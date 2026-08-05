@@ -3,20 +3,14 @@
 A CLI over the Windows Host Compute Service, built on [Microsoft/hcsshim](https://github.com/Microsoft/hcsshim).
 
 The goal is to surface **all** of HCS as a tool you can drive from a shell or an agent. Images,
-layers, Hyper-V-isolated containers and read-only networking work today; that is about 17% of the
-public hcsshim surface, and the rest is ordered, not dropped.
+layers, Hyper-V-isolated containers and read-only networking work today; the rest is ordered, not
+dropped. Near-term priority comes from what an Aspire integration needs — environment into the
+guest, an endpoint address, local file mounts. That sets the *order*, not the scope.
 
-| doc | |
-|---|---|
-| [docs/surface.md](docs/surface.md) | the complete hcsshim inventory and what is wired — the definition of done |
-| [docs/roadmap.md](docs/roadmap.md) | what is next and why that order |
-| [docs/findings.md](docs/findings.md) | what is known by measurement, kept separate from what is only suspected |
-| [docs/working-on-hcsctl.md](docs/working-on-hcsctl.md) | picking up work in a new session |
-| [docs/runhcs.md](docs/runhcs.md) | why we write container verbs instead of driving hcsshim's own OCI runtime |
-
-Near-term priority comes from what an Aspire integration would need — local file mounts, enough
-network plumbing to allocate an endpoint, environment into the guest. That sets the *order*; the
-whole surface is still the goal.
+**[Issue #1](https://github.com/joshmakestuff/hcsctl/issues/1)** is the live roadmap: the surface
+inventory, the priority order, and the standing decisions. Two docs hold what issues shouldn't —
+[docs/findings.md](docs/findings.md) (what is known by measurement) and
+[docs/working-on-hcsctl.md](docs/working-on-hcsctl.md) (picking up work cold).
 
 Pull an image and run something in an isolated container:
 
