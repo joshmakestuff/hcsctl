@@ -23,6 +23,7 @@ import (
 	"os"
 
 	"github.com/joshmakestuff/hcsctl/internal/cli"
+	"github.com/joshmakestuff/hcsctl/internal/container"
 	"github.com/joshmakestuff/hcsctl/internal/image"
 	"github.com/joshmakestuff/hcsctl/internal/layer"
 	"github.com/joshmakestuff/hcsctl/internal/sysinfo"
@@ -41,7 +42,7 @@ func run(argv []string) int {
 	}
 	e := cli.Emit{JSON: wantJSON}
 
-	args, err := cli.Parse(argv, "--json", "--blobs")
+	args, err := cli.Parse(argv, "--json", "--blobs", "--keep", "--force")
 	if err != nil {
 		e.Failure("usage", err)
 		usage()
@@ -59,10 +60,12 @@ func run(argv []string) int {
 		code, err = image.Dispatch(args, e)
 	case "layer":
 		code, err = layer.Dispatch(args, e)
+	case "container":
+		code, err = container.Dispatch(args, e)
 	case "info":
 		code, err = sysinfo.Run(args, e)
 	default:
-		err = cli.Usagef("unknown verb group %q (expected: image, layer, info)", args.Word(0))
+		err = cli.Usagef("unknown verb group %q (expected: image, layer, container, info)", args.Word(0))
 		code = cli.Usage
 	}
 
@@ -118,14 +121,27 @@ usage: hcsctl <group> <verb> [options]
 
   layer ls      [--store <dir>]                Mounts and their volume paths.
 
+  container run    --ref <ref> [--cmd "<cmdline>"] [--id <id>] [--cpus N]
+                   [--memory-mb N] [--hostname H] [--cwd D] [--user U] [--keep]
+               Create, boot and run one command in a Hyper-V-isolated container, then tear
+               it down. --cmd defaults to "cmd /c ver". ELEVATED.
+
+  container create --ref <ref> [--id <id>] [--cpus N] [--memory-mb N] [--hostname H]
+  container start  --id <id> | --ref <ref>
+  container exec   --id <id> --cmd "<cmdline>" [--cwd D] [--user U]
+  container stop   --id <id> [--force]
+  container rm     --id <id> [--force]
+  container ls     [--store <dir>]             Containers and their HCS state.
+
   info         Host build, CimFS support, elevation and privilege state. Unelevated.
 
 global options:
   --json       One JSON document on stdout; progress on stderr.
 
 exit codes: 0 ok, 1 ran and failed, 64 bad arguments (nothing attempted)
+             a guest process's own exit code is reported as exitCode in the result, not as
+             hcsctl's exit code
 
-Planned, not built: container (create/start/exec, Hyper-V isolated first), network (hcn),
-cim. See the roadmap issue.
+Planned, not built: network (hcn), cim, process-isolated containers. See the roadmap issue.
 `)
 }
