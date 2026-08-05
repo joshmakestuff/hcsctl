@@ -24,6 +24,7 @@ import (
 
 	"github.com/joshmakestuff/hcsctl/internal/cli"
 	"github.com/joshmakestuff/hcsctl/internal/image"
+	"github.com/joshmakestuff/hcsctl/internal/layer"
 	"github.com/joshmakestuff/hcsctl/internal/sysinfo"
 )
 
@@ -56,10 +57,12 @@ func run(argv []string) int {
 	switch args.Word(0) {
 	case "image":
 		code, err = image.Dispatch(args, e)
+	case "layer":
+		code, err = layer.Dispatch(args, e)
 	case "info":
 		code, err = sysinfo.Run(args, e)
 	default:
-		err = cli.Usagef("unknown verb group %q (expected: image, info)", args.Word(0))
+		err = cli.Usagef("unknown verb group %q (expected: image, layer, info)", args.Word(0))
 		code = cli.Usage
 	}
 
@@ -106,6 +109,15 @@ usage: hcsctl <group> <verb> [options]
   image rm     --ref <ref> [--blobs] [--store <dir>]
                Remove materialized layers via DestroyLayer. ELEVATED.
 
+  layer mount   --ref <ref> [--id <id>] [--store <dir>]
+               Put a writable scratch layer over a materialized chain, activate and prepare
+               it, then print the volume path. ELEVATED.
+
+  layer unmount --id <id> | --ref <ref> [--store <dir>]
+               Unprepare, deactivate and destroy the scratch. ELEVATED.
+
+  layer ls      [--store <dir>]                Mounts and their volume paths.
+
   info         Host build, CimFS support, elevation and privilege state. Unelevated.
 
 global options:
@@ -113,7 +125,7 @@ global options:
 
 exit codes: 0 ok, 1 ran and failed, 64 bad arguments (nothing attempted)
 
-Planned, not built: layer (activate/prepare/mount), container (create/start/exec, Hyper-V
-isolated first), network (hcn), cim. See the roadmap issue.
+Planned, not built: container (create/start/exec, Hyper-V isolated first), network (hcn),
+cim. See the roadmap issue.
 `)
 }
