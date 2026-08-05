@@ -2,8 +2,21 @@
 
 A CLI over the Windows Host Compute Service, built on [Microsoft/hcsshim](https://github.com/Microsoft/hcsshim).
 
-The goal is to surface HCS as a tool you can drive from a shell or an agent. Images, layers and
-Hyper-V-isolated containers work today. Networking and CimFS come next — see the roadmap issue.
+The goal is to surface **all** of HCS as a tool you can drive from a shell or an agent. Images,
+layers, Hyper-V-isolated containers and read-only networking work today; that is about 17% of the
+public hcsshim surface, and the rest is ordered, not dropped.
+
+| doc | |
+|---|---|
+| [docs/surface.md](docs/surface.md) | the complete hcsshim inventory and what is wired — the definition of done |
+| [docs/roadmap.md](docs/roadmap.md) | what is next and why that order |
+| [docs/findings.md](docs/findings.md) | what is known by measurement, kept separate from what is only suspected |
+| [docs/working-on-hcsctl.md](docs/working-on-hcsctl.md) | picking up work in a new session |
+| [docs/runhcs.md](docs/runhcs.md) | why we write container verbs instead of driving hcsshim's own OCI runtime |
+
+Near-term priority comes from what an Aspire integration would need — local file mounts, enough
+network plumbing to allocate an endpoint, environment into the guest. That sets the *order*; the
+whole surface is still the goal.
 
 Pull an image and run something in an isolated container:
 
