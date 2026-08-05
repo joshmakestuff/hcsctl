@@ -65,10 +65,20 @@ func Dispatch(a *cli.Args, e cli.Emit) (int, error) {
 		return remove(a, e)
 	case "ls":
 		return list(a, e)
+	case "stats":
+		return stats(a, e)
+	case "ps":
+		return ps(a, e)
+	case "inspect":
+		return inspect(a, e)
+	case "pause":
+		return pauseResume(a, e, "pause")
+	case "resume":
+		return pauseResume(a, e, "resume")
 	case "":
-		return cli.Usage, cli.Usagef("container needs a subcommand: run, create, start, exec, stop, rm, ls")
+		return cli.Usage, cli.Usagef("container needs a subcommand: run, create, start, exec, stop, rm, ls, stats, ps, inspect, pause, resume")
 	default:
-		return cli.Usage, cli.Usagef("unknown container subcommand %q (expected run, create, start, exec, stop, rm, ls)", a.Word(1))
+		return cli.Usage, cli.Usagef("unknown container subcommand %q (expected run, create, start, exec, stop, rm, ls, stats, ps, inspect, pause, resume)", a.Word(1))
 	}
 }
 
@@ -718,6 +728,192 @@ func list(a *cli.Args, e cli.Emit) (int, error) {
 		}
 	})
 	return cli.OK, nil
+}
+
+// -- introspection -----------------------------------------------------------------------
+
+// open is the common preamble for every verb that inspects a live container: resolve the id,
+// confirm we know about it, and get a handle.
+func open(a *cli.Args, known ...string) (hcsshim.Container, string, error) {
+	if err := a.RejectUnknown(append([]string{"--id", "--ref", "--store"}, known...)...); err != nil {
+		return nil, "", err
+	}
+	st, id, err := resolve(a)
+	if err != nil {
+		return nil, "", err
+	}
+	if _, err := readState(st, id); err != nil {
+		return nil, id, err
+	}
+	c, err := hcsshim.OpenContainer(id)
+	if err != nil {
+		return nil, id, fmt.Errorf("OpenContainer(%s): %w", id, err)
+	}
+	return c, id, nil
+}
+
+func stats(a *cli.Args, e cli.Emit) (int, error) {
+	c, id, err := open(a)
+	if err != nil {
+		return exitFor(err), err
+	}
+	defer c.Close()
+
+	s, err := c.Statistics()
+	if err != nil {
+		return cli.Failed, fmt.Errorf("Statistics: %w", err)
+	}
+	e.Result(map[string]any{
+		"ok": true, "command": "container stats", "id": id, "statistics": s,
+	}, func() {
+		// 100ns ticks are what HCS reports; seconds are what a person wants.
+		fmt.Printf("uptime            %s\n", time.Duration(s.Uptime100ns*100))
+		fmt.Printf("started           %s\n", s.ContainerStartTime.Format(time.RFC3339))
+		fmt.Printf("memory commit     %s\n", bytes(s.Memory.UsageCommitBytes))
+		fmt.Printf("memory peak       %s\n", bytes(s.Memory.UsageCommitPeakBytes))
+		fmt.Printf("working set priv  %s\n", bytes(s.Memory.UsagePrivateWorkingSetBytes))
+		fmt.Printf("cpu total         %s\n", time.Duration(s.Processor.TotalRuntime100ns*100))
+		fmt.Printf("cpu user/kernel   %s / %s\n",
+			time.Duration(s.Processor.RuntimeUser100ns*100),
+			time.Duration(s.Processor.RuntimeKernel100ns*100))
+		fmt.Printf("storage r/w       %d / %d ops\n",
+			s.Storage.ReadCountNormalized, s.Storage.WriteCountNormalized)
+		for i, n := range s.Network {
+			fmt.Printf("net[%d] rx/tx      %s / %s\n", i, bytes(n.BytesReceived), bytes(n.BytesSent))
+		}
+	})
+	return cli.OK, nil
+}
+
+func ps(a *cli.Args, e cli.Emit) (int, error) {
+	c, id, err := open(a)
+	if err != nil {
+		return exitFor(err), err
+	}
+	defer c.Close()
+
+	procs, err := c.ProcessList()
+	if err != nil {
+		return cli.Failed, fmt.Errorf("ProcessList: %w", err)
+	}
+	sort.Slice(procs, func(i, j int) bool { return procs[i].ProcessId < procs[j].ProcessId })
+
+	e.Result(map[string]any{
+		"ok": true, "command": "container ps", "id": id, "processes": procs,
+	}, func() {
+		if len(procs) == 0 {
+			fmt.Println("no processes")
+			return
+		}
+		fmt.Printf("%8s  %-32s %12s %12s\n", "PID", "IMAGE", "COMMIT", "CPU")
+		for _, p := range procs {
+			fmt.Printf("%8d  %-32s %12s %12s\n",
+				p.ProcessId, trunc(p.ImageName, 32), bytes(p.MemoryCommitBytes),
+				time.Duration((p.KernelTime100ns+p.UserTime100ns)*100).Round(time.Millisecond))
+		}
+	})
+	return cli.OK, nil
+}
+
+// inspect reports what HCS itself knows, which is a different and larger set than state.json.
+func inspect(a *cli.Args, e cli.Emit) (int, error) {
+	if err := a.RejectUnknown("--id", "--ref", "--store"); err != nil {
+		return cli.Usage, err
+	}
+	st, id, err := resolve(a)
+	if err != nil {
+		return cli.Usage, err
+	}
+	s, err := readState(st, id)
+	if err != nil {
+		return exitFor(err), err
+	}
+
+	// GetContainers rather than OpenContainer().Properties(): it answers for a container that
+	// exists but was never started, where an open handle tells you very little.
+	props, err := hcsshim.GetContainers(hcsshim.ComputeSystemQuery{IDs: []string{id}})
+	if err != nil {
+		return cli.Failed, fmt.Errorf("GetContainers: %w", err)
+	}
+
+	doc := map[string]any{"ok": true, "command": "container inspect", "id": id, "state": s}
+	if len(props) > 0 {
+		doc["hcs"] = props[0]
+	} else {
+		doc["hcs"] = nil
+	}
+	e.Result(doc, func() {
+		fmt.Printf("id         %s\nref        %s\nscratch    %s\nutilityVM  %s\n",
+			s.ID, s.Ref, s.Scratch, s.UVM)
+		fmt.Printf("chain      %d layer(s)\n", len(s.Chain))
+		for _, l := range s.Chain {
+			fmt.Printf("           %s\n", l)
+		}
+		if len(props) == 0 {
+			fmt.Println("hcs        absent (not created, or already torn down)")
+			return
+		}
+		p := props[0]
+		fmt.Printf("hcs state  %s\n", orDash(p.State))
+		fmt.Printf("owner      %s\n", orDash(p.Owner))
+		fmt.Printf("systemType %s\n", orDash(p.SystemType))
+		if p.RuntimeImagePath != "" {
+			fmt.Printf("runtimeImg %s\n", p.RuntimeImagePath)
+		}
+		if p.Stopped {
+			fmt.Printf("stopped    true (exitType %s)\n", orDash(p.ExitType))
+		}
+	})
+	return cli.OK, nil
+}
+
+// pauseResume covers both because they are the same verb with a different call and a different
+// past participle, and splitting them duplicates the whole preamble.
+func pauseResume(a *cli.Args, e cli.Emit, verb string) (int, error) {
+	c, id, err := open(a)
+	if err != nil {
+		return exitFor(err), err
+	}
+	defer c.Close()
+
+	call, done, api := c.Pause, "paused", "Pause"
+	if verb == "resume" {
+		call, done, api = c.Resume, "resumed", "Resume"
+	}
+	if err := call(); err != nil {
+		return cli.Failed, fmt.Errorf("%s: %w", api, err)
+	}
+	e.Result(map[string]any{
+		"ok": true, "command": "container " + verb, "id": id,
+	}, func() { fmt.Printf("%s %s\n", done, id) })
+	return cli.OK, nil
+}
+
+func bytes(n uint64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	div, exp := uint64(unit), 0
+	for v := n / unit; v >= unit; v /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTPE"[exp])
+}
+
+func orDash(s string) string {
+	if s == "" {
+		return "-"
+	}
+	return s
+}
+
+func trunc(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n-1] + "~"
 }
 
 // -- shared ------------------------------------------------------------------------------

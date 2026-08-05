@@ -33,6 +33,14 @@ hcsctl container exec   --id <id> --cmd "..." [--cwd D] [--user U]
 hcsctl container stop   --id <id> [--force]
 hcsctl container rm     --id <id> [--force]
 hcsctl container ls
+hcsctl container stats   --id <id>                   # uptime, memory, CPU, storage, network
+hcsctl container ps      --id <id>                   # processes in the guest
+hcsctl container inspect --id <id>                   # what the store and HCS each know
+hcsctl container pause   --id <id>
+hcsctl container resume  --id <id>
+
+hcsctl network ls                                    # unelevated
+hcsctl network endpoints [--network <name|id>]       # unelevated
 
 hcsctl info
 ```
