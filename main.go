@@ -26,6 +26,7 @@ import (
 	"github.com/joshmakestuff/hcsctl/internal/container"
 	"github.com/joshmakestuff/hcsctl/internal/image"
 	"github.com/joshmakestuff/hcsctl/internal/layer"
+	"github.com/joshmakestuff/hcsctl/internal/network"
 	"github.com/joshmakestuff/hcsctl/internal/sysinfo"
 )
 
@@ -62,10 +63,12 @@ func run(argv []string) int {
 		code, err = layer.Dispatch(args, e)
 	case "container":
 		code, err = container.Dispatch(args, e)
+	case "network":
+		code, err = network.Dispatch(args, e)
 	case "info":
 		code, err = sysinfo.Run(args, e)
 	default:
-		err = cli.Usagef("unknown verb group %q (expected: image, layer, container, info)", args.Word(0))
+		err = cli.Usagef("unknown verb group %q (expected: image, layer, container, network, info)", args.Word(0))
 		code = cli.Usage
 	}
 
@@ -132,6 +135,14 @@ usage: hcsctl <group> <verb> [options]
   container stop   --id <id> [--force]
   container rm     --id <id> [--force]
   container ls     [--store <dir>]             Containers and their HCS state.
+  container stats   --id <id>                  Uptime, memory, CPU, storage and network.
+  container ps      --id <id>                  Processes running in the guest.
+  container inspect --id <id>                  What the store and HCS each know.
+  container pause   --id <id>
+  container resume  --id <id>
+
+  network ls        Host compute networks, their subnets and endpoint counts. Unelevated.
+  network endpoints [--network <name|id>]      Endpoints and their addresses. Unelevated.
 
   info         Host build, CimFS support, elevation and privilege state. Unelevated.
 
