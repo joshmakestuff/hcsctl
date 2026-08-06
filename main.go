@@ -129,13 +129,16 @@ usage: hcsctl <group> <verb> [options]
 
   container run    --ref <ref> [--cmd "<cmdline>"] [--id <id>] [--cpus N]
                    [--memory-mb N] [--hostname H] [--cwd D] [--user U]
-                   [--env NAME=value]... [--network <name|id>] [--dns-search list] [--keep]
+                   [--env NAME=value]... [--network <name|id>] [--dns-search list]
+                   [--mount HOST:CONTAINER[:ro]]... [--keep]
                Create, boot and run one command in a Hyper-V-isolated container, then tear
                it down. --cmd defaults to "cmd /c ver". --network attaches an endpoint on
-               an existing host compute network and reports its address. ELEVATED.
+               an existing host compute network and reports its address. --mount maps a host
+               directory into the guest over VSMB -- not a bind mount, and not Docker
+               semantics; both paths drive-letter absolute. ELEVATED.
 
   container create --ref <ref> [--id <id>] [--cpus N] [--memory-mb N] [--hostname H]
-                   [--network <name|id>] [--dns-search list]
+                   [--network <name|id>] [--dns-search list] [--mount HOST:CONTAINER[:ro]]...
   container start  --id <id> | --ref <ref>
   container exec   --id <id> --cmd "<cmdline>" [--cwd D] [--user U] [--env NAME=value]...
   container stop   --id <id> [--force]

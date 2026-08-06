@@ -108,6 +108,10 @@ var usageCases = []struct {
 	{"env with empty value", []string{"container", "exec", "--id", "a", "--cmd", "c", "--env", "N="}},
 	{"dns-search without network", []string{"container", "run", "--ref", "r", "--dns-search", "d"}},
 	{"cpus not a number", []string{"container", "run", "--ref", "r", "--cpus", "two"}},
+	{"mount not absolute", []string{"container", "run", "--ref", "r", "--mount", `relative\p:C:\app`}},
+	{"mount host missing", []string{"container", "run", "--ref", "r", "--mount", `C:\hcsctl-no-such-dir:C:\app`}},
+	{"mount container path repeated", []string{"container", "run", "--ref", "r",
+		"--mount", `C:\Windows:C:\app`, "--mount", `C:\Windows:C:\app`}},
 }
 
 func TestUsageErrorsExit64(t *testing.T) {
@@ -150,6 +154,7 @@ func TestUsageErrorAttemptsNothing(t *testing.T) {
 		{"container", "exec", "--id", "a", "--cmd", "c", "--env", "BAD"},
 		{"container", "run", "--ref", "r", "--dns-search", "d"},
 		{"container", "run", "--ref", "r", "--cpus", "two"},
+		{"container", "run", "--ref", "r", "--mount", `bad-mount`},
 	}
 	for _, args := range cases {
 		t.Run(strings.Join(args, " "), func(t *testing.T) {

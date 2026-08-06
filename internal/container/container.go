@@ -31,6 +31,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -246,10 +247,50 @@ func deleteEndpoint(id string) error {
 	return nil
 }
 
+// -- mounts ------------------------------------------------------------------------------
+
+// mountRe wants both sides drive-letter absolute, which sidesteps the ambiguity a plain
+// colon split has with Windows paths. `:ro` is the only suffix; read-write is the default
+// and not a spelling.
+var mountRe = regexp.MustCompile(`^([A-Za-z]:\\[^:]*):([A-Za-z]:\\[^:]*?)(:ro)?$`)
+
+// parseMounts turns repeated --mount HOST:CONTAINER[:ro] into MappedDirectories. For a xenon
+// these go over VSMB, not a bind mount -- different performance, different semantics, and the
+// help text describes what it does rather than promising Docker parity.
+func parseMounts(a *cli.Args) ([]hcsshim.MappedDir, error) {
+	vals := a.Options("--mount")
+	if len(vals) == 0 {
+		return nil, nil
+	}
+	seen := map[string]bool{}
+	out := make([]hcsshim.MappedDir, 0, len(vals))
+	for _, v := range vals {
+		m := mountRe.FindStringSubmatch(v)
+		if m == nil {
+			return nil, cli.Usagef("--mount wants HOST:CONTAINER[:ro] with both paths drive-letter absolute, got %q", v)
+		}
+		host, ctr := m[1], m[2]
+		fi, err := os.Stat(host)
+		if err != nil {
+			return nil, cli.Usagef("--mount host path %s: %v", host, err)
+		}
+		if !fi.IsDir() {
+			return nil, cli.Usagef("--mount host path %s is not a directory", host)
+		}
+		key := strings.ToLower(strings.TrimRight(ctr, `\`))
+		if seen[key] {
+			return nil, cli.Usagef("--mount container path %s given more than once", ctr)
+		}
+		seen[key] = true
+		out = append(out, hcsshim.MappedDir{HostPath: host, ContainerPath: ctr, ReadOnly: m[3] != ""})
+	}
+	return out, nil
+}
+
 // -- create ------------------------------------------------------------------------------
 
 var createOptions = []string{"--ref", "--id", "--store", "--cpus", "--memory-mb", "--hostname",
-	"--network", "--dns-search"}
+	"--network", "--dns-search", "--mount"}
 
 // buildConfig assembles the compute system document. Split out from create() because `run`
 // needs the same document and the same failure messages.
@@ -273,6 +314,10 @@ func buildConfig(a *cli.Args, e cli.Emit, st *store.Store, id, ref string) (*hcs
 		if memoryMB, err = parseUint(v); err != nil {
 			return nil, s, cli.Usagef("--memory-mb must be a positive integer, got %q", v)
 		}
+	}
+	mounts, err := parseMounts(a)
+	if err != nil {
+		return nil, s, err
 	}
 
 	chain, err := chainFor(st, ref)
@@ -352,6 +397,7 @@ func buildConfig(a *cli.Args, e cli.Emit, st *store.Store, id, ref string) (*hcs
 	if memoryMB != 0 {
 		cfg.MemoryMaximumInMB = int64(memoryMB)
 	}
+	cfg.MappedDirectories = mounts
 	if ep != nil {
 		cfg.EndpointList = []string{ep.Id}
 		// Unqualified lookups are what a developer's `ping example.com` is, so this defaults
