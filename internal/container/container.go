@@ -37,6 +37,7 @@ import (
 	"time"
 
 	"github.com/Microsoft/hcsshim"
+	"github.com/Microsoft/hcsshim/hcn"
 	"github.com/joshmakestuff/hcsctl/internal/cli"
 	"github.com/joshmakestuff/hcsctl/internal/store"
 )
@@ -93,6 +94,10 @@ type state struct {
 	Scratch string   `json:"scratch"`
 	UVM     string   `json:"utilityVM"`
 	Chain   []string `json:"chain"`
+	// Endpoint is here because endpoints are host-global and outlive the creating process:
+	// `rm` after a crash must delete an endpoint it did not create.
+	Endpoint  string   `json:"endpoint,omitempty"`
+	Addresses []string `json:"addresses,omitempty"`
 }
 
 func containersRoot(st *store.Store) string { return filepath.Join(st.Root, "containers") }
@@ -186,14 +191,89 @@ func layersFor(chain []string) ([]hcsshim.Layer, error) {
 	return out, nil
 }
 
+// -- network endpoint --------------------------------------------------------------------
+
+// resolveNetwork accepts a name or an id, matching `network endpoints --network`. Reuse of an
+// existing network is the whole posture: creating one is risky (one NAT network per host, and
+// Docker usually owns it) and deliberately lives elsewhere -- see issue #15.
+func resolveNetwork(want string) (*hcn.HostComputeNetwork, error) {
+	nets, err := hcn.ListNetworks()
+	if err != nil {
+		return nil, fmt.Errorf("ListNetworks: %w", err)
+	}
+	for i := range nets {
+		if strings.EqualFold(nets[i].Name, want) || strings.EqualFold(nets[i].Id, want) {
+			return &nets[i], nil
+		}
+	}
+	return nil, cli.Usagef("no network named or with id %q -- try `hcsctl network ls`", want)
+}
+
+// createEndpoint puts a new endpoint on the network. The returned document carries the
+// address HNS allocated, which is the thing the caller wants reported.
+func createEndpoint(netw *hcn.HostComputeNetwork, name string) (*hcn.HostComputeEndpoint, error) {
+	ep := &hcn.HostComputeEndpoint{
+		Name:               name,
+		HostComputeNetwork: netw.Id,
+		SchemaVersion:      hcn.V2SchemaVersion(),
+	}
+	created, err := ep.Create()
+	if err != nil {
+		return nil, fmt.Errorf("endpoint Create on %s: %w", netw.Name, err)
+	}
+	return created, nil
+}
+
+// deleteEndpoint removes an endpoint and verifies it is gone. Endpoints are host-global, so a
+// silently failed delete is a leak that outlives every process -- the post-condition matters
+// more than the return value, same as destroyScratch.
+func deleteEndpoint(id string) error {
+	ep, err := hcn.GetEndpointByID(id)
+	if err != nil {
+		if hcn.IsNotFoundError(err) {
+			return nil
+		}
+		return fmt.Errorf("GetEndpointByID(%s): %w", id, err)
+	}
+	if err := ep.Delete(); err != nil {
+		return fmt.Errorf("endpoint Delete(%s): %w", id, err)
+	}
+	if _, err := hcn.GetEndpointByID(id); err == nil {
+		return fmt.Errorf("endpoint %s still present after Delete", id)
+	} else if !hcn.IsNotFoundError(err) {
+		return fmt.Errorf("endpoint %s after Delete: %w", id, err)
+	}
+	return nil
+}
+
 // -- create ------------------------------------------------------------------------------
 
-var createOptions = []string{"--ref", "--id", "--store", "--cpus", "--memory-mb", "--hostname"}
+var createOptions = []string{"--ref", "--id", "--store", "--cpus", "--memory-mb", "--hostname",
+	"--network", "--dns-search"}
 
 // buildConfig assembles the compute system document. Split out from create() because `run`
 // needs the same document and the same failure messages.
 func buildConfig(a *cli.Args, e cli.Emit, st *store.Store, id, ref string) (*hcsshim.ContainerConfig, state, error) {
 	var s state
+
+	// Every argument is validated before anything touches the disk, because exit 64 promises
+	// nothing was attempted -- and because from CreateScratchLayer on, an early return has an
+	// increasing amount to clean up.
+	if a.Option("--dns-search") != "" && a.Option("--network") == "" {
+		return nil, s, cli.Usagef("--dns-search only means something with --network")
+	}
+	var cpus, memoryMB uint64
+	var err error
+	if v := a.Option("--cpus"); v != "" {
+		if cpus, err = parseUint(v); err != nil {
+			return nil, s, cli.Usagef("--cpus must be a positive integer, got %q", v)
+		}
+	}
+	if v := a.Option("--memory-mb"); v != "" {
+		if memoryMB, err = parseUint(v); err != nil {
+			return nil, s, cli.Usagef("--memory-mb must be a positive integer, got %q", v)
+		}
+	}
 
 	chain, err := chainFor(st, ref)
 	if err != nil {
@@ -206,6 +286,15 @@ func buildConfig(a *cli.Args, e cli.Emit, st *store.Store, id, ref string) (*hcs
 	layers, err := layersFor(chain)
 	if err != nil {
 		return nil, s, err
+	}
+
+	// Resolved before anything touches the disk, so a bad name is exit 64 with nothing to
+	// clean up.
+	var netw *hcn.HostComputeNetwork
+	if want := a.Option("--network"); want != "" {
+		if netw, err = resolveNetwork(want); err != nil {
+			return nil, s, err
+		}
 	}
 
 	sd := scratchDir(st, id)
@@ -229,6 +318,19 @@ func buildConfig(a *cli.Args, e cli.Emit, st *store.Store, id, ref string) (*hcs
 	}
 	e.Progress("CreateScratchLayer ok")
 
+	var ep *hcn.HostComputeEndpoint
+	var addrs []string
+	if netw != nil {
+		if ep, err = createEndpoint(netw, id+"-ep"); err != nil {
+			destroyScratch(st, id)
+			return nil, s, err
+		}
+		for _, ip := range ep.IpConfigurations {
+			addrs = append(addrs, fmt.Sprintf("%s/%d", ip.IpAddress, ip.PrefixLength))
+		}
+		e.Progress("endpoint:  %s on %s (%s)", ep.Id, netw.Name, strings.Join(addrs, ","))
+	}
+
 	cfg := &hcsshim.ContainerConfig{
 		SystemType:      "Container",
 		Name:            id,
@@ -244,22 +346,25 @@ func buildConfig(a *cli.Args, e cli.Emit, st *store.Store, id, ref string) (*hcs
 	if h := a.Option("--hostname"); h != "" {
 		cfg.HostName = h
 	}
-	if v := a.Option("--cpus"); v != "" {
-		n, err := parseUint(v)
-		if err != nil {
-			return nil, s, cli.Usagef("--cpus must be a positive integer, got %q", v)
-		}
-		cfg.ProcessorCount = uint32(n)
+	if cpus != 0 {
+		cfg.ProcessorCount = uint32(cpus)
 	}
-	if v := a.Option("--memory-mb"); v != "" {
-		n, err := parseUint(v)
-		if err != nil {
-			return nil, s, cli.Usagef("--memory-mb must be a positive integer, got %q", v)
-		}
-		cfg.MemoryMaximumInMB = int64(n)
+	if memoryMB != 0 {
+		cfg.MemoryMaximumInMB = int64(memoryMB)
+	}
+	if ep != nil {
+		cfg.EndpointList = []string{ep.Id}
+		// Unqualified lookups are what a developer's `ping example.com` is, so this defaults
+		// on rather than being a switch nobody remembers.
+		cfg.AllowUnqualifiedDNSQuery = true
+		cfg.DNSSearchList = a.Option("--dns-search")
 	}
 
 	s = state{ID: id, Ref: ref, Scratch: sd, UVM: uvm, Chain: chain}
+	if ep != nil {
+		s.Endpoint = ep.Id
+		s.Addresses = addrs
+	}
 	return cfg, s, nil
 }
 
@@ -304,7 +409,7 @@ func create(a *cli.Args, e cli.Emit) (int, error) {
 
 	c, err := hcsshim.CreateContainer(id, cfg)
 	if err != nil {
-		destroyScratch(st, id)
+		destroy(st, s)
 		return cli.Failed, fmt.Errorf("CreateContainer: %w", err)
 	}
 	// The handle is dropped here on purpose: the compute system outlives this process and is
@@ -317,8 +422,12 @@ func create(a *cli.Args, e cli.Emit) (int, error) {
 	e.Result(map[string]any{
 		"ok": true, "command": "container create", "id": id, "ref": ref,
 		"utilityVM": s.UVM, "scratch": s.Scratch, "chain": s.Chain,
+		"endpoint": s.Endpoint, "addresses": s.Addresses,
 	}, func() {
 		fmt.Printf("created %s\n  id:      %s\n  scratch: %s\n", ref, id, s.Scratch)
+		if s.Endpoint != "" {
+			fmt.Printf("  address: %s\n", strings.Join(s.Addresses, ","))
+		}
 	})
 	return cli.OK, nil
 }
@@ -593,7 +702,7 @@ func run(a *cli.Args, e cli.Emit) (int, error) {
 
 	c, err := hcsshim.CreateContainer(id, cfg)
 	if err != nil {
-		destroyScratch(st, id)
+		destroy(st, s)
 		return cli.Failed, fmt.Errorf("CreateContainer: %w", err)
 	}
 	e.Progress("CreateContainer ok")
@@ -609,7 +718,7 @@ func run(a *cli.Args, e cli.Emit) (int, error) {
 			e.Progress("teardown: %v", err)
 		}
 		c.Close()
-		if err := destroyScratch(st, id); err != nil {
+		if err := destroy(st, s); err != nil {
 			e.Progress("teardown: %v", err)
 		}
 	}
@@ -642,6 +751,7 @@ func run(a *cli.Args, e cli.Emit) (int, error) {
 		"ok": true, "command": "container run", "id": id, "ref": ref,
 		"cmd": cmdline, "exitCode": code, "output": out.String(),
 		"utilityVM": s.UVM, "kept": a.Flag("--keep"),
+		"endpoint": s.Endpoint, "addresses": s.Addresses,
 	}, func() {
 		fmt.Printf("exit code: %d\n", code)
 	})
@@ -668,6 +778,20 @@ func destroyScratch(st *store.Store, id string) error {
 	return os.RemoveAll(containerDir(st, id))
 }
 
+// destroy tears down everything a container owns outside HCS: its endpoint, then its scratch.
+// Every step is attempted regardless of earlier failures -- a half-torn-down container should
+// lose as much as possible -- and the first error is what gets reported.
+func destroy(st *store.Store, s state) error {
+	var first error
+	if s.Endpoint != "" {
+		first = deleteEndpoint(s.Endpoint)
+	}
+	if err := destroyScratch(st, s.ID); err != nil && first == nil {
+		first = err
+	}
+	return first
+}
+
 func remove(a *cli.Args, e cli.Emit) (int, error) {
 	if err := a.RejectUnknown("--id", "--ref", "--store", "--force"); err != nil {
 		return cli.Usage, err
@@ -676,12 +800,13 @@ func remove(a *cli.Args, e cli.Emit) (int, error) {
 	if err != nil {
 		return cli.Usage, err
 	}
-	if _, err := readState(st, id); err != nil {
+	s, err := readState(st, id)
+	if err != nil {
 		return exitFor(err), err
 	}
 
 	// A container that is gone from HCS but still on disk is the normal state after a crash, so
-	// a failure to open is not fatal here -- the scratch still needs removing.
+	// a failure to open is not fatal here -- the scratch and endpoint still need removing.
 	if c, err := hcsshim.OpenContainer(id); err == nil {
 		if err := shutdown(c, e, a.Flag("--force")); err != nil {
 			e.Progress("stop: %v", err)
@@ -691,7 +816,7 @@ func remove(a *cli.Args, e cli.Emit) (int, error) {
 		e.Progress("OpenContainer: %v -- removing on-disk state anyway", err)
 	}
 
-	if err := destroyScratch(st, id); err != nil {
+	if err := destroy(st, s); err != nil {
 		return cli.Failed, err
 	}
 	e.Result(map[string]any{"ok": true, "command": "container rm", "id": id}, func() {
