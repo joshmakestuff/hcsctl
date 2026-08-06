@@ -18,6 +18,7 @@ Host of record: **Windows 11 Enterprise, build 10.0.26200.8894**, HNS schema 16.
 | `PrepareLayer` | an enabled `BUILTIN\Administrators` SID |
 | HNS endpoint/namespace create, attach, delete | **nothing** |
 | `hcn.GetGlobals` | elevation — the only HNS call that differs |
+| `computestorage.FormatWritableLayerVhd` | elevation — denied from a filtered token even holding `SeManageVolumePrivilege`, so the computestorage scratch path is not a lower-privilege route (probe: `hcsspike/probes/computestorage`) |
 
 Three things that get conflated:
 
