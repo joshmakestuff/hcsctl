@@ -1,0 +1,22 @@
+# A green tick here means "builds, starts, and honours its contract" -- never "works".
+# Hosted runners have no Hyper-V and no elevation worth having, so nothing in this workflow
+# reaches HCS; pull would also cost ~114 MB of registry traffic per run. "Works" is the
+# elevated smoke transcript on a real host (docs/working-on-hcsctl.md), and issue #1 records
+# which verbs have actually run.
+name: contract
+on:
+  push:
+    branches: [main]
+  pull_request:
+jobs:
+  contract:
+    name: builds, starts, honours the contract (never "works")
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go vet ./...
+      - run: go build -o hcsctl.exe .
+      - run: go test -v .
