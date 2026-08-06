@@ -153,7 +153,10 @@ usage: hcsctl <group> <verb> [options]
   network ls        Host compute networks, their subnets and endpoint counts. Unelevated.
   network endpoints [--network <name|id>]      Endpoints and their addresses. Unelevated.
 
-  info         Host build, CimFS support, elevation and privilege state. Unelevated.
+  info         [--store <dir>]
+               Host build and capability: CimFS support, elevation, Hyper-V Administrators
+               membership, privilege state, vmcompute/vmms/hvhost service states, the store,
+               and per-image process-isolation compatibility. Unelevated.
 
 global options:
   --json       One JSON document on stdout; progress on stderr.

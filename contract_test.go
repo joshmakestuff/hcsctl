@@ -180,6 +180,13 @@ func TestSuccessPath(t *testing.T) {
 		}
 		oneDoc(t, r.stdout, true)
 	})
+	t.Run("info json is one ok document", func(t *testing.T) {
+		r := invoke(t, "info", "--store", store, "--json")
+		if r.code != 0 {
+			t.Fatalf("exit %d, want 0\nstderr: %s", r.code, r.stderr)
+		}
+		oneDoc(t, r.stdout, true)
+	})
 	t.Run("human mode puts no document on stdout", func(t *testing.T) {
 		r := invoke(t, "image", "ls", "--store", store)
 		if r.code != 0 {
