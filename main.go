@@ -125,13 +125,14 @@ usage: hcsctl <group> <verb> [options]
   layer ls      [--store <dir>]                Mounts and their volume paths.
 
   container run    --ref <ref> [--cmd "<cmdline>"] [--id <id>] [--cpus N]
-                   [--memory-mb N] [--hostname H] [--cwd D] [--user U] [--keep]
+                   [--memory-mb N] [--hostname H] [--cwd D] [--user U]
+                   [--env NAME=value]... [--keep]
                Create, boot and run one command in a Hyper-V-isolated container, then tear
                it down. --cmd defaults to "cmd /c ver". ELEVATED.
 
   container create --ref <ref> [--id <id>] [--cpus N] [--memory-mb N] [--hostname H]
   container start  --id <id> | --ref <ref>
-  container exec   --id <id> --cmd "<cmdline>" [--cwd D] [--user U]
+  container exec   --id <id> --cmd "<cmdline>" [--cwd D] [--user U] [--env NAME=value]...
   container stop   --id <id> [--force]
   container rm     --id <id> [--force]
   container ls     [--store <dir>]             Containers and their HCS state.

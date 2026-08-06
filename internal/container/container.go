@@ -409,14 +409,40 @@ func shutdown(c hcsshim.Container, e cli.Emit, force bool) error {
 
 // -- exec --------------------------------------------------------------------------------
 
+// parseEnv turns repeated --env NAME=value into ProcessConfig.Environment. The value keeps
+// everything after the first '='. An empty value is an error rather than a pass-through:
+// hcsshim sends {"NAME":""} over the wire intact, but the variable never appears in the guest
+// (measured against servercore:ltsc2022 -- Win32 treats empty as deleted), and a silent drop
+// is worse than a loud one. There is no inherited environment here, so "unset" is expressed
+// by omitting the variable.
+func parseEnv(a *cli.Args) (map[string]string, error) {
+	vals := a.Options("--env")
+	if len(vals) == 0 {
+		return nil, nil
+	}
+	env := make(map[string]string, len(vals))
+	for _, v := range vals {
+		name, value, found := strings.Cut(v, "=")
+		if !found || name == "" {
+			return nil, cli.Usagef("--env wants NAME=value, got %q", v)
+		}
+		if value == "" {
+			return nil, cli.Usagef("--env %s= has an empty value, which HCS drops before the guest sees it -- omit the variable instead", name)
+		}
+		env[name] = value
+	}
+	return env, nil
+}
+
 // execIn launches a process, streams its output, and returns its exit code. Stdin is closed
 // immediately: nothing here is interactive, and a process blocked on a stdin that never closes
 // looks exactly like a hung container.
-func execIn(c hcsshim.Container, e cli.Emit, cmdline, cwd, user string, sink io.Writer) (int, error) {
+func execIn(c hcsshim.Container, e cli.Emit, cmdline, cwd, user string, env map[string]string, sink io.Writer) (int, error) {
 	pc := &hcsshim.ProcessConfig{
 		CommandLine:      cmdline,
 		WorkingDirectory: cwd,
 		User:             user,
+		Environment:      env,
 		CreateStdInPipe:  true,
 		CreateStdOutPipe: true,
 		CreateStdErrPipe: true,
@@ -465,7 +491,7 @@ func execIn(c hcsshim.Container, e cli.Emit, cmdline, cwd, user string, sink io.
 }
 
 func exec(a *cli.Args, e cli.Emit) (int, error) {
-	if err := a.RejectUnknown("--id", "--ref", "--store", "--cmd", "--cwd", "--user"); err != nil {
+	if err := a.RejectUnknown("--id", "--ref", "--store", "--cmd", "--cwd", "--user", "--env"); err != nil {
 		return cli.Usage, err
 	}
 	st, id, err := resolve(a)
@@ -473,6 +499,10 @@ func exec(a *cli.Args, e cli.Emit) (int, error) {
 		return cli.Usage, err
 	}
 	cmdline, err := a.Require("--cmd")
+	if err != nil {
+		return cli.Usage, err
+	}
+	env, err := parseEnv(a)
 	if err != nil {
 		return cli.Usage, err
 	}
@@ -486,7 +516,7 @@ func exec(a *cli.Args, e cli.Emit) (int, error) {
 	defer c.Close()
 
 	out := &captured{json: e.JSON}
-	code, err := execIn(c, e, cmdline, a.Option("--cwd"), a.Option("--user"), out)
+	code, err := execIn(c, e, cmdline, a.Option("--cwd"), a.Option("--user"), env, out)
 	if err != nil {
 		return cli.Failed, err
 	}
@@ -528,11 +558,15 @@ func (c *captured) String() string {
 // run is create + start + exec + stop + rm in one call: the shape you want for a smoke test and
 // for one-shot work, and the shape that leaves nothing behind when a step fails.
 func run(a *cli.Args, e cli.Emit) (int, error) {
-	known := append([]string{"--cmd", "--cwd", "--user", "--keep"}, createOptions...)
+	known := append([]string{"--cmd", "--cwd", "--user", "--env", "--keep"}, createOptions...)
 	if err := a.RejectUnknown(known...); err != nil {
 		return cli.Usage, err
 	}
 	ref, err := a.Require("--ref")
+	if err != nil {
+		return cli.Usage, err
+	}
+	env, err := parseEnv(a)
 	if err != nil {
 		return cli.Usage, err
 	}
@@ -596,7 +630,7 @@ func run(a *cli.Args, e cli.Emit) (int, error) {
 	e.Progress("started")
 
 	out := &captured{json: e.JSON}
-	code, execErr := execIn(c, e, cmdline, a.Option("--cwd"), a.Option("--user"), out)
+	code, execErr := execIn(c, e, cmdline, a.Option("--cwd"), a.Option("--user"), env, out)
 	cleanup()
 	if execErr != nil {
 		return cli.Failed, execErr

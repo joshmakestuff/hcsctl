@@ -29,8 +29,14 @@ func Usagef(format string, a ...any) error {
 type Args struct {
 	Words   []string // positional, e.g. ["image", "pull"]
 	options map[string]string
+	multi   map[string][]string
 	flags   map[string]bool
 }
+
+// repeatable options accumulate instead of hitting the duplicate check. The duplicate
+// rejection is deliberate -- it catches typos -- so repeatability is opted into per option
+// here rather than relaxed globally.
+var repeatable = map[string]bool{"--env": true}
 
 // Parse splits argv. Anything starting with "--" is an option; those in boolFlags take no
 // value, the rest consume the next argument.
@@ -39,7 +45,7 @@ func Parse(argv []string, boolFlags ...string) (*Args, error) {
 	for _, f := range boolFlags {
 		isFlag[f] = true
 	}
-	a := &Args{options: map[string]string{}, flags: map[string]bool{}}
+	a := &Args{options: map[string]string{}, multi: map[string][]string{}, flags: map[string]bool{}}
 	for i := 0; i < len(argv); i++ {
 		s := argv[i]
 		switch {
@@ -47,6 +53,12 @@ func Parse(argv []string, boolFlags ...string) (*Args, error) {
 			a.Words = append(a.Words, s)
 		case isFlag[s]:
 			a.flags[s] = true
+		case repeatable[s]:
+			if i+1 >= len(argv) || strings.HasPrefix(argv[i+1], "--") {
+				return nil, Usagef("%s requires a value", s)
+			}
+			a.multi[s] = append(a.multi[s], argv[i+1])
+			i++
 		default:
 			if i+1 >= len(argv) || strings.HasPrefix(argv[i+1], "--") {
 				return nil, Usagef("%s requires a value", s)
@@ -71,6 +83,9 @@ func (a *Args) Word(i int) string {
 func (a *Args) Option(name string) string { return a.options[name] }
 func (a *Args) Flag(name string) bool     { return a.flags[name] }
 
+// Options returns every value a repeatable option was given, in order.
+func (a *Args) Options(name string) []string { return a.multi[name] }
+
 func (a *Args) Require(name string) (string, error) {
 	if v := a.options[name]; v != "" {
 		return v, nil
@@ -86,6 +101,11 @@ func (a *Args) RejectUnknown(known ...string) error {
 		ok[k] = true
 	}
 	for k := range a.options {
+		if !ok[k] {
+			return Usagef("unknown option %s", k)
+		}
+	}
+	for k := range a.multi {
 		if !ok[k] {
 			return Usagef("unknown option %s", k)
 		}
