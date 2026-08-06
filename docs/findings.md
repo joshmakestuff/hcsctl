@@ -64,7 +64,15 @@ Probes: `hcsspike/probes/hcn/`.
   (`HcsExportLegacyWritableLayer` et al.) are not wrapped by public hcsshim.
 - **`HcsImportLayer` has not been seen working here.** It writes `Files` then fails
   path-not-found, whether fed a partial legacy export or a valid writable-layer export, with
-  backup/restore privileges enabled. Destination semantics unresolved.
+  backup/restore privileges enabled. The destination's shape changes the error but not the
+  outcome (probe: `hcsspike/probes/csimport`): a plain directory — pre-existing or not, with
+  or without parents — fails path-not-found; a mounted blank-copy volume — initialized or
+  not — fails access-denied. No event reaches the Hyper-V-Compute logs. Unresolved.
+- **Store base layers really do mount as-is, chains included.** `storage mount --ref` over
+  the two-layer servercore chain gave the merged view (base + servercore-only content) with
+  writes landing in the scratch and the store untouched.
+- **`computestorage.DestroyLayer` removes a scratch-dir layer** and the directory is gone
+  afterwards — same call-then-verify shape as wclayer's, but here absence was observed.
 - The raw computestorage syscalls do not enable privileges for you, unlike `ociwclayer`.
 
 ## CimFS

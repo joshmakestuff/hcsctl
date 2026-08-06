@@ -35,6 +35,7 @@ import (
 	"github.com/Microsoft/hcsshim"
 	"github.com/Microsoft/hcsshim/computestorage"
 	"github.com/joshmakestuff/hcsctl/internal/cli"
+	"github.com/joshmakestuff/hcsctl/internal/store"
 	"golang.org/x/sys/windows"
 )
 
@@ -50,10 +51,12 @@ func Dispatch(a *cli.Args, e cli.Emit) (int, error) {
 		return importLayer(a, e)
 	case "export":
 		return exportLayer(a, e)
+	case "destroy":
+		return destroy(a, e)
 	case "":
-		return cli.Usage, cli.Usagef("storage needs a subcommand: setup-base, mount, unmount, import, export")
+		return cli.Usage, cli.Usagef("storage needs a subcommand: setup-base, mount, unmount, import, export, destroy")
 	default:
-		return cli.Usage, cli.Usagef("unknown storage subcommand %q (expected setup-base, mount, unmount, import, export)", a.Word(1))
+		return cli.Usage, cli.Usagef("unknown storage subcommand %q (expected setup-base, mount, unmount, import, export, destroy)", a.Word(1))
 	}
 }
 
@@ -160,6 +163,30 @@ func exportLayer(a *cli.Args, e cli.Emit) (int, error) {
 	return cli.OK, nil
 }
 
+// destroy wraps HcsDestroyLayer. Same caveat as wclayer's DestroyLayer (findings.md): it can
+// return success and leave the tree, so absence is verified rather than assumed.
+func destroy(a *cli.Args, e cli.Emit) (int, error) {
+	if err := a.RejectUnknown("--layer"); err != nil {
+		return cli.Usage, err
+	}
+	layer, err := requireDir(a, "--layer")
+	if err != nil {
+		return cli.Usage, err
+	}
+	if err := computestorage.DestroyLayer(context.Background(), layer); err != nil {
+		return cli.Failed, fmt.Errorf("DestroyLayer: %w", err)
+	}
+	if _, err := os.Stat(layer); err == nil {
+		return cli.Failed, fmt.Errorf("DestroyLayer returned success but %s still exists", layer)
+	}
+	e.Result(map[string]any{
+		"ok": true, "command": "storage destroy", "layer": layer,
+	}, func() {
+		fmt.Printf("destroyed %s\n", layer)
+	})
+	return cli.OK, nil
+}
+
 const (
 	blankBaseName = "blank-base.vhdx"
 	blankName     = "blank.vhdx"
@@ -240,24 +267,71 @@ func openScratch(dir string) (syscall.Handle, string, error) {
 	return h, p, nil
 }
 
+// chainFor resolves a store reference to its materialized layer directories, topmost first --
+// the order LayerData wants. Same shape as the layer group's chainFor; duplicated because the
+// two groups check different things (this one wants blank.vhdx in the base, checked at the
+// call site, not Files/ everywhere).
+func chainFor(st *store.Store, ref string) ([]string, error) {
+	rec, err := st.ReadRecord(ref)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, cli.Usagef("no record for %s -- pull and import it first", ref)
+		}
+		return nil, err
+	}
+	if len(rec.DiffIDs) == 0 {
+		return nil, fmt.Errorf("record for %s lists no layers", ref)
+	}
+	var chain []string // topmost first
+	for _, d := range rec.DiffIDs {
+		p := st.LayerPath(d)
+		if _, err := os.Stat(p); err != nil {
+			return nil, cli.Usagef("layer %s is not materialized -- run image import", filepath.Base(p))
+		}
+		chain = append([]string{p}, chain...)
+	}
+	return chain, nil
+}
+
 func mount(a *cli.Args, e cli.Emit) (int, error) {
-	if err := a.RejectUnknown("--base", "--scratch-dir", "--parent"); err != nil {
+	if err := a.RejectUnknown("--base", "--ref", "--store", "--scratch-dir", "--parent"); err != nil {
 		return cli.Usage, err
 	}
-	base, err := requireDir(a, "--base")
-	if err != nil {
-		return cli.Usage, err
+	var base string
+	var parents []string
+	var err error
+	switch ref := a.Option("--ref"); {
+	case ref != "" && a.Option("--base") != "":
+		return cli.Usage, cli.Usagef("--ref and --base are exclusive: a ref resolves the whole chain")
+	case ref != "":
+		// The finding that makes this safe: wclayer import already creates blank.vhdx in
+		// base layers, so a store layer mounts as-is -- nothing here mutates the store.
+		st, err := store.New(a.Option("--store"))
+		if err != nil {
+			return cli.Failed, err
+		}
+		chain, err := chainFor(st, ref)
+		if err != nil {
+			return exitFor(err), err
+		}
+		base = chain[len(chain)-1]
+		parents = chain
+	default:
+		base, err = requireDir(a, "--base")
+		if err != nil {
+			return cli.Usage, err
+		}
+		parents, err = checkParents(a)
+		if err != nil {
+			return cli.Usage, err
+		}
+		if len(parents) == 0 {
+			parents = []string{base}
+		}
 	}
 	dir, err := a.Require("--scratch-dir")
 	if err != nil {
 		return cli.Usage, err
-	}
-	parents, err := checkParents(a)
-	if err != nil {
-		return cli.Usage, err
-	}
-	if len(parents) == 0 {
-		parents = []string{base}
 	}
 	blank := filepath.Join(base, blankName)
 	if _, err := os.Stat(blank); err != nil {
