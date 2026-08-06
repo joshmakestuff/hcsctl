@@ -44,7 +44,7 @@ func run(argv []string) int {
 	}
 	e := cli.Emit{JSON: wantJSON}
 
-	args, err := cli.Parse(argv, "--json", "--blobs", "--keep", "--force")
+	args, err := cli.Parse(argv, "--json", "--blobs", "--keep", "--force", "--writable")
 	if err != nil {
 		e.Failure("usage", err)
 		usage()
@@ -175,6 +175,14 @@ usage: hcsctl <group> <verb> [options]
 
   storage unmount --scratch-dir <dir>
                Detach the storage filter and the scratch VHD. ELEVATED.
+
+  storage export  --layer <volume> --dest <existing-dir> [--parent <dir>]... [--writable]
+               HcsExportLayer. Measured working: a *mounted* writable layer's volume path
+               with --writable, producing Files/Hives/tombstones. A legacy (wclayer)
+               directory layer fails partway -- the legacy variants are not public hcsshim.
+  storage import  --source <dir> --layer <dest-dir> [--parent <dir>]...
+               HcsImportLayer. NOT YET SEEN WORKING -- fails path-not-found after writing
+               Files; destination semantics under investigation, see issue #18. ELEVATED.
 
   network ls        Host compute networks, their subnets and endpoint counts. Unelevated.
   network endpoints [--network <name|id>]      Endpoints and their addresses. Unelevated.

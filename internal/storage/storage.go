@@ -27,8 +27,10 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 
+	winio "github.com/Microsoft/go-winio"
 	"github.com/Microsoft/go-winio/vhd"
 	"github.com/Microsoft/hcsshim"
 	"github.com/Microsoft/hcsshim/computestorage"
@@ -44,11 +46,118 @@ func Dispatch(a *cli.Args, e cli.Emit) (int, error) {
 		return mount(a, e)
 	case "unmount":
 		return unmount(a, e)
+	case "import":
+		return importLayer(a, e)
+	case "export":
+		return exportLayer(a, e)
 	case "":
-		return cli.Usage, cli.Usagef("storage needs a subcommand: setup-base, mount, unmount")
+		return cli.Usage, cli.Usagef("storage needs a subcommand: setup-base, mount, unmount, import, export")
 	default:
-		return cli.Usage, cli.Usagef("unknown storage subcommand %q (expected setup-base, mount, unmount)", a.Word(1))
+		return cli.Usage, cli.Usagef("unknown storage subcommand %q (expected setup-base, mount, unmount, import, export)", a.Word(1))
 	}
+}
+
+// layerDataFor builds the LayerData every computestorage call wants: parents topmost first,
+// absolute paths, schema 2.1. An empty parent list is a base layer and is fine.
+func layerDataFor(parents []string) (computestorage.LayerData, error) {
+	data := computestorage.LayerData{SchemaVersion: computestorage.Version{Major: 2, Minor: 1}}
+	for _, p := range parents {
+		g, err := hcsshim.NameToGuid(filepath.Base(p))
+		if err != nil {
+			return data, fmt.Errorf("NameToGuid(%s): %w", filepath.Base(p), err)
+		}
+		data.Layers = append(data.Layers, computestorage.Layer{Id: g.ToString(), Path: p, PathType: "AbsolutePath"})
+	}
+	return data, nil
+}
+
+func checkParents(a *cli.Args) ([]string, error) {
+	parents := a.Options("--parent")
+	for _, p := range parents {
+		if _, err := os.Stat(p); err != nil {
+			return nil, cli.Usagef("--parent %s: %v", p, err)
+		}
+	}
+	return parents, nil
+}
+
+// importLayer wraps HcsImportLayer: folder to folder, not a tar -- the tar half of the
+// round-trip question lives with image export (#13).
+func importLayer(a *cli.Args, e cli.Emit) (int, error) {
+	if err := a.RejectUnknown("--source", "--layer", "--parent"); err != nil {
+		return cli.Usage, err
+	}
+	src, err := requireDir(a, "--source")
+	if err != nil {
+		return cli.Usage, err
+	}
+	dest, err := a.Require("--layer")
+	if err != nil {
+		return cli.Usage, err
+	}
+	parents, err := checkParents(a)
+	if err != nil {
+		return cli.Usage, err
+	}
+	data, err := layerDataFor(parents)
+	if err != nil {
+		return cli.Failed, err
+	}
+
+	// Backup/restore semantics are the caller's job here: unlike ociwclayer, the raw
+	// computestorage syscalls do not enable privileges, and an elevated token holds
+	// SeBackup/SeRestore disabled.
+	err = winio.RunWithPrivileges([]string{winio.SeBackupPrivilege, winio.SeRestorePrivilege}, func() error {
+		return computestorage.ImportLayer(context.Background(), dest, src, data)
+	})
+	if err != nil {
+		return cli.Failed, fmt.Errorf("ImportLayer: %w", err)
+	}
+	e.Result(map[string]any{
+		"ok": true, "command": "storage import", "layer": dest, "source": src, "parents": parents,
+	}, func() {
+		fmt.Printf("imported %s\n  from: %s\n", dest, src)
+	})
+	return cli.OK, nil
+}
+
+func exportLayer(a *cli.Args, e cli.Emit) (int, error) {
+	if err := a.RejectUnknown("--layer", "--dest", "--parent", "--writable"); err != nil {
+		return cli.Usage, err
+	}
+	layer, err := requireDir(a, "--layer")
+	if err != nil {
+		return cli.Usage, err
+	}
+	// Pre-existing by API contract, and worth enforcing before the call: HcsExportLayer's
+	// own error for a missing destination does not name the path.
+	dest, err := requireDir(a, "--dest")
+	if err != nil {
+		return cli.Usage, err
+	}
+	parents, err := checkParents(a)
+	if err != nil {
+		return cli.Usage, err
+	}
+	data, err := layerDataFor(parents)
+	if err != nil {
+		return cli.Failed, err
+	}
+	opts := computestorage.ExportLayerOptions{IsWritableLayer: a.Flag("--writable")}
+
+	err = winio.RunWithPrivileges([]string{winio.SeBackupPrivilege, winio.SeRestorePrivilege}, func() error {
+		return computestorage.ExportLayer(context.Background(), layer, dest, data, opts)
+	})
+	if err != nil {
+		return cli.Failed, fmt.Errorf("ExportLayer: %w", err)
+	}
+	e.Result(map[string]any{
+		"ok": true, "command": "storage export", "layer": layer, "dest": dest,
+		"parents": parents, "writable": opts.IsWritableLayer,
+	}, func() {
+		fmt.Printf("exported %s\n  to: %s\n", layer, dest)
+	})
+	return cli.OK, nil
 }
 
 const (
@@ -59,12 +168,18 @@ const (
 )
 
 // requireDir is the shared argument shape: a named option that must be an existing directory.
+// A \\?\Volume{...} path is a directory for every purpose here, but stat wants the trailing
+// separator that callers conventionally omit.
 func requireDir(a *cli.Args, name string) (string, error) {
 	v, err := a.Require(name)
 	if err != nil {
 		return "", err
 	}
-	fi, err := os.Stat(v)
+	probe := v
+	if strings.HasPrefix(v, `\\?\Volume{`) && !strings.HasSuffix(v, `\`) {
+		probe = v + `\`
+	}
+	fi, err := os.Stat(probe)
 	if err != nil {
 		return "", cli.Usagef("%s %s: %v", name, v, err)
 	}
@@ -137,31 +252,21 @@ func mount(a *cli.Args, e cli.Emit) (int, error) {
 	if err != nil {
 		return cli.Usage, err
 	}
-	parents := a.Options("--parent")
+	parents, err := checkParents(a)
+	if err != nil {
+		return cli.Usage, err
+	}
 	if len(parents) == 0 {
 		parents = []string{base}
-	}
-	for _, p := range parents {
-		if _, err := os.Stat(p); err != nil {
-			return cli.Usage, cli.Usagef("--parent %s: %v", p, err)
-		}
 	}
 	blank := filepath.Join(base, blankName)
 	if _, err := os.Stat(blank); err != nil {
 		return cli.Usage, cli.Usagef("%s has no %s -- run storage setup-base first", base, blankName)
 	}
 
-	var layers []computestorage.Layer
-	for _, p := range parents {
-		g, err := hcsshim.NameToGuid(filepath.Base(p))
-		if err != nil {
-			return cli.Failed, fmt.Errorf("NameToGuid(%s): %w", filepath.Base(p), err)
-		}
-		layers = append(layers, computestorage.Layer{Id: g.ToString(), Path: p, PathType: "AbsolutePath"})
-	}
-	data := computestorage.LayerData{
-		SchemaVersion: computestorage.Version{Major: 2, Minor: 1},
-		Layers:        layers,
+	data, err := layerDataFor(parents)
+	if err != nil {
+		return cli.Failed, err
 	}
 
 	if err := os.MkdirAll(dir, 0o755); err != nil {
