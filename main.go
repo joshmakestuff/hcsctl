@@ -169,9 +169,12 @@ usage: hcsctl <group> <verb> [options]
                Layout are regenerated -- so point it at a copy, not a store layer. ELEVATED.
 
   storage mount   --base <dir> --scratch-dir <dir> [--parent <dir>]...
+  storage mount   --ref <ref> --scratch-dir <dir> [--store <dir>]
                Copy blank.vhdx to sandbox.vhdx (first time), attach it, initialize the
                writable layer and attach the storage filter. Prints the volume carrying the
-               merged view. Parents topmost first; defaults to the base. ELEVATED.
+               merged view. Parents topmost first; defaults to the base. --ref resolves a
+               store image's chain instead -- store base layers already carry blank.vhdx
+               (wclayer import creates it), so nothing mutates the store. ELEVATED.
 
   storage unmount --scratch-dir <dir>
                Detach the storage filter and the scratch VHD. ELEVATED.
@@ -183,6 +186,11 @@ usage: hcsctl <group> <verb> [options]
   storage import  --source <dir> --layer <dest-dir> [--parent <dir>]...
                HcsImportLayer. NOT YET SEEN WORKING -- fails path-not-found after writing
                Files; destination semantics under investigation, see issue #18. ELEVATED.
+
+  storage destroy --layer <dir>
+               HcsDestroyLayer, verified by directory absence. Layer directories defeat
+               ordinary deletion (restored security descriptors); this is the tool that
+               removes them. ELEVATED.
 
   network ls        Host compute networks, their subnets and endpoint counts. Unelevated.
   network endpoints [--network <name|id>]      Endpoints and their addresses. Unelevated.
