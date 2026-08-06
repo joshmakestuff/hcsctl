@@ -141,6 +141,16 @@ usage: hcsctl <group> <verb> [options]
                    [--network <name|id>] [--dns-search list] [--mount HOST:CONTAINER[:ro]]...
   container start  --id <id> | --ref <ref>
   container exec   --id <id> --cmd "<cmdline>" [--cwd D] [--user U] [--env NAME=value]...
+                   [--timeout 30s]
+               Without --timeout, waits for the guest process forever -- that is how a
+               caller follows a long-running app's output. With it, the process is killed
+               on expiry and the result reports timedOut=true with a null exitCode.
+
+  container kill   --id <id> --pid <pid>
+               Kill one guest process and confirm it is gone. PIDs come from container ps
+               or the exec result. Kill (and --timeout) terminates that process only: a
+               cmd /c wrapper's children survive it, so exec the target directly when a
+               kill must be total.
   container stop   --id <id> [--force]
   container rm     --id <id> [--force]
   container ls     [--store <dir>]             Containers and their HCS state.

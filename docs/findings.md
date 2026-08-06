@@ -71,6 +71,11 @@ hyperv + CIM. A xenon-first tool gets less from CimFS than the API size suggests
   an empty `HomeDir` makes the id the full path.
 - **A created-but-never-started container reports a blank `State`** from `GetContainers`, which is
   not the same as no compute system at all.
+- **`Process.Kill` terminates one process, not a tree.** Killing an exec'd `cmd /c ping ...`
+  kills `cmd.exe` and orphans the still-running `PING.EXE`; `ProcessList` carries no parent
+  pids to chase it with. When a kill must be total, exec the target directly.
+- **A killed guest process reports exit code 1067** (`ERROR_PROCESS_ABORTED`) to whoever else
+  is waiting on it.
 - **`S_FALSE` (1) is a success HRESULT.** `FAILED(hr)` is `hr < 0`.
 - **`hcn`'s `HcnCreateTest*` and `HcnGenerateNATNetwork` live in `hcnutils_test.go`** — not
   importable. Carry the template yourself.
