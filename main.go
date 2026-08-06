@@ -27,6 +27,7 @@ import (
 	"github.com/joshmakestuff/hcsctl/internal/image"
 	"github.com/joshmakestuff/hcsctl/internal/layer"
 	"github.com/joshmakestuff/hcsctl/internal/network"
+	"github.com/joshmakestuff/hcsctl/internal/storage"
 	"github.com/joshmakestuff/hcsctl/internal/sysinfo"
 )
 
@@ -68,10 +69,12 @@ func run(argv []string) int {
 		code, err = container.Dispatch(args, e)
 	case "network":
 		code, err = network.Dispatch(args, e)
+	case "storage":
+		code, err = storage.Dispatch(args, e)
 	case "info":
 		code, err = sysinfo.Run(args, e)
 	default:
-		err = cli.Usagef("unknown verb group %q (expected: image, layer, container, network, info)", args.Word(0))
+		err = cli.Usagef("unknown verb group %q (expected: image, layer, container, network, storage, info)", args.Word(0))
 		code = cli.Usage
 	}
 
@@ -159,6 +162,19 @@ usage: hcsctl <group> <verb> [options]
   container inspect --id <id>                  What the store and HCS each know.
   container pause   --id <id>
   container resume  --id <id>
+
+  storage setup-base --layer <dir> [--size-gb N]
+               Prepare a base layer for VHD-backed (computestorage) use: blank-base.vhdx and
+               blank.vhdx created inside the layer directory. MUTATES the layer -- Hives/ and
+               Layout are regenerated -- so point it at a copy, not a store layer. ELEVATED.
+
+  storage mount   --base <dir> --scratch-dir <dir> [--parent <dir>]...
+               Copy blank.vhdx to sandbox.vhdx (first time), attach it, initialize the
+               writable layer and attach the storage filter. Prints the volume carrying the
+               merged view. Parents topmost first; defaults to the base. ELEVATED.
+
+  storage unmount --scratch-dir <dir>
+               Detach the storage filter and the scratch VHD. ELEVATED.
 
   network ls        Host compute networks, their subnets and endpoint counts. Unelevated.
   network endpoints [--network <name|id>]      Endpoints and their addresses. Unelevated.
