@@ -112,6 +112,10 @@ var usageCases = []struct {
 	{"mount host missing", []string{"container", "run", "--ref", "r", "--mount", `C:\hcsctl-no-such-dir:C:\app`}},
 	{"mount container path repeated", []string{"container", "run", "--ref", "r",
 		"--mount", `C:\Windows:C:\app`, "--mount", `C:\Windows:C:\app`}},
+	{"timeout not a duration", []string{"container", "exec", "--id", "a", "--cmd", "c", "--timeout", "soon"}},
+	{"timeout not positive", []string{"container", "exec", "--id", "a", "--cmd", "c", "--timeout", "-3s"}},
+	{"kill without pid", []string{"container", "kill", "--id", "a"}},
+	{"kill pid not a number", []string{"container", "kill", "--id", "a", "--pid", "abc"}},
 }
 
 func TestUsageErrorsExit64(t *testing.T) {

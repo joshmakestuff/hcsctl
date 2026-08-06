@@ -61,6 +61,8 @@ func Dispatch(a *cli.Args, e cli.Emit) (int, error) {
 		return start(a, e)
 	case "exec":
 		return exec(a, e)
+	case "kill":
+		return kill(a, e)
 	case "stop":
 		return stop(a, e)
 	case "rm":
@@ -78,9 +80,9 @@ func Dispatch(a *cli.Args, e cli.Emit) (int, error) {
 	case "resume":
 		return pauseResume(a, e, "resume")
 	case "":
-		return cli.Usage, cli.Usagef("container needs a subcommand: run, create, start, exec, stop, rm, ls, stats, ps, inspect, pause, resume")
+		return cli.Usage, cli.Usagef("container needs a subcommand: run, create, start, exec, kill, stop, rm, ls, stats, ps, inspect, pause, resume")
 	default:
-		return cli.Usage, cli.Usagef("unknown container subcommand %q (expected run, create, start, exec, stop, rm, ls, stats, ps, inspect, pause, resume)", a.Word(1))
+		return cli.Usage, cli.Usagef("unknown container subcommand %q (expected run, create, start, exec, kill, stop, rm, ls, stats, ps, inspect, pause, resume)", a.Word(1))
 	}
 }
 
@@ -589,10 +591,39 @@ func parseEnv(a *cli.Args) (map[string]string, error) {
 	return env, nil
 }
 
+// parseTimeout reads --timeout as a Go duration. Zero means absent, which means wait
+// forever -- the default an integration's log-following exec depends on, so the bound is
+// strictly opt-in.
+func parseTimeout(a *cli.Args) (time.Duration, error) {
+	v := a.Option("--timeout")
+	if v == "" {
+		return 0, nil
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d <= 0 {
+		return 0, cli.Usagef("--timeout wants a positive duration like 30s or 2m, got %q", v)
+	}
+	return d, nil
+}
+
+// killWait bounds the wait for a Kill to take effect. A process that survives its kill this
+// long is a failure to report, not a thing to wait harder on.
+const killWait = 10 * time.Second
+
+// execResult is what execIn measured. ExitCode is meaningful only when TimedOut is false: a
+// killed process's code is an invention of the kill, not something the guest produced.
+type execResult struct {
+	ExitCode int
+	Pid      int
+	TimedOut bool
+}
+
 // execIn launches a process, streams its output, and returns its exit code. Stdin is closed
 // immediately: nothing here is interactive, and a process blocked on a stdin that never closes
-// looks exactly like a hung container.
-func execIn(c hcsshim.Container, e cli.Emit, cmdline, cwd, user string, env map[string]string, sink io.Writer) (int, error) {
+// looks exactly like a hung container. A non-zero timeout kills the process on expiry.
+func execIn(c hcsshim.Container, e cli.Emit, cmdline, cwd, user string, env map[string]string, timeout time.Duration, sink io.Writer) (execResult, error) {
+	var res execResult
+	res.ExitCode = -1
 	pc := &hcsshim.ProcessConfig{
 		CommandLine:      cmdline,
 		WorkingDirectory: cwd,
@@ -604,13 +635,14 @@ func execIn(c hcsshim.Container, e cli.Emit, cmdline, cwd, user string, env map[
 	}
 	p, err := c.CreateProcess(pc)
 	if err != nil {
-		return -1, fmt.Errorf("CreateProcess(%q): %w", cmdline, err)
+		return res, fmt.Errorf("CreateProcess(%q): %w", cmdline, err)
 	}
 	defer p.Close()
+	res.Pid = p.Pid()
 
 	stdin, stdout, stderr, err := p.Stdio()
 	if err != nil {
-		return -1, fmt.Errorf("Stdio: %w", err)
+		return res, fmt.Errorf("Stdio: %w", err)
 	}
 	if stdin != nil {
 		stdin.Close()
@@ -632,21 +664,44 @@ func execIn(c hcsshim.Container, e cli.Emit, cmdline, cwd, user string, env map[
 		}(r)
 	}
 
-	if err := p.Wait(); err != nil {
+	if timeout > 0 {
+		if err := p.WaitTimeout(timeout); err != nil {
+			if !hcsshim.IsTimeout(err) {
+				wg.Wait()
+				return res, fmt.Errorf("process WaitTimeout: %w", err)
+			}
+			// Expired: kill, then confirm the kill landed rather than trusting it. "We gave
+			// up on it" and "it exited" must stay distinguishable, so the exit code is not
+			// collected -- it would be the kill's invention, not the guest's.
+			res.TimedOut = true
+			e.Progress("timeout %s expired, killing pid %d", timeout, res.Pid)
+			if err := p.Kill(); err != nil {
+				wg.Wait()
+				return res, fmt.Errorf("Kill after %s timeout: %w", timeout, err)
+			}
+			if err := p.WaitTimeout(killWait); err != nil {
+				wg.Wait()
+				return res, fmt.Errorf("pid %d still running %s after Kill: %w", res.Pid, killWait, err)
+			}
+			wg.Wait()
+			return res, nil
+		}
+	} else if err := p.Wait(); err != nil {
 		wg.Wait()
-		return -1, fmt.Errorf("process Wait: %w", err)
+		return res, fmt.Errorf("process Wait: %w", err)
 	}
 	wg.Wait()
 
 	code, err := p.ExitCode()
 	if err != nil {
-		return -1, fmt.Errorf("ExitCode: %w", err)
+		return res, fmt.Errorf("ExitCode: %w", err)
 	}
-	return code, nil
+	res.ExitCode = code
+	return res, nil
 }
 
 func exec(a *cli.Args, e cli.Emit) (int, error) {
-	if err := a.RejectUnknown("--id", "--ref", "--store", "--cmd", "--cwd", "--user", "--env"); err != nil {
+	if err := a.RejectUnknown("--id", "--ref", "--store", "--cmd", "--cwd", "--user", "--env", "--timeout"); err != nil {
 		return cli.Usage, err
 	}
 	st, id, err := resolve(a)
@@ -661,6 +716,10 @@ func exec(a *cli.Args, e cli.Emit) (int, error) {
 	if err != nil {
 		return cli.Usage, err
 	}
+	timeout, err := parseTimeout(a)
+	if err != nil {
+		return cli.Usage, err
+	}
 	if _, err := readState(st, id); err != nil {
 		return exitFor(err), err
 	}
@@ -671,17 +730,38 @@ func exec(a *cli.Args, e cli.Emit) (int, error) {
 	defer c.Close()
 
 	out := &captured{json: e.JSON}
-	code, err := execIn(c, e, cmdline, a.Option("--cwd"), a.Option("--user"), env, out)
+	res, err := execIn(c, e, cmdline, a.Option("--cwd"), a.Option("--user"), env, timeout, out)
 	if err != nil {
 		return cli.Failed, err
 	}
-	e.Result(map[string]any{
-		"ok": true, "command": "container exec", "id": id,
-		"cmd": cmdline, "exitCode": code, "output": out.String(),
-	}, func() {
-		fmt.Printf("exit code: %d\n", code)
+	e.Result(execDoc("container exec", id, cmdline, res, out), func() {
+		printExec(res)
 	})
 	return cli.OK, nil
+}
+
+// execDoc is the shared shape of an exec-like result. A timed-out process gets exitCode null
+// -- the guest never produced one, and inventing it would make "gave up" look like "exited".
+func execDoc(command, id, cmdline string, res execResult, out *captured) map[string]any {
+	doc := map[string]any{
+		"ok": true, "command": command, "id": id,
+		"cmd": cmdline, "pid": res.Pid, "timedOut": res.TimedOut,
+		"output": out.String(),
+	}
+	if res.TimedOut {
+		doc["exitCode"] = nil
+	} else {
+		doc["exitCode"] = res.ExitCode
+	}
+	return doc
+}
+
+func printExec(res execResult) {
+	if res.TimedOut {
+		fmt.Printf("timed out, killed pid %d\n", res.Pid)
+		return
+	}
+	fmt.Printf("exit code: %d\n", res.ExitCode)
 }
 
 // captured tees guest output. In JSON mode it must not reach stdout -- stdout carries exactly
@@ -713,7 +793,7 @@ func (c *captured) String() string {
 // run is create + start + exec + stop + rm in one call: the shape you want for a smoke test and
 // for one-shot work, and the shape that leaves nothing behind when a step fails.
 func run(a *cli.Args, e cli.Emit) (int, error) {
-	known := append([]string{"--cmd", "--cwd", "--user", "--env", "--keep"}, createOptions...)
+	known := append([]string{"--cmd", "--cwd", "--user", "--env", "--timeout", "--keep"}, createOptions...)
 	if err := a.RejectUnknown(known...); err != nil {
 		return cli.Usage, err
 	}
@@ -722,6 +802,10 @@ func run(a *cli.Args, e cli.Emit) (int, error) {
 		return cli.Usage, err
 	}
 	env, err := parseEnv(a)
+	if err != nil {
+		return cli.Usage, err
+	}
+	timeout, err := parseTimeout(a)
 	if err != nil {
 		return cli.Usage, err
 	}
@@ -785,7 +869,7 @@ func run(a *cli.Args, e cli.Emit) (int, error) {
 	e.Progress("started")
 
 	out := &captured{json: e.JSON}
-	code, execErr := execIn(c, e, cmdline, a.Option("--cwd"), a.Option("--user"), env, out)
+	res, execErr := execIn(c, e, cmdline, a.Option("--cwd"), a.Option("--user"), env, timeout, out)
 	cleanup()
 	if execErr != nil {
 		return cli.Failed, execErr
@@ -793,13 +877,68 @@ func run(a *cli.Args, e cli.Emit) (int, error) {
 
 	// The CLI's own exit code stays on contract -- 0 means hcsctl ran the thing -- and the
 	// guest's exit code is reported in the document rather than conflated with it.
+	doc := execDoc("container run", id, cmdline, res, out)
+	doc["ref"] = ref
+	doc["utilityVM"] = s.UVM
+	doc["kept"] = a.Flag("--keep")
+	doc["endpoint"] = s.Endpoint
+	doc["addresses"] = s.Addresses
+	e.Result(doc, func() {
+		printExec(res)
+	})
+	return cli.OK, nil
+}
+
+// kill terminates one guest process by pid. It exists because an exec that hcsctl no longer
+// owns -- a crashed caller, an abandoned long-running app -- leaves a process nothing can
+// reach: HCS pipes belong to whoever created them, but Kill needs only the pid.
+func kill(a *cli.Args, e cli.Emit) (int, error) {
+	// The whole command line is judged before any container lookup, so a bad --pid is exit 64
+	// even when the container does not exist either.
+	if err := a.RejectUnknown("--id", "--ref", "--store", "--pid"); err != nil {
+		return cli.Usage, err
+	}
+	v, err := a.Require("--pid")
+	if err != nil {
+		return cli.Usage, err
+	}
+	pid, err := parseUint(v)
+	if err != nil {
+		return cli.Usage, cli.Usagef("--pid must be a positive integer, got %q", v)
+	}
+	st, id, err := resolve(a)
+	if err != nil {
+		return cli.Usage, err
+	}
+	if _, err := readState(st, id); err != nil {
+		return exitFor(err), err
+	}
+	c, err := hcsshim.OpenContainer(id)
+	if err != nil {
+		return cli.Failed, fmt.Errorf("OpenContainer(%s): %w", id, err)
+	}
+	defer c.Close()
+
+	// A pid that is not there is a runtime fact, not a bad command line: the process may have
+	// exited a moment ago, and exit 1 with the message is the honest report.
+	p, err := c.OpenProcess(int(pid))
+	if err != nil {
+		return cli.Failed, fmt.Errorf("OpenProcess(%d): %w", pid, err)
+	}
+	defer p.Close()
+
+	if err := p.Kill(); err != nil {
+		return cli.Failed, fmt.Errorf("Kill(%d): %w", pid, err)
+	}
+	// The post-condition, not the return value: Kill signals, WaitTimeout is what confirms.
+	if err := p.WaitTimeout(killWait); err != nil {
+		return cli.Failed, fmt.Errorf("pid %d still running %s after Kill: %w", pid, killWait, err)
+	}
+
 	e.Result(map[string]any{
-		"ok": true, "command": "container run", "id": id, "ref": ref,
-		"cmd": cmdline, "exitCode": code, "output": out.String(),
-		"utilityVM": s.UVM, "kept": a.Flag("--keep"),
-		"endpoint": s.Endpoint, "addresses": s.Addresses,
+		"ok": true, "command": "container kill", "id": id, "pid": pid, "killed": true,
 	}, func() {
-		fmt.Printf("exit code: %d\n", code)
+		fmt.Printf("killed pid %d in %s\n", pid, id)
 	})
 	return cli.OK, nil
 }
