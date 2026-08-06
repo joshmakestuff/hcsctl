@@ -51,6 +51,22 @@ The namespace / `AddNamespaceEndpoint` machinery in hcsshim's `internal/hcsoci/n
 
 Probes: `hcsspike/probes/hcn/`.
 
+## computestorage
+
+- **wclayer import already produces the computestorage artifacts.** A base layer imported via
+  `ociwclayer` carries `blank-base.vhdx`/`blank.vhdx` (timestamps prove import created them),
+  so **store base layers are `storage mount`-able as-is** — no `SetupContainerBaseLayer`, no
+  hives regeneration, source untouched.
+- **`HcsExportLayer` reads through the mounted filter.** Exporting a *mounted* writable
+  layer's volume path with `IsWritableLayer` works and produces `Files`/`Hives`/`$wcidirs$`
+  metadata/`tombstones.txt`. The same call on an unmounted scratch directory or on a legacy
+  (wclayer) directory layer fails partway with file-not-found — the legacy-format variants
+  (`HcsExportLegacyWritableLayer` et al.) are not wrapped by public hcsshim.
+- **`HcsImportLayer` has not been seen working here.** It writes `Files` then fails
+  path-not-found, whether fed a partial legacy export or a valid writable-layer export, with
+  backup/restore privileges enabled. Destination semantics unresolved.
+- The raw computestorage syscalls do not enable privileges for you, unlike `ociwclayer`.
+
 ## CimFS
 
 Creating and committing a CIM, including per-file security descriptors, is unprivileged. Mounting
