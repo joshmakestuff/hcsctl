@@ -51,6 +51,9 @@ func run(argv []string) int {
 	}
 
 	if len(args.Words) == 0 {
+		// Failure before usage, so `hcsctl --json` still puts its one document on stdout --
+		// the contract holds on every path, including the empty one.
+		e.Failure("usage", cli.Usagef("a verb group is required (image, layer, container, network, info)"))
 		usage()
 		return cli.Usage
 	}
