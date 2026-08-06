@@ -92,12 +92,18 @@ type mountResult struct {
 }
 
 func mount(a *cli.Args, e cli.Emit) (int, error) {
-	if err := a.RejectUnknown("--ref", "--id", "--store"); err != nil {
+	if err := a.RejectUnknown("--ref", "--id", "--store", "--scratch-size"); err != nil {
 		return cli.Usage, err
 	}
 	ref, err := a.Require("--ref")
 	if err != nil {
 		return cli.Usage, err
+	}
+	var scratchSize uint64
+	if v := a.Option("--scratch-size"); v != "" {
+		if scratchSize, err = cli.ParseSize(v); err != nil {
+			return cli.Usage, err
+		}
 	}
 	st, err := store.New(a.Option("--store"))
 	if err != nil {
@@ -131,6 +137,16 @@ func mount(a *cli.Args, e cli.Emit) (int, error) {
 		return cli.Failed, fmt.Errorf("CreateScratchLayer (rerun elevated?): %w", err)
 	}
 	e.Progress("CreateScratchLayer ok")
+
+	// Expand before Activate/Prepare, while nothing holds the vhd -- the same point in the
+	// sequence Docker's windowsfilter driver does it.
+	if scratchSize != 0 {
+		if err := hcsshim.ExpandScratchSize(info, sp, scratchSize); err != nil {
+			_ = hcsshim.DestroyLayer(info, sp)
+			return cli.Failed, fmt.Errorf("ExpandScratchSize: %w", err)
+		}
+		e.Progress("ExpandScratchSize to %d bytes ok", scratchSize)
+	}
 
 	if err := hcsshim.ActivateLayer(info, sp); err != nil {
 		_ = hcsshim.DestroyLayer(info, sp)

@@ -118,6 +118,37 @@ func (a *Args) RejectUnknown(known ...string) error {
 	return nil
 }
 
+// ParseSize turns a human size -- "40GB", "40960MB" -- into bytes. The unit is required:
+// a bare number is ambiguous enough to be a mistake, and this is used for disk sizes where
+// the wrong guess costs tens of gigabytes.
+func ParseSize(s string) (uint64, error) {
+	upper := strings.ToUpper(strings.TrimSpace(s))
+	var mult uint64
+	var digits string
+	switch {
+	case strings.HasSuffix(upper, "GB"):
+		mult, digits = 1<<30, strings.TrimSuffix(upper, "GB")
+	case strings.HasSuffix(upper, "MB"):
+		mult, digits = 1<<20, strings.TrimSuffix(upper, "MB")
+	default:
+		return 0, Usagef("size %q needs a unit: GB or MB", s)
+	}
+	if digits == "" {
+		return 0, Usagef("size %q has no number", s)
+	}
+	var n uint64
+	for _, c := range digits {
+		if c < '0' || c > '9' {
+			return 0, Usagef("size %q is not <number>GB or <number>MB", s)
+		}
+		n = n*10 + uint64(c-'0')
+	}
+	if n == 0 {
+		return 0, Usagef("size %q is zero", s)
+	}
+	return n * mult, nil
+}
+
 // Emit is the output sink. In JSON mode stdout carries exactly one document and progress goes
 // to stderr, so a consumer never has to scrape.
 type Emit struct{ JSON bool }
