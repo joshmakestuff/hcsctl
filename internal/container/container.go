@@ -292,7 +292,7 @@ func parseMounts(a *cli.Args) ([]hcsshim.MappedDir, error) {
 // -- create ------------------------------------------------------------------------------
 
 var createOptions = []string{"--ref", "--id", "--store", "--cpus", "--memory-mb", "--hostname",
-	"--network", "--dns-search", "--mount"}
+	"--network", "--dns-search", "--mount", "--scratch-size"}
 
 // buildConfig assembles the compute system document. Split out from create() because `run`
 // needs the same document and the same failure messages.
@@ -320,6 +320,12 @@ func buildConfig(a *cli.Args, e cli.Emit, st *store.Store, id, ref string) (*hcs
 	mounts, err := parseMounts(a)
 	if err != nil {
 		return nil, s, err
+	}
+	var scratchSize uint64
+	if v := a.Option("--scratch-size"); v != "" {
+		if scratchSize, err = cli.ParseSize(v); err != nil {
+			return nil, s, err
+		}
 	}
 
 	chain, err := chainFor(st, ref)
@@ -364,6 +370,14 @@ func buildConfig(a *cli.Args, e cli.Emit, st *store.Store, id, ref string) (*hcs
 		return nil, s, fmt.Errorf("CreateScratchLayer (rerun elevated?): %w", err)
 	}
 	e.Progress("CreateScratchLayer ok")
+
+	if scratchSize != 0 {
+		if err := hcsshim.ExpandScratchSize(hcsshim.DriverInfo{}, sd, scratchSize); err != nil {
+			destroyScratch(st, id)
+			return nil, s, fmt.Errorf("ExpandScratchSize: %w", err)
+		}
+		e.Progress("ExpandScratchSize to %d bytes ok", scratchSize)
+	}
 
 	var ep *hcn.HostComputeEndpoint
 	var addrs []string

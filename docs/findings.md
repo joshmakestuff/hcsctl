@@ -77,6 +77,19 @@ needs more than `SeManageVolumePrivilege`.
 hcsshim consumes CIM layers **for process-isolated containers only** — `MountWCOWLayers` errors for
 hyperv + CIM. A xenon-first tool gets less from CimFS than the API size suggests.
 
+## Scratch sizing
+
+- **The default scratch gives a guest a 20 GB C:.** Measured: `fsutil volume diskfree c:` in a
+  servercore xenon reports 19.9 GB total with a default scratch.
+- **Both sizing mechanisms work on a xenon, and they are equivalent.** `ExpandScratchSize` on
+  the scratch directory after `CreateScratchLayer`, and `StorageSandboxSize` in the v1
+  `ContainerConfig`, each produce a 39.9 GB guest C: from a 40 GB request. hcsctl wires
+  `ExpandScratchSize` because it also covers `layer mount`, where there is no config document.
+- **`LayerExists` answers "does the directory exist", nothing more.** It returns true for a
+  freshly created empty directory and for a torn layer with no `Files` (probe:
+  `hcsspike/probes/layerexists`, unelevated -- it needs no elevation). It cannot detect an
+  interrupted import, so the `Files` stat in chainFor stays.
+
 ## API behaviour that is not visible from the call site
 
 - **hcsshim does not write `layerchain.json`.** hcsctl does: `null` for a base layer, otherwise the

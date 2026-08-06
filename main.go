@@ -121,9 +121,10 @@ usage: hcsctl <group> <verb> [options]
   image rm     --ref <ref> [--blobs] [--store <dir>]
                Remove materialized layers via DestroyLayer. ELEVATED.
 
-  layer mount   --ref <ref> [--id <id>] [--store <dir>]
+  layer mount   --ref <ref> [--id <id>] [--scratch-size 40GB] [--store <dir>]
                Put a writable scratch layer over a materialized chain, activate and prepare
-               it, then print the volume path. ELEVATED.
+               it, then print the volume path. --scratch-size grows the scratch beyond the
+               default via ExpandScratchSize. ELEVATED.
 
   layer unmount --id <id> | --ref <ref> [--store <dir>]
                Unprepare, deactivate and destroy the scratch. ELEVATED.
@@ -133,7 +134,7 @@ usage: hcsctl <group> <verb> [options]
   container run    --ref <ref> [--cmd "<cmdline>"] [--id <id>] [--cpus N]
                    [--memory-mb N] [--hostname H] [--cwd D] [--user U]
                    [--env NAME=value]... [--network <name|id>] [--dns-search list]
-                   [--mount HOST:CONTAINER[:ro]]... [--keep]
+                   [--mount HOST:CONTAINER[:ro]]... [--scratch-size 40GB] [--keep]
                Create, boot and run one command in a Hyper-V-isolated container, then tear
                it down. --cmd defaults to "cmd /c ver". --network attaches an endpoint on
                an existing host compute network and reports its address. --mount maps a host
@@ -142,6 +143,9 @@ usage: hcsctl <group> <verb> [options]
 
   container create --ref <ref> [--id <id>] [--cpus N] [--memory-mb N] [--hostname H]
                    [--network <name|id>] [--dns-search list] [--mount HOST:CONTAINER[:ro]]...
+                   [--scratch-size 40GB]
+               --scratch-size grows the scratch VHD so the guest's C: is bigger than the
+               default -- anything writing real data wants this.
   container start  --id <id> | --ref <ref>
   container exec   --id <id> --cmd "<cmdline>" [--cwd D] [--user U] [--env NAME=value]...
                    [--timeout 30s]
