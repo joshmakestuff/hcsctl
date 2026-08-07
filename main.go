@@ -181,6 +181,10 @@ usage: hcsctl <group> <verb> [options]
   container create --ref <ref> [--id <id>] [--cmd "<cmdline>"] [--cpus N] [--memory-mb N]
                    [--hostname H] [--network <name|id>] [--dns-search list]
                    [--mount HOST:CONTAINER[:ro]]... [--scratch-size 40GB]
+                   [--label key=value]...
+               --label stores opaque key=value pairs in state.json, reported by ls and
+               inspect and never interpreted -- ownership and run identity are the
+               consumer's policy (record an owner pid; scavenge only on proof it is dead).
                --scratch-size grows the scratch VHD so the guest's C: is bigger than the
                default -- anything writing real data wants this. --cmd records the primary
                process; start launches it. Exec the target directly, not via cmd /c -- a
