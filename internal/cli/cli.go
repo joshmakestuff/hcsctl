@@ -17,6 +17,20 @@ const (
 	Usage  = 64
 )
 
+// ContractVersion is the number a consumer's preflight checks (#29). Bump it when the shape
+// of a result document changes, a field's meaning changes, or an exit code's meaning changes
+// -- and ONLY then. Adding a new verb, option, or document field is not a bump: a consumer
+// reading fields it knows keeps working. If you are editing a Result document or the exit
+// codes above, you are the person this comment is for.
+const ContractVersion = "1"
+
+// ToolVersion identifies the build for humans in a bug report. Release builds stamp it:
+//
+//	go build -ldflags "-X github.com/joshmakestuff/hcsctl/internal/cli.ToolVersion=v0.2.0" .
+//
+// A dev build reports "dev" rather than a version it does not have.
+var ToolVersion = "dev"
+
 // UsageError means the command line was wrong and nothing was attempted.
 type UsageError struct{ Msg string }
 

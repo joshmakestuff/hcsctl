@@ -32,8 +32,13 @@ type storeInfo struct {
 }
 
 type info struct {
-	OK              bool     `json:"ok"`
-	Command         string   `json:"command"`
+	OK      bool   `json:"ok"`
+	Command string `json:"command"`
+	// ToolVersion and ContractVersion are hcsctl's own (#29); Version below is the host OS.
+	// The contract version is what a consumer's preflight checks; the tool version is for
+	// humans in a bug report.
+	ToolVersion     string   `json:"toolVersion"`
+	ContractVersion string   `json:"contractVersion"`
 	Build           uint16   `json:"build"`
 	BuildRevision   uint32   `json:"buildRevision"`
 	Version         string   `json:"version"`
@@ -81,6 +86,7 @@ func Run(a *cli.Args, e cli.Emit) (int, error) {
 
 	i := info{
 		OK: true, Command: "info",
+		ToolVersion: cli.ToolVersion, ContractVersion: cli.ContractVersion,
 		Build: osversion.Build(), BuildRevision: rev,
 		Version:         fmt.Sprintf("%d.%d.%d.%d", v.MajorVersion, v.MinorVersion, v.Build, rev),
 		Elevated:        isElevated(),
@@ -94,6 +100,7 @@ func Run(a *cli.Args, e cli.Emit) (int, error) {
 	}
 
 	e.Result(i, func() {
+		fmt.Printf("hcsctl       %s (contract %s)\n", i.ToolVersion, i.ContractVersion)
 		fmt.Printf("windows      %s\n", i.Version)
 		fmt.Printf("elevated     %v\n", i.Elevated)
 		fmt.Printf("hypervAdmin  %v\n", i.HyperVAdmin)
