@@ -653,7 +653,7 @@ type execResult struct {
 // execIn launches a process, streams its output, and returns its exit code. Stdin is closed
 // immediately: nothing here is interactive, and a process blocked on a stdin that never closes
 // looks exactly like a hung container. A non-zero timeout kills the process on expiry.
-func execIn(c hcsshim.Container, e cli.Emit, cmdline, cwd, user string, env map[string]string, timeout time.Duration, sink io.Writer) (execResult, error) {
+func execIn(c hcsshim.Container, e cli.Emit, cmdline, cwd, user string, env map[string]string, timeout time.Duration, outSink, errSink io.Writer) (execResult, error) {
 	var res execResult
 	res.ExitCode = -1
 	pc := &hcsshim.ProcessConfig{
@@ -682,18 +682,23 @@ func execIn(c hcsshim.Container, e cli.Emit, cmdline, cwd, user string, env map[
 	_ = p.CloseStdin()
 
 	// Both streams are drained concurrently. Draining them in sequence deadlocks as soon as the
-	// guest fills the pipe this side is not reading.
+	// guest fills the pipe this side is not reading. The sinks are separate so --stream-json
+	// can attribute guest stdout and stderr individually (#28); without it both are the same
+	// merged writer, exactly as before.
 	var wg sync.WaitGroup
-	for _, r := range []io.ReadCloser{stdout, stderr} {
-		if r == nil {
+	for _, s := range []struct {
+		r    io.ReadCloser
+		sink io.Writer
+	}{{stdout, outSink}, {stderr, errSink}} {
+		if s.r == nil {
 			continue
 		}
 		wg.Add(1)
-		go func(r io.ReadCloser) {
+		go func(r io.ReadCloser, sink io.Writer) {
 			defer wg.Done()
 			defer r.Close()
 			io.Copy(sink, r)
-		}(r)
+		}(s.r, s.sink)
 	}
 
 	if timeout > 0 {
@@ -762,7 +767,9 @@ func exec(a *cli.Args, e cli.Emit) (int, error) {
 	defer c.Close()
 
 	out := &captured{json: e.JSON}
-	res, err := execIn(c, e, cmdline, a.Option("--cwd"), a.Option("--user"), env, timeout, out)
+	outSink, errSink, closeFraming := guestSinks(e, out)
+	res, err := execIn(c, e, cmdline, a.Option("--cwd"), a.Option("--user"), env, timeout, outSink, errSink)
+	closeFraming()
 	if err != nil {
 		return cli.Failed, err
 	}
@@ -770,6 +777,24 @@ func exec(a *cli.Args, e cli.Emit) (int, error) {
 		printExec(res)
 	})
 	return cli.OK, nil
+}
+
+// guestSinks wires guest output for one exec (#28). Default: both guest streams merge into
+// the captured buffer, which tees live -- exactly the pre-#28 behaviour. Under --stream-json
+// (with --json), each stream additionally flows through its own NDJSON line framer, the tee
+// goes quiet (the framers own stderr now), and the buffer keeps serving the final document's
+// merged output field unchanged.
+func guestSinks(e cli.Emit, out *captured) (outSink, errSink io.Writer, closeFraming func()) {
+	if !e.JSON || !e.StreamJSON {
+		return out, out, func() {}
+	}
+	out.quiet = true
+	so := cli.NewStreamWriter(e, "stdout")
+	se := cli.NewStreamWriter(e, "stderr")
+	return io.MultiWriter(out, so), io.MultiWriter(out, se), func() {
+		so.Close()
+		se.Close()
+	}
 }
 
 // execDoc is the shared shape of an exec-like result. A timed-out process gets exitCode null
@@ -800,14 +825,20 @@ func printExec(res execResult) {
 // one document -- so it goes to stderr live and into the document at the end.
 type captured struct {
 	json bool
-	mu   sync.Mutex
-	buf  strings.Builder
+	// quiet suppresses the live tee: under --stream-json the framing writers own stderr,
+	// and this buffer serves only the final document's output field (#28).
+	quiet bool
+	mu    sync.Mutex
+	buf   strings.Builder
 }
 
 func (c *captured) Write(p []byte) (int, error) {
 	c.mu.Lock()
 	c.buf.Write(p)
 	c.mu.Unlock()
+	if c.quiet {
+		return len(p), nil
+	}
 	if c.json {
 		return os.Stderr.Write(p)
 	}
@@ -906,7 +937,9 @@ func run(a *cli.Args, e cli.Emit) (int, error) {
 	e.Progress("started")
 
 	out := &captured{json: e.JSON}
-	res, execErr := execIn(c, e, cmdline, a.Option("--cwd"), a.Option("--user"), env, timeout, out)
+	outSink, errSink, closeFraming := guestSinks(e, out)
+	res, execErr := execIn(c, e, cmdline, a.Option("--cwd"), a.Option("--user"), env, timeout, outSink, errSink)
+	closeFraming()
 	cleanup()
 	if execErr != nil {
 		return cli.Failed, execErr
