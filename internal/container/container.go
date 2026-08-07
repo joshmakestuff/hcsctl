@@ -42,6 +42,7 @@ import (
 	"github.com/Microsoft/hcsshim/hcn"
 	"github.com/joshmakestuff/hcsctl/internal/cli"
 	"github.com/joshmakestuff/hcsctl/internal/store"
+	"golang.org/x/sys/windows"
 )
 
 // defaultCmd is chosen to prove the guest actually booted and is the OS we think it is, while
@@ -80,10 +81,12 @@ func Dispatch(a *cli.Args, e cli.Emit) (int, error) {
 		return pauseResume(a, e, "pause")
 	case "resume":
 		return pauseResume(a, e, "resume")
+	case "logs":
+		return logsCmd(a, e)
 	case "":
-		return cli.Usage, cli.Usagef("container needs a subcommand: run, create, start, exec, kill, stop, rm, ls, stats, ps, inspect, pause, resume")
+		return cli.Usage, cli.Usagef("container needs a subcommand: run, create, start, exec, kill, logs, stop, rm, ls, stats, ps, inspect, pause, resume")
 	default:
-		return cli.Usage, cli.Usagef("unknown container subcommand %q (expected run, create, start, exec, kill, stop, rm, ls, stats, ps, inspect, pause, resume)", a.Word(1))
+		return cli.Usage, cli.Usagef("unknown container subcommand %q (expected run, create, start, exec, kill, logs, stop, rm, ls, stats, ps, inspect, pause, resume)", a.Word(1))
 	}
 }
 
@@ -102,6 +105,27 @@ type state struct {
 	// `rm` after a crash must delete an endpoint it did not create.
 	Endpoint  string   `json:"endpoint,omitempty"`
 	Addresses []string `json:"addresses,omitempty"`
+	// Primary is the container's main workload (#33), recorded by `create --cmd` so a fresh
+	// invocation can say what a running container is running, follow its retained output,
+	// and report its exit after the starting invocation is gone.
+	Primary *primaryState `json:"primary,omitempty"`
+}
+
+// primaryState survives the invocation that starts the process. Pipes cannot: whoever creates
+// a guest process owns them, unrecoverably -- so `start` tees output to primary.log and this
+// records who was pumping (PumpPid, a host pid) and how it ended. ExitCode is a pointer
+// because 0 is an exit code and "never exited" must stay distinguishable.
+type primaryState struct {
+	Cmd        string `json:"cmd"`
+	Pid        int    `json:"pid,omitempty"`
+	PumpPid    int    `json:"pumpPid,omitempty"`
+	StartedUTC string `json:"startedUtc,omitempty"`
+	ExitCode   *int   `json:"exitCode,omitempty"`
+	EndedUTC   string `json:"endedUtc,omitempty"`
+}
+
+func primaryLogPath(st *store.Store, id string) string {
+	return filepath.Join(containerDir(st, id), "primary.log")
 }
 
 func containersRoot(st *store.Store) string { return filepath.Join(st.Root, "containers") }
@@ -314,7 +338,7 @@ func parseMounts(a *cli.Args) ([]hcsshim.MappedDir, error) {
 // -- create ------------------------------------------------------------------------------
 
 var createOptions = []string{"--ref", "--id", "--store", "--cpus", "--memory-mb", "--hostname",
-	"--network", "--dns-search", "--mount", "--scratch-size"}
+	"--network", "--dns-search", "--mount", "--scratch-size", "--cmd"}
 
 // buildConfig assembles the compute system document. Split out from create() because `run`
 // needs the same document and the same failure messages.
@@ -475,6 +499,12 @@ func create(a *cli.Args, e cli.Emit) (int, error) {
 	if err != nil {
 		return exitFor(err), err
 	}
+	// The primary process (#33) is recorded, not started: `start` launches it. The cmd
+	// should be the target directly, not a `cmd /c` wrapper -- Kill terminates one process,
+	// not a tree (findings.md), and a wrapper's children would survive a later kill.
+	if cmd := a.Option("--cmd"); cmd != "" {
+		s.Primary = &primaryState{Cmd: cmd}
+	}
 
 	c, err := hcsshim.CreateContainer(id, cfg)
 	if err != nil {
@@ -522,7 +552,8 @@ func start(a *cli.Args, e cli.Emit) (int, error) {
 	if err != nil {
 		return cli.Usage, err
 	}
-	if _, err := readState(st, id); err != nil {
+	s, err := readState(st, id)
+	if err != nil {
 		return exitFor(err), err
 	}
 	c, err := hcsshim.OpenContainer(id)
@@ -535,10 +566,75 @@ func start(a *cli.Args, e cli.Emit) (int, error) {
 	if err := c.Start(); err != nil {
 		return cli.Failed, fmt.Errorf("Start: %w", err)
 	}
-	e.Result(map[string]any{"ok": true, "command": "container start", "id": id}, func() {
-		fmt.Printf("started %s\n", id)
+
+	if s.Primary == nil {
+		e.Result(map[string]any{"ok": true, "command": "container start", "id": id}, func() {
+			fmt.Printf("started %s\n", id)
+		})
+		return cli.OK, nil
+	}
+
+	// A primary process is recorded (#33): launch it and stay attached as its pump. This
+	// invocation owns the pipes -- HCS gives them out once, to the creator, unrecoverably --
+	// so it tees everything to primary.log, where `container logs` can follow from any fresh
+	// invocation, and records the exit in state.json when the process ends. If this pump
+	// dies with its caller, the workload keeps running; the log truncates at that moment and
+	// `logs` reports the pump's death rather than pretending the file is complete.
+	logFile, err := os.Create(primaryLogPath(st, id))
+	if err != nil {
+		return cli.Failed, fmt.Errorf("primary.log: %w", err)
+	}
+	defer logFile.Close()
+	e.Progress("primary: %s", s.Primary.Cmd)
+
+	out := &captured{json: e.JSON}
+	outSink, errSink, closeFraming := guestSinks(e, out)
+	lw := &lockedWriter{w: logFile}
+	outSink, errSink = io.MultiWriter(lw, outSink), io.MultiWriter(lw, errSink)
+
+	onStart := func(pid int) {
+		s.Primary.Pid = pid
+		s.Primary.PumpPid = os.Getpid()
+		s.Primary.StartedUTC = time.Now().UTC().Format(time.RFC3339)
+		if werr := writeState(st, s); werr != nil {
+			// Bookkeeping must not kill a started workload; `logs` degrades honestly.
+			e.Progress("recording primary pid: %v", werr)
+		}
+	}
+	res, execErr := execIn(c, e, s.Primary.Cmd, "", "", nil, 0, outSink, errSink, onStart)
+	closeFraming()
+
+	s.Primary.PumpPid = 0
+	s.Primary.EndedUTC = time.Now().UTC().Format(time.RFC3339)
+	if execErr == nil {
+		s.Primary.ExitCode = &res.ExitCode
+	}
+	if werr := writeState(st, s); werr != nil {
+		e.Progress("recording primary exit: %v", werr)
+	}
+	if execErr != nil {
+		return cli.Failed, execErr
+	}
+	e.Result(map[string]any{
+		"ok": true, "command": "container start", "id": id,
+		"primary": map[string]any{"cmd": s.Primary.Cmd, "pid": res.Pid, "exitCode": res.ExitCode},
+	}, func() {
+		fmt.Printf("started %s; primary pid %d exited %d\n", id, res.Pid, res.ExitCode)
 	})
 	return cli.OK, nil
+}
+
+// lockedWriter serializes two concurrent guest streams into one log file, so lines from
+// stdout and stderr cannot interleave mid-chunk.
+type lockedWriter struct {
+	mu sync.Mutex
+	w  io.Writer
+}
+
+func (l *lockedWriter) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.w.Write(p)
 }
 
 func stop(a *cli.Args, e cli.Emit) (int, error) {
@@ -653,7 +749,9 @@ type execResult struct {
 // execIn launches a process, streams its output, and returns its exit code. Stdin is closed
 // immediately: nothing here is interactive, and a process blocked on a stdin that never closes
 // looks exactly like a hung container. A non-zero timeout kills the process on expiry.
-func execIn(c hcsshim.Container, e cli.Emit, cmdline, cwd, user string, env map[string]string, timeout time.Duration, outSink, errSink io.Writer) (execResult, error) {
+// onStart, when non-nil, runs with the guest pid as soon as the process exists -- the
+// primary-process path records it in state.json while the process is still running (#33).
+func execIn(c hcsshim.Container, e cli.Emit, cmdline, cwd, user string, env map[string]string, timeout time.Duration, outSink, errSink io.Writer, onStart func(pid int)) (execResult, error) {
 	var res execResult
 	res.ExitCode = -1
 	pc := &hcsshim.ProcessConfig{
@@ -671,6 +769,9 @@ func execIn(c hcsshim.Container, e cli.Emit, cmdline, cwd, user string, env map[
 	}
 	defer p.Close()
 	res.Pid = p.Pid()
+	if onStart != nil {
+		onStart(res.Pid)
+	}
 
 	stdin, stdout, stderr, err := p.Stdio()
 	if err != nil {
@@ -768,7 +869,7 @@ func exec(a *cli.Args, e cli.Emit) (int, error) {
 
 	out := &captured{json: e.JSON}
 	outSink, errSink, closeFraming := guestSinks(e, out)
-	res, err := execIn(c, e, cmdline, a.Option("--cwd"), a.Option("--user"), env, timeout, outSink, errSink)
+	res, err := execIn(c, e, cmdline, a.Option("--cwd"), a.Option("--user"), env, timeout, outSink, errSink, nil)
 	closeFraming()
 	if err != nil {
 		return cli.Failed, err
@@ -938,7 +1039,7 @@ func run(a *cli.Args, e cli.Emit) (int, error) {
 
 	out := &captured{json: e.JSON}
 	outSink, errSink, closeFraming := guestSinks(e, out)
-	res, execErr := execIn(c, e, cmdline, a.Option("--cwd"), a.Option("--user"), env, timeout, outSink, errSink)
+	res, execErr := execIn(c, e, cmdline, a.Option("--cwd"), a.Option("--user"), env, timeout, outSink, errSink, nil)
 	closeFraming()
 	cleanup()
 	if execErr != nil {
@@ -1330,6 +1431,132 @@ func trunc(s string, n int) string {
 		return s
 	}
 	return s[:n-1] + "~"
+}
+
+// -- logs --------------------------------------------------------------------------------
+
+// logsCmd reads a primary process's retained output from a fresh invocation (#33). It reads
+// the file the pump wrote, never the pipes -- those died with their creator. Status comes
+// from state.json and is reported honestly: running (pump alive), exited (code recorded), or
+// pump dead (the log may be truncated and the exit unrecorded).
+func logsCmd(a *cli.Args, e cli.Emit) (int, error) {
+	if err := a.RejectUnknown("--id", "--ref", "--store", "--follow"); err != nil {
+		return cli.Usage, err
+	}
+	st, id, err := resolve(a)
+	if err != nil {
+		return cli.Usage, err
+	}
+	s, err := readState(st, id)
+	if err != nil {
+		return exitFor(err), err
+	}
+	if s.Primary == nil {
+		return cli.Usage, cli.Usagef("no primary process recorded for %q -- `container create --cmd` records one", id)
+	}
+
+	lp := primaryLogPath(st, id)
+	status := func(s state) string {
+		switch {
+		case s.Primary.ExitCode != nil:
+			return "exited"
+		case s.Primary.PumpPid != 0 && pidAlive(s.Primary.PumpPid):
+			return "running"
+		case s.Primary.Pid == 0:
+			return "never started"
+		default:
+			return "pump dead -- output may be truncated, exit unrecorded"
+		}
+	}
+
+	if !a.Flag("--follow") {
+		b, err := os.ReadFile(lp)
+		if err != nil && !os.IsNotExist(err) {
+			return cli.Failed, err
+		}
+		e.Result(map[string]any{
+			"ok": true, "command": "container logs", "id": id,
+			"primary": s.Primary, "status": status(s), "log": string(b),
+		}, func() {
+			fmt.Print(string(b))
+		})
+		return cli.OK, nil
+	}
+
+	// Follow: emit the file as it grows, re-reading state each pass to notice the exit (or
+	// the pump's death). Lines go to stderr in JSON mode -- stdout still carries exactly one
+	// document, at the end -- and are framed under --stream-json as {"stream":"log"}: the
+	// file merges guest stdout and stderr, so per-stream attribution is gone by design here.
+	f, err := os.Open(lp)
+	if err != nil && !os.IsNotExist(err) {
+		return cli.Failed, err
+	}
+	emit := func(chunk []byte) {
+		if len(chunk) == 0 {
+			return
+		}
+		if e.JSON {
+			if e.StreamJSON {
+				for _, line := range strings.Split(strings.TrimRight(string(chunk), "\r\n"), "\n") {
+					e.StreamLogLine(strings.TrimSuffix(line, "\r"))
+				}
+			} else {
+				os.Stderr.Write(chunk)
+			}
+			return
+		}
+		os.Stdout.Write(chunk)
+	}
+	buf := make([]byte, 64*1024)
+	for {
+		if f == nil {
+			f, _ = os.Open(lp)
+		}
+		drained := false
+		for f != nil {
+			n, rerr := f.Read(buf)
+			emit(buf[:n])
+			if rerr != nil {
+				drained = true
+				break
+			}
+		}
+		if drained || f == nil {
+			cur, rerr := readState(st, id)
+			if rerr != nil || cur.Primary == nil {
+				return cli.Failed, fmt.Errorf("state disappeared while following: %v", rerr)
+			}
+			if st := status(cur); st != "running" {
+				if f != nil {
+					f.Close()
+				}
+				e.Result(map[string]any{
+					"ok": true, "command": "container logs", "id": id,
+					"primary": cur.Primary, "status": st, "followed": true,
+				}, func() {
+					fmt.Fprintf(os.Stderr, "-- %s\n", st)
+				})
+				return cli.OK, nil
+			}
+			time.Sleep(500 * time.Millisecond)
+		}
+	}
+}
+
+// pidAlive asks whether a host pid is still running. Pid reuse can, in principle, make a
+// recycled pid look like a live pump; the window is small and the failure mode is a follow
+// that waits instead of finishing -- annoying, not wrong.
+func pidAlive(pid int) bool {
+	h, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(pid))
+	if err != nil {
+		return false
+	}
+	defer windows.CloseHandle(h)
+	var code uint32
+	if err := windows.GetExitCodeProcess(h, &code); err != nil {
+		return false
+	}
+	return code == 259 // STILL_ACTIVE
 }
 
 // -- shared ------------------------------------------------------------------------------

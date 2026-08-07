@@ -145,6 +145,8 @@ var usageCases = []struct {
 	{"pid above int32", []string{"container", "kill", "--id", "a", "--pid", "2147483648"}},
 	{"size-gb above vhdx ceiling", []string{"storage", "setup-base", "--layer", `C:\Windows`, "--size-gb", "65537"}},
 	{"scratch-size above vhdx ceiling", []string{"container", "run", "--ref", "r", "--scratch-size", "65537GB"}},
+	{"logs without id", []string{"container", "logs"}},
+	{"logs unknown container", []string{"container", "logs", "--id", "zz-no-such"}},
 }
 
 func TestUsageErrorsExit64(t *testing.T) {
@@ -248,6 +250,80 @@ func TestStreamJSONTypesStderr(t *testing.T) {
 	if json.Valid([]byte(strings.SplitN(strings.TrimSpace(bare.stderr), "\n", 2)[0])) {
 		t.Fatalf("without --stream-json stderr should be bare text, got %q", bare.stderr)
 	}
+}
+
+// TestContainerLogs (#33) exercises every logs path that needs no HCS: the file and the
+// state are the whole interface, so a planted container directory covers them.
+func TestContainerLogs(t *testing.T) {
+	plant := func(t *testing.T, primary string) string {
+		t.Helper()
+		store := filepath.Join(t.TempDir(), "store")
+		dir := filepath.Join(store, "containers", "p")
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		state := `{"id":"p","ref":"r","scratch":"x","utilityVM":"y","chain":[]` + primary + `}`
+		if err := os.WriteFile(filepath.Join(dir, "state.json"), []byte(state), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return store
+	}
+
+	t.Run("no primary recorded is exit 64", func(t *testing.T) {
+		r := invoke(t, "container", "logs", "--id", "p", "--store", plant(t, ""))
+		if r.code != 64 || !strings.Contains(r.stderr, "--cmd") {
+			t.Fatalf("exit %d, stderr %q", r.code, r.stderr)
+		}
+	})
+	t.Run("exited primary: retained log and exit code from a fresh invocation", func(t *testing.T) {
+		store := plant(t, `,"primary":{"cmd":"app.exe","pid":900,"exitCode":7,"endedUtc":"2026-08-07T00:00:00Z"}`)
+		if err := os.WriteFile(filepath.Join(store, "containers", "p", "primary.log"), []byte("retained line\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		r := invoke(t, "container", "logs", "--id", "p", "--store", store, "--json")
+		if r.code != 0 {
+			t.Fatalf("exit %d\nstderr: %s", r.code, r.stderr)
+		}
+		var doc map[string]any
+		if err := json.Unmarshal([]byte(r.stdout), &doc); err != nil {
+			t.Fatal(err)
+		}
+		if doc["status"] != "exited" || doc["log"] != "retained line\n" {
+			t.Fatalf("status %v, log %q", doc["status"], doc["log"])
+		}
+		if ec := doc["primary"].(map[string]any)["exitCode"]; ec != float64(7) {
+			t.Fatalf("exitCode %v, want 7", ec)
+		}
+	})
+	t.Run("dead pump is reported, not hidden", func(t *testing.T) {
+		// 999999 is not a multiple of 4, so it can never be a live Windows pid.
+		store := plant(t, `,"primary":{"cmd":"app.exe","pid":900,"pumpPid":999999,"startedUtc":"2026-08-07T00:00:00Z"}`)
+		r := invoke(t, "container", "logs", "--id", "p", "--store", store, "--json")
+		if r.code != 0 {
+			t.Fatalf("exit %d\nstderr: %s", r.code, r.stderr)
+		}
+		var doc map[string]any
+		if err := json.Unmarshal([]byte(r.stdout), &doc); err != nil {
+			t.Fatal(err)
+		}
+		if s, _ := doc["status"].(string); !strings.Contains(s, "pump dead") {
+			t.Fatalf("status %q does not report the dead pump", s)
+		}
+	})
+	t.Run("follow of an exited primary drains and finishes", func(t *testing.T) {
+		store := plant(t, `,"primary":{"cmd":"app.exe","pid":900,"exitCode":0,"endedUtc":"2026-08-07T00:00:00Z"}`)
+		if err := os.WriteFile(filepath.Join(store, "containers", "p", "primary.log"), []byte("a\nb\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		r := invoke(t, "container", "logs", "--id", "p", "--store", store, "--follow", "--json")
+		if r.code != 0 {
+			t.Fatalf("follow did not finish cleanly: exit %d\nstderr: %s", r.code, r.stderr)
+		}
+		oneDoc(t, r.stdout, true)
+		if !strings.Contains(r.stderr, "a\nb\n") {
+			t.Fatalf("followed content missing from stderr: %q", r.stderr)
+		}
+	})
 }
 
 // Requested help and version are exit 0 with output on stdout -- unlike the usage text that

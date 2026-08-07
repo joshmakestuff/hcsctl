@@ -59,7 +59,7 @@ func run(argv []string) int {
 		}
 	}
 
-	args, err := cli.Parse(argv, "--json", "--stream-json", "--blobs", "--keep", "--force", "--writable")
+	args, err := cli.Parse(argv, "--json", "--stream-json", "--blobs", "--keep", "--force", "--writable", "--follow")
 	if err != nil {
 		e.Failure("usage", err)
 		usage()
@@ -178,12 +178,23 @@ usage: hcsctl <group> <verb> [options]
                directory into the guest over VSMB -- not a bind mount, and not Docker
                semantics; both paths drive-letter absolute. ELEVATED.
 
-  container create --ref <ref> [--id <id>] [--cpus N] [--memory-mb N] [--hostname H]
-                   [--network <name|id>] [--dns-search list] [--mount HOST:CONTAINER[:ro]]...
-                   [--scratch-size 40GB]
+  container create --ref <ref> [--id <id>] [--cmd "<cmdline>"] [--cpus N] [--memory-mb N]
+                   [--hostname H] [--network <name|id>] [--dns-search list]
+                   [--mount HOST:CONTAINER[:ro]]... [--scratch-size 40GB]
                --scratch-size grows the scratch VHD so the guest's C: is bigger than the
-               default -- anything writing real data wants this.
+               default -- anything writing real data wants this. --cmd records the primary
+               process; start launches it. Exec the target directly, not via cmd /c -- a
+               kill terminates one process, not a tree, and a wrapper's children survive.
   container start  --id <id> | --ref <ref>
+               With a recorded primary process, start launches it and stays attached as its
+               pump, teeing output to primary.log and recording the exit in state.json. The
+               pump owns the pipes -- if it dies with its caller, the workload keeps running
+               and logs reports the truncation honestly.
+  container logs   --id <id> [--follow]
+               A primary process's retained output, from any invocation -- the file the pump
+               wrote, plus status: running, exited (with code), or pump dead. --follow tails
+               until the primary exits or the pump dies. Under --stream-json, followed lines
+               are framed {"stream":"log"} (the file merges guest stdout and stderr).
   container exec   --id <id> --cmd "<cmdline>" [--cwd D] [--user U] [--env NAME=value]...
                    [--timeout 30s]
                Without --timeout, waits for the guest process forever -- that is how a
