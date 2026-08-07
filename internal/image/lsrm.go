@@ -111,7 +111,7 @@ func remove(a *cli.Args, e cli.Emit) (int, error) {
 		}
 	}
 
-	if err := os.Remove(st.RecordPath(ref)); err != nil && !os.IsNotExist(err) {
+	if err := st.RemoveRecord(ref); err != nil {
 		return cli.Failed, err
 	}
 

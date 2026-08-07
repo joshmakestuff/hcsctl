@@ -345,6 +345,25 @@ func TestFailurePath(t *testing.T) {
 		}
 		oneDoc(t, r.stdout, false)
 	})
+	t.Run("semantically invalid record cannot panic (#22)", func(t *testing.T) {
+		// Valid JSON, mismatched arrays: pre-#22 import indexed LayerDigests[i] over DiffIDs
+		// and a record like this panicked instead of erroring.
+		store := filepath.Join(t.TempDir(), "store")
+		images := filepath.Join(store, "images")
+		if err := os.MkdirAll(images, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		d := `"sha256:` + strings.Repeat("0", 64) + `"`
+		rec := `{"ref":"x","layerDigests":[],"diffIDs":[` + d + `]}`
+		if err := os.WriteFile(filepath.Join(images, "x.json"), []byte(rec), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		r := invoke(t, "image", "rm", "--ref", "x", "--store", store, "--json")
+		if r.code != 1 {
+			t.Fatalf("exit %d, want 1 (2 would be a panic)\nstderr: %s", r.code, r.stderr)
+		}
+		oneDoc(t, r.stdout, false)
+	})
 	t.Run("human mode keeps stdout empty", func(t *testing.T) {
 		r := invoke(t, "image", "rm", "--ref", "x", "--store", makeStore(t))
 		if r.code != 1 {
