@@ -1,0 +1,154 @@
+//go:build windows
+
+// Failure paths that isolate without HCS (#24). Everything here is filesystem and parsing;
+// nothing opens a compute system. The smoke harness (tools/Run-Smoke.ps1) owns the rest.
+package container
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/joshmakestuff/hcsctl/internal/cli"
+	"github.com/joshmakestuff/hcsctl/internal/store"
+)
+
+func TestLocateUVM(t *testing.T) {
+	mk := func(t *testing.T, withUVM ...bool) []string {
+		var chain []string
+		for _, u := range withUVM {
+			d := t.TempDir()
+			if u {
+				if err := os.Mkdir(filepath.Join(d, "UtilityVM"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			chain = append(chain, d)
+		}
+		return chain
+	}
+
+	t.Run("no layer carries a UtilityVM", func(t *testing.T) {
+		_, err := locateUVM(mk(t, false, false))
+		if err == nil || !strings.Contains(err.Error(), "UtilityVM") {
+			t.Fatalf("want an error naming UtilityVM, got %v", err)
+		}
+	})
+	t.Run("uppermost UtilityVM wins", func(t *testing.T) {
+		chain := mk(t, true, true) // topmost first; both carry one
+		got, err := locateUVM(chain)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := filepath.Join(chain[0], "UtilityVM"); got != want {
+			t.Fatalf("got %s, want the topmost %s", got, want)
+		}
+	})
+}
+
+func TestChainFor(t *testing.T) {
+	d1 := "sha256:" + strings.Repeat("1", 64)
+	d2 := "sha256:" + strings.Repeat("2", 64)
+	newStore := func(t *testing.T) *store.Store {
+		st, err := store.New(filepath.Join(t.TempDir(), "s"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return st
+	}
+	materialize := func(t *testing.T, st *store.Store, diffID string) {
+		if err := os.MkdirAll(filepath.Join(st.LayerPath(diffID), "Files"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	t.Run("no record is a usage error", func(t *testing.T) {
+		_, err := chainFor(newStore(t), "never/pulled:it")
+		if _, ok := err.(*cli.UsageError); !ok || !strings.Contains(err.Error(), "pull") {
+			t.Fatalf("want a usage error pointing at pull, got %v", err)
+		}
+	})
+	t.Run("unmaterialized layer is a usage error naming import", func(t *testing.T) {
+		st := newStore(t)
+		if err := st.WriteRecord("r:x", store.Record{Ref: "r:x", LayerDigests: []string{d1}, DiffIDs: []string{d1}}); err != nil {
+			t.Fatal(err)
+		}
+		_, err := chainFor(st, "r:x")
+		if _, ok := err.(*cli.UsageError); !ok || !strings.Contains(err.Error(), "import") {
+			t.Fatalf("want a usage error pointing at import, got %v", err)
+		}
+	})
+	t.Run("chain is topmost first (record order reversed)", func(t *testing.T) {
+		st := newStore(t)
+		// pull writes base first; every wclayer call wants topmost first.
+		if err := st.WriteRecord("r:x", store.Record{Ref: "r:x", LayerDigests: []string{d1, d2}, DiffIDs: []string{d1, d2}}); err != nil {
+			t.Fatal(err)
+		}
+		materialize(t, st, d1)
+		materialize(t, st, d2)
+		chain, err := chainFor(st, "r:x")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(chain) != 2 || chain[0] != st.LayerPath(d2) || chain[1] != st.LayerPath(d1) {
+			t.Fatalf("chain %v is not topmost-first for record order [d1, d2]", chain)
+		}
+	})
+}
+
+func TestParseMounts(t *testing.T) {
+	host := t.TempDir() // drive-letter absolute, exists
+	parse := func(t *testing.T, specs ...string) ([]string, error) {
+		var argv []string
+		for _, s := range specs {
+			argv = append(argv, "--mount", s)
+		}
+		a, err := cli.Parse(argv)
+		if err != nil {
+			t.Fatal(err)
+		}
+		m, err := parseMounts(a)
+		if err != nil {
+			return nil, err
+		}
+		var out []string
+		for _, d := range m {
+			ro := ""
+			if d.ReadOnly {
+				ro = ":ro"
+			}
+			out = append(out, d.HostPath+"->"+d.ContainerPath+ro)
+		}
+		return out, nil
+	}
+
+	t.Run("read-write default and ro suffix", func(t *testing.T) {
+		got, err := parse(t, host+`:C:\app`, host+`:C:\cfg:ro`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got[0] != host+`->C:\app` || got[1] != host+`->C:\cfg:ro` {
+			t.Fatalf("got %v", got)
+		}
+	})
+	t.Run("relative host is rejected", func(t *testing.T) {
+		if _, err := parse(t, `relative\p:C:\app`); err == nil {
+			t.Fatal("relative host path accepted")
+		}
+	})
+}
+
+func TestParseEnvKeepsValueAfterFirstEquals(t *testing.T) {
+	a, err := cli.Parse([]string{"--env", "CONN=Server=x;Db=y"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	env, err := parseEnv(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if env["CONN"] != "Server=x;Db=y" {
+		t.Fatalf("value mangled: %q", env["CONN"])
+	}
+}

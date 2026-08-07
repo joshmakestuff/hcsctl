@@ -32,26 +32,28 @@ rather than a silently ignored setting. Repeatability is opted into per option.
 **Verbs land with something that ran.** A group gets added because it was exercised against a real
 host, not because the function exists.
 
-## Smoke testing, which is manual
+## Smoke testing, which is manual and a release gate
 
-No CI yet — see issue #3. Most verbs need elevation, so write a transcript script and launch it
-elevated:
-
-```powershell
-Start-Transcript -Path (Join-Path $PSScriptRoot 'out.txt') -Force
-Set-Location 'E:\source\repos\hcs\hcsctl'
-& .\hcsctl.exe container run --ref $ref --id smoke1 --store $store
-"exit: $LASTEXITCODE"
-Stop-Transcript
-```
+CI (the `contract` workflow, on PRs and manual dispatch) proves "builds, starts, honours the
+contract" — never "works". Works is the elevated smoke harness, **`tools\Run-Smoke.ps1`** (#24):
+pull → import → layer mount (merged view, write isolation) → container run (guest output,
+endpoint lifecycle) → the #19 injected-failure transaction → create/rm → cleanup, every step
+asserted by postcondition. It records the host, commit and image inputs, and retains a
+transcript under `smoke\` for attaching to the release or issue.
 
 ```powershell
-Start-Process pwsh -Verb RunAs -Wait -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File',$script
+Start-Process pwsh -Verb RunAs -Wait -ArgumentList '-NoProfile','-File','tools\Run-Smoke.ps1'
+# or with Windows sudo:  sudo pwsh -NoProfile -File tools\Run-Smoke.ps1
 ```
+
+**Execution model: run it before tagging a release and attach the transcript.** The default is
+a fresh store with a full pull+import; quick mode reuses the working store and skips
+acquisition: `-Store E:\hcsctl-store -SkipAcquire`.
 
 `E:\hcsctl-store` is the working store; importing is slow, so reuse it.
-`servercore:ltsc2022` and `dotnet/runtime:8.0-nanoserver-ltsc2022` are already materialized and
-both carry a `UtilityVM`. Clean up with `container rm` / `layer unmount`, never `Remove-Item`.
+`servercore:ltsc2022`, `nanoserver:ltsc2025` and `dotnet/runtime:8.0-nanoserver-ltsc2022` are
+already materialized and carry a `UtilityVM`. Clean up with `container rm` / `layer unmount`,
+never `Remove-Item`.
 
 ### Three PowerShell traps that have each cost an hour
 
