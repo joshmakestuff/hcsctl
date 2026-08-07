@@ -310,6 +310,13 @@ func (w *StreamWriter) emit(line []byte) {
 	w.e.streamLine(map[string]string{"stream": w.stream, "data": strings.TrimSuffix(string(line), "\r")})
 }
 
+// StreamLogLine frames one retained-log line (#33's `container logs --follow`). The stream
+// is "log", not "stdout"/"stderr": primary.log merges the guest's two streams, so per-stream
+// attribution is gone by design once output is replayed from the file.
+func (e Emit) StreamLogLine(line string) {
+	e.streamLine(map[string]string{"stream": "log", "data": line})
+}
+
 // Result prints the command's single result: the document in JSON mode, human() otherwise.
 func (e Emit) Result(doc any, human func()) {
 	if e.JSON {

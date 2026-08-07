@@ -36,9 +36,10 @@ hcsctl layer ls
 hcsctl container run    --ref <ref> [--cmd "..."] [--env NAME=value]... [--network <name|id>]
                         [--mount HOST:CONTAINER[:ro]]... [--timeout 30s] [--cpus N]
                         [--memory-mb N] [--scratch-size 40GB] [--keep]   # elevated; one-shot
-hcsctl container create --ref <ref> [--cpus N] [--memory-mb N] [--hostname H]
+hcsctl container create --ref <ref> [--cmd "..."] [--cpus N] [--memory-mb N] [--hostname H]
                         [--network <name|id>] [--mount ...] [--scratch-size 40GB]
-hcsctl container start  --id <id>
+hcsctl container start  --id <id>                    # launches a recorded --cmd and pumps it
+hcsctl container logs   --id <id> [--follow]         # its retained output, from any invocation
 hcsctl container exec   --id <id> --cmd "..." [--cwd D] [--user U] [--env NAME=value]...
                         [--timeout 30s]
 hcsctl container kill   --id <id> --pid <pid>        # one process, not a tree

@@ -120,6 +120,20 @@ Assert "rm removed the container directory" (-not (Test-Path (Join-Path $Store "
 $cs = Get-ComputeProcess -ErrorAction SilentlyContinue | Where-Object Id -eq $id
 Assert "no compute system named $id remains" ($null -eq $cs)
 
+# -- primary process (#33): recorded, pumped, retained, reported --------------------------
+"== primary process lifecycle =="
+& $bin container create --ref $Ref --id $id --store $Store --cmd 'cmd /c echo smoke-primary-line' 2>&1 | Out-Null
+Assert "create with --cmd exits 0" ($LASTEXITCODE -eq 0)
+& $bin container start --id $id --store $Store 2>&1 | Out-Null
+Assert "start (as pump) exits 0" ($LASTEXITCODE -eq 0)
+$logsJson = (& $bin container logs --id $id --store $Store --json 2>$null) | Out-String
+Assert "logs exits 0 from a fresh invocation" ($LASTEXITCODE -eq 0)
+$logsDoc = $logsJson | ConvertFrom-Json
+Assert "retained output survives the pump" ($logsDoc.log -match 'smoke-primary-line')
+Assert "primary exit code recorded" ($logsDoc.status -eq 'exited' -and $logsDoc.primary.exitCode -eq 0)
+& $bin container rm --id $id --store $Store --force 2>&1 | Out-Null
+Assert "primary container rm exits 0" ($LASTEXITCODE -eq 0)
+
 # -- image rm (fresh stores only: the working store is a shared fixture) ------------------
 if (-not $SkipAcquire) {
     "== image rm =="
