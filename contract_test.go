@@ -308,6 +308,24 @@ func TestSuccessPath(t *testing.T) {
 		}
 		oneDoc(t, r.stdout, true)
 	})
+	t.Run("info carries tool and contract versions (#29)", func(t *testing.T) {
+		r := invoke(t, "info", "--store", store, "--json")
+		var doc map[string]any
+		if err := json.Unmarshal([]byte(r.stdout), &doc); err != nil {
+			t.Fatal(err)
+		}
+		tool, _ := doc["toolVersion"].(string)
+		contract, _ := doc["contractVersion"].(string)
+		if tool == "" {
+			t.Fatal("toolVersion missing or empty -- a consumer's preflight has nothing to log")
+		}
+		if contract == "" {
+			t.Fatal("contractVersion missing or empty -- a consumer's preflight has nothing to check")
+		}
+		if host, _ := doc["version"].(string); host == tool {
+			t.Fatalf("toolVersion %q equals the host OS version -- the two must not be confusable", tool)
+		}
+	})
 	t.Run("human mode puts no document on stdout", func(t *testing.T) {
 		r := invoke(t, "image", "ls", "--store", store)
 		if r.code != 0 {
