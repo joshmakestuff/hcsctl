@@ -131,6 +131,14 @@ var usageCases = []struct {
 	{"timeout not positive", []string{"container", "exec", "--id", "a", "--cmd", "c", "--timeout", "-3s"}},
 	{"kill without pid", []string{"container", "kill", "--id", "a"}},
 	{"kill pid not a number", []string{"container", "kill", "--id", "a", "--pid", "abc"}},
+	{"id with traversal", []string{"container", "start", "--id", `..\..\x`}},
+	{"id rooted", []string{"container", "start", "--id", `C:\evil`}},
+	{"id with separator", []string{"container", "exec", "--id", `a\b`, "--cmd", "c"}},
+	{"id reserved device name", []string{"container", "rm", "--id", "NUL"}},
+	{"id trailing dot", []string{"container", "create", "--ref", "r", "--id", "x."}},
+	{"id derived from traversal ref", []string{"container", "run", "--ref", "..", "--cmd", "c"}},
+	{"layer mount id with separator", []string{"layer", "mount", "--ref", "r", "--id", `a\b`}},
+	{"layer unmount id dotdot", []string{"layer", "unmount", "--id", ".."}},
 }
 
 func TestUsageErrorsExit64(t *testing.T) {
@@ -174,6 +182,9 @@ func TestUsageErrorAttemptsNothing(t *testing.T) {
 		{"container", "run", "--ref", "r", "--dns-search", "d"},
 		{"container", "run", "--ref", "r", "--cpus", "two"},
 		{"container", "run", "--ref", "r", "--mount", `bad-mount`},
+		{"container", "start", "--id", `..\..\x`},
+		{"container", "rm", "--id", `C:\evil`, "--force"},
+		{"layer", "unmount", "--id", ".."},
 	}
 	for _, args := range cases {
 		t.Run(strings.Join(args, " "), func(t *testing.T) {
@@ -187,6 +198,48 @@ func TestUsageErrorAttemptsNothing(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestIDValidationIsWired plants a real target at the traversal destination and asserts the
+// command exits 64 with the target untouched. This discriminates wiring from mere existence of
+// the validator: the plain usageCases for bad ids would pass even without validation (they fall
+// into "no container named" / "no mount named", also 64). Before the fix, these two commands
+// found their traversal target -- the planted state parsed, the scratch stat succeeded -- and
+// proceeded toward destruction: container rm's os.RemoveAll would have deleted the store root.
+func TestIDValidationIsWired(t *testing.T) {
+	t.Run("container rm --id .. cannot reach planted state", func(t *testing.T) {
+		store := filepath.Join(t.TempDir(), "store")
+		if err := os.MkdirAll(filepath.Join(store, "containers"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		// statePath(store, "..") resolves to store\state.json -- plant a valid record there.
+		state := `{"id":"..","ref":"r","scratch":"x","utilityVM":"y","chain":[]}`
+		if err := os.WriteFile(filepath.Join(store, "state.json"), []byte(state), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		r := invoke(t, "container", "rm", "--id", "..", "--force", "--store", store)
+		if r.code != 64 {
+			t.Fatalf("exit %d, want 64\nstderr: %s", r.code, r.stderr)
+		}
+		if _, err := os.Stat(filepath.Join(store, "state.json")); err != nil {
+			t.Fatalf("planted state was consumed or removed: %v", err)
+		}
+	})
+	t.Run("layer unmount --id .. cannot reach the store root", func(t *testing.T) {
+		store := filepath.Join(t.TempDir(), "store")
+		if err := os.MkdirAll(filepath.Join(store, "scratch"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		// scratchPath(store, "..") resolves to the store root, which exists -- without
+		// validation the existence check passes and DestroyLayer runs against it.
+		r := invoke(t, "layer", "unmount", "--id", "..", "--store", store)
+		if r.code != 64 {
+			t.Fatalf("exit %d, want 64\nstderr: %s", r.code, r.stderr)
+		}
+		if _, err := os.Stat(filepath.Join(store, "scratch")); err != nil {
+			t.Fatalf("store scratch directory is gone: %v", err)
+		}
+	})
 }
 
 func TestSuccessPath(t *testing.T) {

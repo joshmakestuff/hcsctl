@@ -118,6 +118,47 @@ func (a *Args) RejectUnknown(known ...string) error {
 	return nil
 }
 
+// reservedNames are the Win32 device names that resolve regardless of directory. The check is
+// against the part before the first dot, because "CON.txt" names the same device "CON" does.
+var reservedNames = map[string]bool{
+	"CON": true, "PRN": true, "AUX": true, "NUL": true,
+	"COM1": true, "COM2": true, "COM3": true, "COM4": true, "COM5": true,
+	"COM6": true, "COM7": true, "COM8": true, "COM9": true,
+	"LPT1": true, "LPT2": true, "LPT3": true, "LPT4": true, "LPT5": true,
+	"LPT6": true, "LPT7": true, "LPT8": true, "LPT9": true,
+}
+
+// ValidateID rejects an id that is not a safe leaf name. IDs are joined into store paths that
+// later reach DestroyLayer and os.RemoveAll -- operations that commonly run elevated -- so
+// anything that could escape the intended subtree (separators, traversal, rooted paths) or
+// alias a different name (reserved device names; trailing dots and spaces, which Windows
+// strips) is exit 64 before any path is built. Applies to derived ids too: a ref is as
+// caller-controlled as an id.
+func ValidateID(id string) error {
+	if id == "" {
+		return Usagef("id is empty")
+	}
+	if id == "." || id == ".." {
+		return Usagef("id %q is not a name", id)
+	}
+	if i := strings.IndexAny(id, `/\:*?"<>|`); i >= 0 {
+		return Usagef("id %q contains %q -- an id is a single name, not a path", id, id[i:i+1])
+	}
+	for _, r := range id {
+		if r < 0x20 || r == 0x7f {
+			return Usagef("id contains a control character")
+		}
+	}
+	if strings.HasPrefix(id, " ") || strings.HasSuffix(id, " ") || strings.HasSuffix(id, ".") {
+		return Usagef("id %q begins or ends with a space or dot, which Windows strips", id)
+	}
+	base, _, _ := strings.Cut(id, ".")
+	if reservedNames[strings.ToUpper(base)] {
+		return Usagef("id %q is a Windows reserved device name", id)
+	}
+	return nil
+}
+
 // ParseSize turns a human size -- "40GB", "40960MB" -- into bytes. The unit is required:
 // a bare number is ambiguous enough to be a mistake, and this is used for disk sizes where
 // the wrong guess costs tens of gigabytes.

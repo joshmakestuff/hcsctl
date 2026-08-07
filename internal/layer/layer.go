@@ -57,6 +57,24 @@ func idFor(ref string) string {
 	return strings.NewReplacer("/", "_", ":", "_", "@", "_", "\\", "_").Replace(ref)
 }
 
+// resolveID is the only way mount and unmount obtain an id; validation lives here rather than
+// at call sites, so a future verb cannot forget it -- an unvalidated id reaches DestroyLayer
+// on the elevated path (`--id ..` would name the store root).
+func resolveID(a *cli.Args) (string, error) {
+	id := a.Option("--id")
+	if id == "" {
+		if ref := a.Option("--ref"); ref != "" {
+			id = idFor(ref)
+		} else {
+			return "", cli.Usagef("--id or --ref is required")
+		}
+	}
+	if err := cli.ValidateID(id); err != nil {
+		return "", err
+	}
+	return id, nil
+}
+
 // chainFor resolves a reference to its materialized layer directories, topmost first, which is
 // the order every wclayer call wants for parentLayerPaths.
 func chainFor(st *store.Store, ref string) ([]string, error) {
@@ -109,9 +127,9 @@ func mount(a *cli.Args, e cli.Emit) (int, error) {
 	if err != nil {
 		return cli.Failed, err
 	}
-	id := a.Option("--id")
-	if id == "" {
-		id = idFor(ref)
+	id, err := resolveID(a)
+	if err != nil {
+		return cli.Usage, err
 	}
 
 	chain, err := chainFor(st, ref)
@@ -187,13 +205,9 @@ func unmount(a *cli.Args, e cli.Emit) (int, error) {
 	if err != nil {
 		return cli.Failed, err
 	}
-	id := a.Option("--id")
-	if id == "" {
-		if ref := a.Option("--ref"); ref != "" {
-			id = idFor(ref)
-		} else {
-			return cli.Usage, cli.Usagef("--id or --ref is required")
-		}
+	id, err := resolveID(a)
+	if err != nil {
+		return cli.Usage, err
 	}
 	sp := scratchPath(st, id)
 	if _, err := os.Stat(sp); err != nil {

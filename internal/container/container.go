@@ -139,6 +139,21 @@ func idFor(ref string) string {
 	return strings.NewReplacer("/", "_", ":", "_", "@", "_", "\\", "_").Replace(ref)
 }
 
+// newID is the only way create and run obtain an id; resolve is its counterpart for verbs
+// acting on an existing container. Validation lives in these two functions rather than at
+// call sites, so a future verb cannot forget it -- ids reach DestroyLayer and os.RemoveAll,
+// commonly elevated.
+func newID(a *cli.Args, ref string) (string, error) {
+	id := a.Option("--id")
+	if id == "" {
+		id = idFor(ref)
+	}
+	if err := cli.ValidateID(id); err != nil {
+		return "", err
+	}
+	return id, nil
+}
+
 // -- layer chain -------------------------------------------------------------------------
 
 // chainFor resolves a reference to its materialized layer directories, topmost first, which is
@@ -459,9 +474,9 @@ func create(a *cli.Args, e cli.Emit) (int, error) {
 	if err != nil {
 		return cli.Failed, err
 	}
-	id := a.Option("--id")
-	if id == "" {
-		id = idFor(ref)
+	id, err := newID(a, ref)
+	if err != nil {
+		return cli.Usage, err
 	}
 
 	cfg, s, err := buildConfig(a, e, st, id, ref)
@@ -827,9 +842,9 @@ func run(a *cli.Args, e cli.Emit) (int, error) {
 	if err != nil {
 		return cli.Failed, err
 	}
-	id := a.Option("--id")
-	if id == "" {
-		id = idFor(ref)
+	id, err := newID(a, ref)
+	if err != nil {
+		return cli.Usage, err
 	}
 	cmdline := a.Option("--cmd")
 	if cmdline == "" {
@@ -1277,7 +1292,8 @@ func trunc(s string, n int) string {
 // -- shared ------------------------------------------------------------------------------
 
 // resolve accepts --id or --ref for every verb that acts on an existing container, so a caller
-// that created one by reference never has to know how the id was derived.
+// that created one by reference never has to know how the id was derived. Together with newID
+// it is the only producer of ids, which is why validation lives here.
 func resolve(a *cli.Args) (*store.Store, string, error) {
 	st, err := store.New(a.Option("--store"))
 	if err != nil {
@@ -1290,6 +1306,9 @@ func resolve(a *cli.Args) (*store.Store, string, error) {
 		} else {
 			return nil, "", cli.Usagef("--id or --ref is required")
 		}
+	}
+	if err := cli.ValidateID(id); err != nil {
+		return nil, "", err
 	}
 	return st, id, nil
 }
