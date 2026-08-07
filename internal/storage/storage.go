@@ -280,9 +280,8 @@ func chainFor(st *store.Store, ref string) ([]string, error) {
 		}
 		return nil, err
 	}
-	if len(rec.DiffIDs) == 0 {
-		return nil, fmt.Errorf("record for %s lists no layers", ref)
-	}
+	// Structural soundness (non-empty, matched arrays, digest syntax) is ReadRecord's
+	// guarantee -- one boundary, not a twin check here (#22).
 	var chain []string // topmost first
 	for _, d := range rec.DiffIDs {
 		p := st.LayerPath(d)

@@ -9,9 +9,13 @@
 package store
 
 import (
+	"crypto/sha256"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
 
@@ -52,9 +56,19 @@ func (s *Store) LayerPath(diffID string) string {
 
 func (s *Store) ImagesDir() string { return filepath.Join(s.Root, "images") }
 
-// RecordPath sanitizes the reference into a filename. Collisions are possible in principle;
-// this is a local store keyed by what the user typed, not a content-addressed index.
+// RecordPath keys a record by the sanitized reference plus a short hash of the raw one, so
+// distinct references cannot share a file -- "a/b" and "a_b" sanitized identically before
+// #22. The sanitized half keeps the directory greppable; the hash half makes the key
+// unambiguous.
 func (s *Store) RecordPath(ref string) string {
+	safe := strings.NewReplacer("/", "_", ":", "_", "@", "_", "\\", "_").Replace(ref)
+	h := sha256.Sum256([]byte(ref))
+	return filepath.Join(s.ImagesDir(), fmt.Sprintf("%s-%x.json", safe, h[:8]))
+}
+
+// legacyRecordPath is the pre-#22 ambiguous key. Stores written before the change stay
+// readable through it: reads migrate a legacy record forward, writes and removes cover both.
+func (s *Store) legacyRecordPath(ref string) string {
 	safe := strings.NewReplacer("/", "_", ":", "_", "@", "_", "\\", "_").Replace(ref)
 	return filepath.Join(s.ImagesDir(), safe+".json")
 }
@@ -67,16 +81,98 @@ func (s *Store) WriteRecord(ref string, r Record) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(s.RecordPath(ref), b, 0o644)
+	if err := os.WriteFile(s.RecordPath(ref), b, 0o644); err != nil {
+		return err
+	}
+	// This write supersedes any record under the old ambiguous name; removing it keeps ls
+	// from listing the same reference twice.
+	if lp := s.legacyRecordPath(ref); lp != s.RecordPath(ref) {
+		_ = os.Remove(lp)
+	}
+	return nil
 }
 
+// RemoveRecord removes a reference's record under both keys. Absence is not an error -- the
+// caller decides what a missing record means.
+func (s *Store) RemoveRecord(ref string) error {
+	if err := os.Remove(s.RecordPath(ref)); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	if err := os.Remove(s.legacyRecordPath(ref)); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
+// ReadRecord is the validation boundary for persisted image metadata (#22): every consumer
+// indexes LayerDigests alongside DiffIDs and joins digests into store paths, so a record
+// that reads back successfully is guaranteed structurally sound. A missing record surfaces
+// as os.IsNotExist, which callers turn into "pull it first".
 func (s *Store) ReadRecord(ref string) (Record, error) {
+	r, err := s.readRecordFile(s.RecordPath(ref))
+	if err == nil || !os.IsNotExist(err) {
+		return r, err
+	}
+	notExist := err
+
+	lp := s.legacyRecordPath(ref)
+	lr, lerr := s.readRecordFile(lp)
+	if lerr != nil {
+		if os.IsNotExist(lerr) {
+			return Record{}, notExist
+		}
+		return Record{}, lerr
+	}
+	// The legacy key was ambiguous: two accepted references could sanitize to one filename.
+	// A legacy record is only trusted for the reference it says it belongs to.
+	if lr.Ref != ref {
+		return Record{}, fmt.Errorf("record %s belongs to %q, not %q (the old record key was ambiguous) -- re-pull %s", lp, lr.Ref, ref, ref)
+	}
+	// Migrate forward, best-effort: the read succeeds either way.
+	_ = os.Rename(lp, s.RecordPath(ref))
+	return lr, nil
+}
+
+func (s *Store) readRecordFile(path string) (Record, error) {
 	var r Record
-	b, err := os.ReadFile(s.RecordPath(ref))
+	b, err := os.ReadFile(path)
 	if err != nil {
 		return r, err
 	}
-	return r, json.Unmarshal(b, &r)
+	if err := json.Unmarshal(b, &r); err != nil {
+		return r, fmt.Errorf("record %s is not valid JSON: %w -- re-pull to rewrite it", path, err)
+	}
+	if err := r.validate(); err != nil {
+		return r, fmt.Errorf("record %s: %w -- re-pull to rewrite it", path, err)
+	}
+	return r, nil
+}
+
+// digestRe is exactly what pull writes. Nothing that matches it can escape the store when
+// joined into a blob or layer path -- no separators, no traversal, fixed length.
+var digestRe = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+
+func (r Record) validate() error {
+	if r.Ref == "" {
+		return errors.New("has no ref")
+	}
+	if len(r.DiffIDs) == 0 {
+		return errors.New("lists no layers")
+	}
+	if len(r.LayerDigests) != len(r.DiffIDs) {
+		return fmt.Errorf("lists %d layerDigests but %d diffIDs", len(r.LayerDigests), len(r.DiffIDs))
+	}
+	for _, d := range r.LayerDigests {
+		if !digestRe.MatchString(d) {
+			return fmt.Errorf("malformed layer digest %q", d)
+		}
+	}
+	for _, d := range r.DiffIDs {
+		if !digestRe.MatchString(d) {
+			return fmt.Errorf("malformed diffID %q", d)
+		}
+	}
+	return nil
 }
 
 // Records lists every record in the store, newest first is not attempted -- callers sort.
@@ -103,6 +199,10 @@ func (s *Store) Records() ([]Record, error) {
 		var r Record
 		if err := json.Unmarshal(b, &r); err != nil {
 			out = append(out, Record{Ref: e.Name() + " (corrupt)"})
+			continue
+		}
+		if err := r.validate(); err != nil {
+			out = append(out, Record{Ref: fmt.Sprintf("%s (invalid: %v)", e.Name(), err)})
 			continue
 		}
 		out = append(out, r)
