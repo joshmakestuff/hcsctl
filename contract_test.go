@@ -139,6 +139,12 @@ var usageCases = []struct {
 	{"id derived from traversal ref", []string{"container", "run", "--ref", "..", "--cmd", "c"}},
 	{"layer mount id with separator", []string{"layer", "mount", "--ref", "r", "--id", `a\b`}},
 	{"layer unmount id dotdot", []string{"layer", "unmount", "--id", ".."}},
+	{"cpus above uint32", []string{"container", "run", "--ref", "r", "--cpus", "4294967296"}},
+	{"cpus overflows uint64", []string{"container", "run", "--ref", "r", "--cpus", "18446744073709551617"}},
+	{"memory-mb above int64", []string{"container", "run", "--ref", "r", "--memory-mb", "9223372036854775808"}},
+	{"pid above int32", []string{"container", "kill", "--id", "a", "--pid", "2147483648"}},
+	{"size-gb above vhdx ceiling", []string{"storage", "setup-base", "--layer", `C:\Windows`, "--size-gb", "65537"}},
+	{"scratch-size above vhdx ceiling", []string{"container", "run", "--ref", "r", "--scratch-size", "65537GB"}},
 }
 
 func TestUsageErrorsExit64(t *testing.T) {
@@ -238,6 +244,49 @@ func TestIDValidationIsWired(t *testing.T) {
 		}
 		if _, err := os.Stat(filepath.Join(store, "scratch")); err != nil {
 			t.Fatalf("store scratch directory is gone: %v", err)
+		}
+	})
+}
+
+// TestNumericBoundsAreWired discriminates the bound from the fallthrough: each command would
+// exit 64 either way (the ref/container does not exist), so the assertion is on the error
+// text -- post-#21 it names the rejected option; pre-#21 it named the missing record, which
+// means the oversized value had parsed and execution had moved on.
+func TestNumericBoundsAreWired(t *testing.T) {
+	errorOf := func(t *testing.T, args ...string) string {
+		t.Helper()
+		r := invoke(t, append(args, "--json")...)
+		if r.code != 64 {
+			t.Fatalf("exit %d, want 64\nstderr: %s", r.code, r.stderr)
+		}
+		var doc map[string]any
+		if err := json.Unmarshal([]byte(r.stdout), &doc); err != nil {
+			t.Fatalf("stdout is not a document: %v", err)
+		}
+		msg, _ := doc["error"].(string)
+		return msg
+	}
+	cases := []struct {
+		name, want string
+		args       []string
+	}{
+		{"cpus", "--cpus", []string{"container", "run", "--ref", "r", "--cmd", "c", "--cpus", "4294967296"}},
+		{"memory-mb", "--memory-mb", []string{"container", "run", "--ref", "r", "--cmd", "c", "--memory-mb", "9223372036854775808"}},
+		{"pid", "--pid", []string{"container", "kill", "--id", "a", "--pid", "2147483648"}},
+		{"scratch-size", "65537GB", []string{"container", "run", "--ref", "r", "--cmd", "c", "--scratch-size", "65537GB"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if msg := errorOf(t, tc.args...); !strings.Contains(msg, tc.want) {
+				t.Fatalf("error %q does not mention %q -- the bound is not wired", msg, tc.want)
+			}
+		})
+	}
+	t.Run("size-gb", func(t *testing.T) {
+		// --layer must be an existing directory so the size check is what rejects.
+		msg := errorOf(t, "storage", "setup-base", "--layer", t.TempDir(), "--size-gb", "65537")
+		if !strings.Contains(msg, "--size-gb") {
+			t.Fatalf("error %q does not mention --size-gb -- the bound is not wired", msg)
 		}
 	})
 }

@@ -29,6 +29,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -323,13 +324,15 @@ func buildConfig(a *cli.Args, e cli.Emit, st *store.Store, id, ref string) (*hcs
 	var cpus, memoryMB uint64
 	var err error
 	if v := a.Option("--cpus"); v != "" {
-		if cpus, err = parseUint(v); err != nil {
-			return nil, s, cli.Usagef("--cpus must be a positive integer, got %q", v)
+		// ProcessorCount is a uint32 in the config document.
+		if cpus, err = cli.ParseUint(v, math.MaxUint32); err != nil {
+			return nil, s, cli.Usagef("--cpus %v", err)
 		}
 	}
 	if v := a.Option("--memory-mb"); v != "" {
-		if memoryMB, err = parseUint(v); err != nil {
-			return nil, s, cli.Usagef("--memory-mb must be a positive integer, got %q", v)
+		// MemoryMaximumInMB is an int64 in the config document.
+		if memoryMB, err = cli.ParseUint(v, math.MaxInt64); err != nil {
+			return nil, s, cli.Usagef("--memory-mb %v", err)
 		}
 	}
 	mounts, err := parseMounts(a)
@@ -443,23 +446,6 @@ func buildConfig(a *cli.Args, e cli.Emit, st *store.Store, id, ref string) (*hcs
 		s.Addresses = addrs
 	}
 	return cfg, s, nil
-}
-
-func parseUint(s string) (uint64, error) {
-	var n uint64
-	if s == "" {
-		return 0, fmt.Errorf("empty")
-	}
-	for _, c := range s {
-		if c < '0' || c > '9' {
-			return 0, fmt.Errorf("not a number")
-		}
-		n = n*10 + uint64(c-'0')
-	}
-	if n == 0 {
-		return 0, fmt.Errorf("zero")
-	}
-	return n, nil
 }
 
 func create(a *cli.Args, e cli.Emit) (int, error) {
@@ -931,9 +917,11 @@ func kill(a *cli.Args, e cli.Emit) (int, error) {
 	if err != nil {
 		return cli.Usage, err
 	}
-	pid, err := parseUint(v)
+	// OpenProcess takes an int and a Windows pid is a DWORD; MaxInt32 satisfies both sinks,
+	// and no real pid approaches it.
+	pid, err := cli.ParseUint(v, math.MaxInt32)
 	if err != nil {
-		return cli.Usage, cli.Usagef("--pid must be a positive integer, got %q", v)
+		return cli.Usage, cli.Usagef("--pid %v", err)
 	}
 	st, id, err := resolve(a)
 	if err != nil {
