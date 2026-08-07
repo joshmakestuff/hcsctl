@@ -110,10 +110,14 @@ $eps = (& $bin network endpoints --network $Network --json 2>$null) | Out-String
 Assert "no endpoint left behind" (-not $eps.Contains("$id-ep"))
 
 # -- create / rm: the persisted lifecycle -------------------------------------------------
-"== container create + rm =="
-& $bin container create --ref $Ref --id $id --store $Store
+"== container create + rm (with labels, #31) =="
+& $bin container create --ref $Ref --id $id --store $Store --label "owner=smoke:$PID" --label run=r1
 Assert "create exits 0" ($LASTEXITCODE -eq 0)
 Assert "create persisted state.json" (Test-Path (Join-Path $Store "containers\$id\state.json"))
+$lsRow = ((& $bin container ls --store $Store --json 2>$null) | Out-String | ConvertFrom-Json).containers | Where-Object id -eq $id
+Assert "labels round-trip through ls" ($lsRow.labels.owner -eq "smoke:$PID" -and $lsRow.labels.run -eq 'r1')
+$insp = (& $bin container inspect --id $id --store $Store --json 2>$null) | Out-String | ConvertFrom-Json
+Assert "labels round-trip through inspect" ($insp.state.labels.owner -eq "smoke:$PID")
 & $bin container rm --id $id --store $Store --force
 Assert "rm exits 0" ($LASTEXITCODE -eq 0)
 Assert "rm removed the container directory" (-not (Test-Path (Join-Path $Store "containers\$id")))

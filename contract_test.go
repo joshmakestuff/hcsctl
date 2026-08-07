@@ -147,6 +147,11 @@ var usageCases = []struct {
 	{"scratch-size above vhdx ceiling", []string{"container", "run", "--ref", "r", "--scratch-size", "65537GB"}},
 	{"logs without id", []string{"container", "logs"}},
 	{"logs unknown container", []string{"container", "logs", "--id", "zz-no-such"}},
+	{"label without equals", []string{"container", "create", "--ref", "r", "--label", "owner"}},
+	{"label empty key", []string{"container", "create", "--ref", "r", "--label", "=v"}},
+	{"label bad key", []string{"container", "create", "--ref", "r", "--label", "a b=v"}},
+	{"label reserved key", []string{"container", "create", "--ref", "r", "--label", "id=x"}},
+	{"label duplicate key", []string{"container", "run", "--ref", "r", "--label", "a=1", "--label", "a=2"}},
 }
 
 func TestUsageErrorsExit64(t *testing.T) {
@@ -193,6 +198,7 @@ func TestUsageErrorAttemptsNothing(t *testing.T) {
 		{"container", "start", "--id", `..\..\x`},
 		{"container", "rm", "--id", `C:\evil`, "--force"},
 		{"layer", "unmount", "--id", ".."},
+		{"container", "create", "--ref", "r", "--label", "a=1", "--label", "a=2"},
 	}
 	for _, args := range cases {
 		t.Run(strings.Join(args, " "), func(t *testing.T) {

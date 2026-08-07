@@ -109,6 +109,10 @@ type state struct {
 	// invocation can say what a running container is running, follow its retained output,
 	// and report its exit after the starting invocation is gone.
 	Primary *primaryState `json:"primary,omitempty"`
+	// Labels are stored and reported, never interpreted (#31): ownership and run identity
+	// are the consumer's policy, and the consumer is the only place that knows whether a
+	// pid is alive. Scavenging by proof needs an owner recorded; this is where it lives.
+	Labels map[string]string `json:"labels,omitempty"`
 }
 
 // primaryState survives the invocation that starts the process. Pipes cannot: whoever creates
@@ -335,10 +339,48 @@ func parseMounts(a *cli.Args) ([]hcsshim.MappedDir, error) {
 	return out, nil
 }
 
+// reservedLabelKeys are what a consumer sees when it flattens state.json (or the inspect
+// document) -- a label may not shadow one. Grown alongside the state struct's json tags.
+var reservedLabelKeys = map[string]bool{
+	"id": true, "ref": true, "scratch": true, "utilityVM": true, "chain": true,
+	"endpoint": true, "addresses": true, "primary": true, "labels": true,
+	"ok": true, "command": true, "state": true, "hcs": true,
+}
+
+var labelKeyRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
+
+// parseLabels turns repeated --label key=value into the stored map. hcsctl assigns labels no
+// meaning. Values are stored verbatim, empty included -- unlike --env, nothing downstream
+// deletes an empty value. A repeated key is a usage error, matching --id's duplicate rule.
+func parseLabels(a *cli.Args) (map[string]string, error) {
+	vals := a.Options("--label")
+	if len(vals) == 0 {
+		return nil, nil
+	}
+	labels := make(map[string]string, len(vals))
+	for _, v := range vals {
+		k, val, found := strings.Cut(v, "=")
+		if !found || k == "" {
+			return nil, cli.Usagef("--label wants key=value, got %q", v)
+		}
+		if !labelKeyRe.MatchString(k) {
+			return nil, cli.Usagef("--label key %q -- keys are alphanumeric with ._- after the first character", k)
+		}
+		if reservedLabelKeys[k] {
+			return nil, cli.Usagef("--label key %q collides with a field the state document already carries", k)
+		}
+		if _, dup := labels[k]; dup {
+			return nil, cli.Usagef("--label %q given more than once", k)
+		}
+		labels[k] = val
+	}
+	return labels, nil
+}
+
 // -- create ------------------------------------------------------------------------------
 
 var createOptions = []string{"--ref", "--id", "--store", "--cpus", "--memory-mb", "--hostname",
-	"--network", "--dns-search", "--mount", "--scratch-size", "--cmd"}
+	"--network", "--dns-search", "--mount", "--scratch-size", "--cmd", "--label"}
 
 // buildConfig assembles the compute system document. Split out from create() because `run`
 // needs the same document and the same failure messages.
@@ -366,6 +408,10 @@ func buildConfig(a *cli.Args, e cli.Emit, st *store.Store, id, ref string) (*hcs
 		}
 	}
 	mounts, err := parseMounts(a)
+	if err != nil {
+		return nil, s, err
+	}
+	labels, err := parseLabels(a)
 	if err != nil {
 		return nil, s, err
 	}
@@ -470,7 +516,7 @@ func buildConfig(a *cli.Args, e cli.Emit, st *store.Store, id, ref string) (*hcs
 		cfg.DNSSearchList = a.Option("--dns-search")
 	}
 
-	s = state{ID: id, Ref: ref, Scratch: sd, UVM: uvm, Chain: chain}
+	s = state{ID: id, Ref: ref, Scratch: sd, UVM: uvm, Chain: chain, Labels: labels}
 	if ep != nil {
 		s.Endpoint = ep.Id
 		s.Addresses = addrs
@@ -1208,9 +1254,10 @@ func list(a *cli.Args, e cli.Emit) (int, error) {
 	}
 
 	type row struct {
-		ID    string `json:"id"`
-		Ref   string `json:"ref"`
-		State string `json:"state"`
+		ID     string            `json:"id"`
+		Ref    string            `json:"ref"`
+		State  string            `json:"state"`
+		Labels map[string]string `json:"labels,omitempty"`
 	}
 	var rows []row
 	for _, en := range entries {
@@ -1231,7 +1278,7 @@ func list(a *cli.Args, e cli.Emit) (int, error) {
 		case hcsState == "":
 			hcsState = "created"
 		}
-		rows = append(rows, row{ID: s.ID, Ref: s.Ref, State: hcsState})
+		rows = append(rows, row{ID: s.ID, Ref: s.Ref, State: hcsState, Labels: s.Labels})
 	}
 	sort.Slice(rows, func(i, j int) bool { return rows[i].ID < rows[j].ID })
 
