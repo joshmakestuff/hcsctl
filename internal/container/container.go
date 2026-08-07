@@ -115,6 +115,13 @@ func scratchDir(st *store.Store, id string) string { return filepath.Join(contai
 func statePath(st *store.Store, id string) string { return filepath.Join(containerDir(st, id), "state.json") }
 
 func writeState(st *store.Store, s state) error {
+	// Failpoint (#19): the only way to reach a real state-write failure is after a real
+	// acquisition -- scratch, endpoint, compute system -- which no hosted runner can do. The
+	// env var makes the branch reachable from the elevated smoke path, so the cleanup below
+	// it is proven by a run rather than trusted on inspection.
+	if os.Getenv("HCSCTL_TEST_FAIL_WRITESTATE") != "" {
+		return fmt.Errorf("injected failure: HCSCTL_TEST_FAIL_WRITESTATE is set")
+	}
 	b, err := json.MarshalIndent(s, "", "  ")
 	if err != nil {
 		return err
@@ -475,13 +482,24 @@ func create(a *cli.Args, e cli.Emit) (int, error) {
 		destroy(st, s)
 		return cli.Failed, fmt.Errorf("CreateContainer: %w", err)
 	}
+
+	// State is part of the creation transaction (#19): without state.json, `rm` can never
+	// find any of this again, so a failed write tears down the compute system -- while the
+	// handle is still open -- then the endpoint and scratch. The write error stays the
+	// reported one; cleanup failures are progress, not the verdict.
+	if err := writeState(st, s); err != nil {
+		if terr := shutdown(c, e, true); terr != nil {
+			e.Progress("cleanup after failed state write: %v", terr)
+		}
+		c.Close()
+		if derr := destroy(st, s); derr != nil {
+			e.Progress("cleanup after failed state write: %v", derr)
+		}
+		return cli.Failed, fmt.Errorf("writing state: %w", err)
+	}
 	// The handle is dropped here on purpose: the compute system outlives this process and is
 	// reopened by id. state.json records what HCS does not.
 	c.Close()
-
-	if err := writeState(st, s); err != nil {
-		return cli.Failed, err
-	}
 	e.Result(map[string]any{
 		"ok": true, "command": "container create", "id": id, "ref": ref,
 		"utilityVM": s.UVM, "scratch": s.Scratch, "chain": s.Chain,
@@ -841,8 +859,13 @@ func run(a *cli.Args, e cli.Emit) (int, error) {
 	if err != nil {
 		return exitFor(err), err
 	}
+	// Same transaction rule as create (#19): buildConfig has acquired the scratch and any
+	// endpoint by now, and without state.json nothing can ever find them to clean them up.
 	if err := writeState(st, s); err != nil {
-		return cli.Failed, err
+		if derr := destroy(st, s); derr != nil {
+			e.Progress("cleanup after failed state write: %v", derr)
+		}
+		return cli.Failed, fmt.Errorf("writing state: %w", err)
 	}
 
 	c, err := hcsshim.CreateContainer(id, cfg)
