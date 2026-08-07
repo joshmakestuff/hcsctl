@@ -29,14 +29,19 @@ hcsctl image import  --ref <ref>                     # elevated
 hcsctl image ls
 hcsctl image rm      --ref <ref> [--blobs]           # elevated
 
-hcsctl layer mount   --ref <ref> [--id <id>]         # elevated; merged volume path
+hcsctl layer mount   --ref <ref> [--id <id>] [--scratch-size 40GB]   # elevated; merged volume path
 hcsctl layer unmount --id <id>                       # elevated
 hcsctl layer ls
 
-hcsctl container run    --ref <ref> [--cmd "..."] [--keep]   # elevated; one-shot
+hcsctl container run    --ref <ref> [--cmd "..."] [--env NAME=value]... [--network <name|id>]
+                        [--mount HOST:CONTAINER[:ro]]... [--timeout 30s] [--cpus N]
+                        [--memory-mb N] [--scratch-size 40GB] [--keep]   # elevated; one-shot
 hcsctl container create --ref <ref> [--cpus N] [--memory-mb N] [--hostname H]
+                        [--network <name|id>] [--mount ...] [--scratch-size 40GB]
 hcsctl container start  --id <id>
-hcsctl container exec   --id <id> --cmd "..." [--cwd D] [--user U]
+hcsctl container exec   --id <id> --cmd "..." [--cwd D] [--user U] [--env NAME=value]...
+                        [--timeout 30s]
+hcsctl container kill   --id <id> --pid <pid>        # one process, not a tree
 hcsctl container stop   --id <id> [--force]
 hcsctl container rm     --id <id> [--force]
 hcsctl container ls
@@ -46,10 +51,18 @@ hcsctl container inspect --id <id>                   # what the store and HCS ea
 hcsctl container pause   --id <id>
 hcsctl container resume  --id <id>
 
-hcsctl network ls                                    # unelevated
-hcsctl network endpoints [--network <name|id>]       # unelevated
+hcsctl storage setup-base --layer <dir> [--size-gb N]        # elevated; the computestorage
+hcsctl storage mount      --ref <ref> --scratch-dir <dir>    # (VHD-backed) layer surface;
+hcsctl storage unmount    --scratch-dir <dir>                # see `hcsctl help` and issue #18
+hcsctl storage export     --layer <volume> --dest <dir> [--writable]
+hcsctl storage import     --source <dir> --layer <dir>       # not yet seen working (#18)
+hcsctl storage destroy    --layer <dir>
 
-hcsctl info
+hcsctl network ls                                    # unelevated; read-only today --
+hcsctl network endpoints [--network <name|id>]       # the hcn write surface is unbuilt (#15, #17)
+
+hcsctl info                                          # host capability + toolVersion/contractVersion
+hcsctl help | version
 ```
 
 `--json` puts exactly one document on stdout, progress on stderr. Exit codes: `0` ok, `1` ran
@@ -87,4 +100,4 @@ possible because the guest is a separate VM.
 go build -o hcsctl.exe .
 ```
 
-Windows only. Requires Go 1.23+.
+Windows only. Requires Go 1.26+ (the floor is `go.mod`'s directive; CI builds from it).

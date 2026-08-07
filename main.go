@@ -245,5 +245,6 @@ exit codes: 0 ok, 1 ran and failed, 64 bad arguments (nothing attempted)
              a guest process's own exit code is reported as exitCode in the result, not as
              hcsctl's exit code
 
-Planned, not built: network (hcn), cim, process-isolated containers. See the roadmap issue.
+Planned, not built: the hcn write surface (network create/delete, policies -- the reads above
+exist), CimFS, process-isolated containers. See the roadmap issue.
 `

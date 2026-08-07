@@ -10,7 +10,8 @@ decisions, and does not close.
 go build -o hcsctl.exe .
 ```
 
-Windows only, Go 1.23+. Go is at `C:\Program Files\Go\bin` and is not always on `PATH`.
+Windows only, Go 1.26+ (`go.mod` is the floor). Go is at `C:\Program Files\Go\bin` and is not
+always on `PATH`.
 
 Reference clones sit beside this repo — read them rather than guessing at an API:
 `hcsshim` (the library), `AspireHcs` (the consumer), `hcsspike` (probes), `dcp`.
