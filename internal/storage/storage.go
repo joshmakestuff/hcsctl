@@ -226,8 +226,9 @@ func setupBase(a *cli.Args, e cli.Emit) (int, error) {
 	}
 	size := uint64(defaultSizeGB)
 	if v := a.Option("--size-gb"); v != "" {
-		if size, err = parseUint(v); err != nil {
-			return cli.Usage, cli.Usagef("--size-gb must be a positive integer, got %q", v)
+		// SetupContainerBaseLayer takes GB; 65536 GB is the VHDX format ceiling (64 TB).
+		if size, err = cli.ParseUint(v, 65536); err != nil {
+			return cli.Usage, cli.Usagef("--size-gb %v", err)
 		}
 	}
 	// The layer must look like a layer before SetupBaseOSLayer deletes anything from it: the
@@ -467,22 +468,6 @@ func copyFile(src, dst string) error {
 	return d.Sync()
 }
 
-func parseUint(s string) (uint64, error) {
-	var n uint64
-	if s == "" {
-		return 0, fmt.Errorf("empty")
-	}
-	for _, c := range s {
-		if c < '0' || c > '9' {
-			return 0, fmt.Errorf("not a number")
-		}
-		n = n*10 + uint64(c-'0')
-	}
-	if n == 0 {
-		return 0, fmt.Errorf("zero")
-	}
-	return n, nil
-}
 
 func exitFor(err error) int {
 	if _, ok := err.(*cli.UsageError); ok {

@@ -3,8 +3,10 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 )
 
@@ -159,6 +161,31 @@ func ValidateID(id string) error {
 	return nil
 }
 
+// ParseUint is the one bounded numeric parser (#21): every numeric option names the range its
+// sink actually accepts, so overflow is exit 64 instead of a silent wrap. The hand-rolled
+// parsers this replaces wrapped on uint64 overflow -- `--cpus 18446744073709551617` parsed as 1.
+// The error text is written to read after an option name: Usagef("--cpus %v", err).
+func ParseUint(s string, max uint64) (uint64, error) {
+	n, err := strconv.ParseUint(s, 10, 64)
+	if err != nil {
+		if errors.Is(err, strconv.ErrRange) {
+			return 0, fmt.Errorf("must be at most %d, got %s", max, s)
+		}
+		return 0, fmt.Errorf("must be a positive integer, got %q", s)
+	}
+	if n == 0 {
+		return 0, fmt.Errorf("must be positive, got 0")
+	}
+	if n > max {
+		return 0, fmt.Errorf("must be at most %d, got %s", max, s)
+	}
+	return n, nil
+}
+
+// maxSizeBytes is 64 TB, the VHDX format ceiling -- every size option here ends up in a VHDX
+// one way or another (scratch layers, base layers), so it is the shared operational bound.
+const maxSizeBytes = 64 << 40
+
 // ParseSize turns a human size -- "40GB", "40960MB" -- into bytes. The unit is required:
 // a bare number is ambiguous enough to be a mistake, and this is used for disk sizes where
 // the wrong guess costs tens of gigabytes.
@@ -177,15 +204,11 @@ func ParseSize(s string) (uint64, error) {
 	if digits == "" {
 		return 0, Usagef("size %q has no number", s)
 	}
-	var n uint64
-	for _, c := range digits {
-		if c < '0' || c > '9' {
-			return 0, Usagef("size %q is not <number>GB or <number>MB", s)
-		}
-		n = n*10 + uint64(c-'0')
-	}
-	if n == 0 {
-		return 0, Usagef("size %q is zero", s)
+	// The bound is in the given unit -- 64 TB expressed in GB or MB -- so a too-large size is
+	// rejected with a number the caller can act on rather than silently wrapping.
+	n, err := ParseUint(digits, maxSizeBytes/mult)
+	if err != nil {
+		return 0, Usagef("size %q: %v", s, err)
 	}
 	return n * mult, nil
 }
