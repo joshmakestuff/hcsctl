@@ -44,6 +44,18 @@ func run(argv []string) int {
 	}
 	e := cli.Emit{JSON: wantJSON}
 
+	// help and version are answered before the parser runs: --help would otherwise be "an
+	// option requiring a value" and -h is not an option at all (#25). Leading position only,
+	// deliberately -- an option's *value* may legitimately be the string "--help".
+	if len(argv) > 0 {
+		switch argv[0] {
+		case "--help", "-h", "help":
+			return helpCmd(e)
+		case "--version", "version":
+			return versionCmd(e)
+		}
+	}
+
 	args, err := cli.Parse(argv, "--json", "--blobs", "--keep", "--force", "--writable")
 	if err != nil {
 		e.Failure("usage", err)
@@ -102,8 +114,30 @@ func errorsAs(err error, target **cli.UsageError) bool {
 	return false
 }
 
+// helpCmd is *requested* help: exit 0, usage on stdout. usage() below stays on stderr -- it
+// accompanies an error, and stdout belongs to the contract.
+func helpCmd(e cli.Emit) int {
+	e.Result(map[string]any{"ok": true, "command": "help", "usage": usageText}, func() {
+		fmt.Print(usageText)
+	})
+	return cli.OK
+}
+
+func versionCmd(e cli.Emit) int {
+	e.Result(map[string]any{
+		"ok": true, "command": "version",
+		"toolVersion": cli.ToolVersion, "contractVersion": cli.ContractVersion,
+	}, func() {
+		fmt.Printf("hcsctl %s (contract %s)\n", cli.ToolVersion, cli.ContractVersion)
+	})
+	return cli.OK
+}
+
 func usage() {
-	fmt.Fprint(os.Stderr, `hcsctl -- a CLI over the Windows Host Compute Service
+	fmt.Fprint(os.Stderr, usageText)
+}
+
+const usageText = `hcsctl -- a CLI over the Windows Host Compute Service
 
 usage: hcsctl <group> <verb> [options]
 
@@ -212,5 +246,4 @@ exit codes: 0 ok, 1 ran and failed, 64 bad arguments (nothing attempted)
              hcsctl's exit code
 
 Planned, not built: network (hcn), cim, process-isolated containers. See the roadmap issue.
-`)
-}
+`

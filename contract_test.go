@@ -206,6 +206,50 @@ func TestUsageErrorAttemptsNothing(t *testing.T) {
 	}
 }
 
+// Requested help and version are exit 0 with output on stdout -- unlike the usage text that
+// accompanies an error, which stays on stderr (#25).
+func TestHelpAndVersion(t *testing.T) {
+	for _, args := range [][]string{{"--help"}, {"-h"}, {"help"}} {
+		t.Run(strings.Join(args, ""), func(t *testing.T) {
+			r := invoke(t, args...)
+			if r.code != 0 {
+				t.Fatalf("exit %d, want 0\nstderr: %s", r.code, r.stderr)
+			}
+			if !strings.Contains(r.stdout, "usage: hcsctl") {
+				t.Fatalf("help did not render usage on stdout: %q", r.stdout[:min(len(r.stdout), 80)])
+			}
+		})
+	}
+	for _, args := range [][]string{{"--version"}, {"version"}} {
+		t.Run(strings.Join(args, ""), func(t *testing.T) {
+			r := invoke(t, args...)
+			if r.code != 0 {
+				t.Fatalf("exit %d, want 0\nstderr: %s", r.code, r.stderr)
+			}
+			if !strings.Contains(r.stdout, "hcsctl") || !strings.Contains(r.stdout, "contract") {
+				t.Fatalf("version output: %q", r.stdout)
+			}
+		})
+	}
+	t.Run("json keeps the one-document contract", func(t *testing.T) {
+		for _, args := range [][]string{{"help", "--json"}, {"version", "--json"}} {
+			r := invoke(t, args...)
+			if r.code != 0 {
+				t.Fatalf("%v: exit %d, want 0", args, r.code)
+			}
+			oneDoc(t, r.stdout, true)
+		}
+	})
+	t.Run("an option value spelled --help is not hijacked", func(t *testing.T) {
+		// Leading position only: exec's --cmd may legitimately be the string --help. This
+		// must reach normal dispatch (and fail on the missing container), not print usage.
+		r := invoke(t, "container", "exec", "--id", "zz-no-such", "--cmd", "--help")
+		if r.code == 0 || strings.Contains(r.stdout, "usage: hcsctl") {
+			t.Fatalf("option value --help hijacked the invocation: exit %d", r.code)
+		}
+	})
+}
+
 // TestIDValidationIsWired plants a real target at the traversal destination and asserts the
 // command exits 64 with the target untouched. This discriminates wiring from mere existence of
 // the validator: the plain usageCases for bad ids would pass even without validation (they fall
