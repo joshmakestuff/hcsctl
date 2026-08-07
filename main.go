@@ -36,13 +36,16 @@ func main() { os.Exit(run(os.Args[1:])) }
 func run(argv []string) int {
 	// Read --json off argv rather than off the parse: a malformed command line must still be
 	// reported in the shape the caller asked for, and the parse is what may have failed.
-	wantJSON := false
+	wantJSON, wantStream := false, false
 	for _, a := range argv {
 		if a == "--json" {
 			wantJSON = true
 		}
+		if a == "--stream-json" {
+			wantStream = true
+		}
 	}
-	e := cli.Emit{JSON: wantJSON}
+	e := cli.Emit{JSON: wantJSON, StreamJSON: wantStream}
 
 	// help and version are answered before the parser runs: --help would otherwise be "an
 	// option requiring a value" and -h is not an option at all (#25). Leading position only,
@@ -56,7 +59,7 @@ func run(argv []string) int {
 		}
 	}
 
-	args, err := cli.Parse(argv, "--json", "--blobs", "--keep", "--force", "--writable")
+	args, err := cli.Parse(argv, "--json", "--stream-json", "--blobs", "--keep", "--force", "--writable")
 	if err != nil {
 		e.Failure("usage", err)
 		usage()
@@ -239,7 +242,11 @@ usage: hcsctl <group> <verb> [options]
                and per-image process-isolation compatibility. Unelevated.
 
 global options:
-  --json       One JSON document on stdout; progress on stderr.
+  --json         One JSON document on stdout; progress on stderr.
+  --stream-json  With --json: stderr becomes NDJSON, one object per line, so a consumer
+                 following a long exec can attribute every line -- {"stream":"progress"} is
+                 hcsctl, {"stream":"stdout"|"stderr"} is the guest, per line, live. The final
+                 document is unchanged.
 
 exit codes: 0 ok, 1 ran and failed, 64 bad arguments (nothing attempted)
              a guest process's own exit code is reported as exitCode in the result, not as

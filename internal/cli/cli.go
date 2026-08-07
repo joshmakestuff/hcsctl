@@ -2,6 +2,7 @@
 package cli
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -112,7 +113,7 @@ func (a *Args) Require(name string) (string, error) {
 // RejectUnknown fails on any option the command does not understand, so a typo is an error
 // rather than a silently ignored setting.
 func (a *Args) RejectUnknown(known ...string) error {
-	ok := map[string]bool{"--json": true}
+	ok := map[string]bool{"--json": true, "--stream-json": true}
 	for _, k := range known {
 		ok[k] = true
 	}
@@ -229,15 +230,84 @@ func ParseSize(s string) (uint64, error) {
 
 // Emit is the output sink. In JSON mode stdout carries exactly one document and progress goes
 // to stderr, so a consumer never has to scrape.
-type Emit struct{ JSON bool }
+//
+// StreamJSON (#28) types the one stream that was untyped: with it, everything on stderr is
+// NDJSON -- one object per line -- so a consumer following a long-running exec can attribute
+// every line without matching on message text. {"stream":"progress","msg":...} is hcsctl's
+// own voice; guest output is framed by the container package as
+// {"stream":"stdout"|"stderr","data":...}. Takes effect only alongside JSON mode: without
+// --json there is no consumer, and human output stays human.
+type Emit struct {
+	JSON       bool
+	StreamJSON bool
+}
+
+func (e Emit) framing() bool { return e.JSON && e.StreamJSON }
 
 func (e Emit) Progress(format string, a ...any) {
 	msg := fmt.Sprintf(format, a...)
+	if e.framing() {
+		e.streamLine(map[string]string{"stream": "progress", "msg": msg})
+		return
+	}
 	if e.JSON {
 		fmt.Fprintln(os.Stderr, msg)
 	} else {
 		fmt.Fprintln(os.Stdout, msg)
 	}
+}
+
+func (e Emit) streamLine(obj map[string]string) {
+	b, err := json.Marshal(obj)
+	if err != nil {
+		return
+	}
+	fmt.Fprintln(os.Stderr, string(b))
+}
+
+// NewStreamWriter frames one guest stream as NDJSON lines (#28). Complete lines are emitted
+// as they arrive, without their line ending; a partial line is buffered to the next write --
+// so a consumer sees whole lines and a rune split across reads cannot be mangled -- capped at
+// 64 KB so a line-less guest cannot hold output hostage. Close flushes the remainder.
+func NewStreamWriter(e Emit, stream string) *StreamWriter {
+	return &StreamWriter{e: e, stream: stream}
+}
+
+type StreamWriter struct {
+	e      Emit
+	stream string
+	buf    []byte
+}
+
+const streamLineCap = 64 * 1024
+
+func (w *StreamWriter) Write(p []byte) (int, error) {
+	w.buf = append(w.buf, p...)
+	for {
+		i := bytes.IndexByte(w.buf, '\n')
+		if i < 0 {
+			break
+		}
+		w.emit(w.buf[:i])
+		w.buf = w.buf[i+1:]
+	}
+	if len(w.buf) > streamLineCap {
+		w.emit(w.buf)
+		w.buf = nil
+	}
+	return len(p), nil
+}
+
+func (w *StreamWriter) Close() error {
+	if len(w.buf) > 0 {
+		w.emit(w.buf)
+		w.buf = nil
+	}
+	return nil
+}
+
+func (w *StreamWriter) emit(line []byte) {
+	w.e.streamLine(map[string]string{"stream": w.stream, "data": strings.TrimSuffix(string(line), "\r")})
 }
 
 // Result prints the command's single result: the document in JSON mode, human() otherwise.

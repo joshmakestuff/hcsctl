@@ -206,6 +206,50 @@ func TestUsageErrorAttemptsNothing(t *testing.T) {
 	}
 }
 
+// TestStreamJSONTypesStderr (#28): under --json --stream-json every non-empty stderr line is
+// an NDJSON object with a "stream" field; without the flag the same run writes bare text.
+// The fixture is a fake materialized store -- valid record, layer dirs with Files and a
+// UtilityVM -- so `container run` gets far enough to emit real progress before failing at
+// the first HCS call, which hosted runners cannot make.
+func TestStreamJSONTypesStderr(t *testing.T) {
+	digest := `sha256:` + strings.Repeat("3", 64)
+	store := filepath.Join(t.TempDir(), "store")
+	layerDir := filepath.Join(store, "layers", strings.Repeat("3", 64))
+	for _, d := range []string{filepath.Join(layerDir, "Files"), filepath.Join(layerDir, "UtilityVM"), filepath.Join(store, "images")} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rec := `{"ref":"fake/img:1","layerDigests":["` + digest + `"],"diffIDs":["` + digest + `"]}`
+	if err := os.WriteFile(filepath.Join(store, "images", "fake_img_1.json"), []byte(rec), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	args := []string{"container", "run", "--ref", "fake/img:1", "--store", store, "--json"}
+
+	framed := invoke(t, append(args, "--stream-json")...)
+	if framed.stderr == "" {
+		t.Fatal("no stderr at all -- the fixture no longer reaches a progress line, and this test proves nothing")
+	}
+	for _, line := range strings.Split(strings.TrimSpace(framed.stderr), "\n") {
+		if line == "" {
+			continue
+		}
+		var obj map[string]any
+		if err := json.Unmarshal([]byte(line), &obj); err != nil {
+			t.Fatalf("stderr line is not NDJSON under --stream-json: %q", line)
+		}
+		if s, _ := obj["stream"].(string); s == "" {
+			t.Fatalf("stderr object has no stream field: %q", line)
+		}
+	}
+	oneDoc(t, framed.stdout, false) // the stdout contract is unchanged
+
+	bare := invoke(t, args...)
+	if json.Valid([]byte(strings.SplitN(strings.TrimSpace(bare.stderr), "\n", 2)[0])) {
+		t.Fatalf("without --stream-json stderr should be bare text, got %q", bare.stderr)
+	}
+}
+
 // Requested help and version are exit 0 with output on stdout -- unlike the usage text that
 // accompanies an error, which stays on stderr (#25).
 func TestHelpAndVersion(t *testing.T) {
