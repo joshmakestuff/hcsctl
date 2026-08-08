@@ -64,7 +64,7 @@ func run(argv []string) int {
 		}
 	}
 
-	args, err := cli.Parse(argv, "--json", "--stream-json", "--blobs", "--keep", "--force", "--writable", "--follow", "--no-copy-on-write")
+	args, err := cli.Parse(argv, "--json", "--stream-json", "--blobs", "--keep", "--force", "--writable", "--follow", "--no-copy-on-write", "--no-input")
 	if err != nil {
 		e.Failure("usage", err)
 		usage()
@@ -278,6 +278,13 @@ usage: hcsctl <group> <verb> [options]
                base image is never removed.
   vm ls      [--store <dir>]                   VMs and the state HCS reports for each.
   vm inspect --id <guid>                       The store's record plus the HCS properties.
+  vm console --id <guid> [--no-input] [--timeout 15s]
+               Attach to the VM's serial console over its COM1 named pipe. This is the
+               break-glass path: no agent, no network adapter, no lease, no firewall rule --
+               it works when the agent is what is broken. Input is on by default, so a Linux
+               guest with a getty on ttyS0 gives a login prompt; --no-input only watches.
+               Nothing is buffered, so a console attached after boot has missed the boot.
+               Every VM gets a COM port; --serial-pipe at create time overrides the name.
 
   guest info --vmid <guid> [--timeout 35s]     What a guest VM says about itself, over a
                                                Hyper-V socket. Needs no NIC, no DHCP lease
