@@ -24,6 +24,7 @@ import (
 
 	"github.com/joshmakestuff/hcsctl/internal/cli"
 	"github.com/joshmakestuff/hcsctl/internal/container"
+	"github.com/joshmakestuff/hcsctl/internal/guest"
 	"github.com/joshmakestuff/hcsctl/internal/image"
 	"github.com/joshmakestuff/hcsctl/internal/layer"
 	"github.com/joshmakestuff/hcsctl/internal/network"
@@ -84,6 +85,8 @@ func run(argv []string) int {
 		code, err = container.Dispatch(args, e)
 	case "network":
 		code, err = network.Dispatch(args, e)
+	case "guest":
+		code, err = guest.Dispatch(args, e)
 	case "storage":
 		code, err = storage.Dispatch(args, e)
 	case "info":
@@ -250,6 +253,10 @@ usage: hcsctl <group> <verb> [options]
 
   network ls        Host compute networks, their subnets and endpoint counts. Unelevated.
   network endpoints [--network <name|id>]      Endpoints and their addresses. Unelevated.
+
+  guest info --vmid <guid> [--timeout 35s]     What a guest VM says about itself, over a
+                                               Hyper-V socket. Needs no NIC, no DHCP lease
+                                               and no elevation; needs hcsguest in the image.
 
   info         [--store <dir>]
                Host build and capability: CimFS support, elevation, Hyper-V Administrators
