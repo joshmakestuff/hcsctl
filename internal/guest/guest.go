@@ -70,14 +70,9 @@ func info(a *cli.Args, e cli.Emit) (int, error) {
 		timeout = d
 	}
 
-	svc, err := guid.FromString(guestproto.ServiceID)
-	if err != nil {
-		return cli.Failed, err
-	}
-
-	e.Progress("dialling %s service %s", vmid, svc)
+	e.Progress("dialling %s", vmid)
 	start := time.Now()
-	doc, state, detail, derr := dial(vmid, svc, timeout)
+	doc, state, detail, derr := dialAny(vmid, timeout)
 	elapsed := time.Since(start).Milliseconds()
 
 	res := infoResult{
@@ -113,6 +108,48 @@ func info(a *cli.Args, e cli.Emit) (int, error) {
 		}
 	})
 	return cli.OK, nil
+}
+
+// dialAny reaches the agent without being told which OS the guest runs. A Windows guest
+// binds a service GUID; a Linux guest binds an AF_VSOCK port, which the host addresses
+// through the VSOCK template GUID. They are two spellings of one rendezvous and the caller
+// should not have to know which.
+//
+// Concurrently, not in sequence. A dial that fails because the guest is up and the agent is
+// not takes 30 s (#37), so trying one after the other would cost a minute to learn nothing.
+// A success takes about 3 ms, so racing them is free.
+func dialAny(vmid guid.GUID, timeout time.Duration) (*guestproto.Info, string, string, error) {
+	svc, err := guid.FromString(guestproto.ServiceID)
+	if err != nil {
+		return nil, "unreachable", err.Error(), err
+	}
+	candidates := []guid.GUID{svc, winio.VsockServiceID(guestproto.VsockPort)}
+
+	type attempt struct {
+		doc    *guestproto.Info
+		state  string
+		detail string
+		err    error
+	}
+	results := make(chan attempt, len(candidates))
+	for _, c := range candidates {
+		go func(c guid.GUID) {
+			d, s, det, e := dial(vmid, c, timeout)
+			results <- attempt{d, s, det, e}
+		}(c)
+	}
+
+	// First success wins. If none succeeds, report the last failure -- they are the same
+	// errno in every case that matters, because both dials meet the same guest.
+	var last attempt
+	for range candidates {
+		a := <-results
+		if a.err == nil {
+			return a.doc, a.state, a.detail, nil
+		}
+		last = a
+	}
+	return nil, last.state, last.detail, last.err
 }
 
 // dial returns the guest document, or a state naming why not. The three states come from the
