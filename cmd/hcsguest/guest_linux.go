@@ -12,35 +12,21 @@ import (
 	"time"
 
 	"github.com/joshmakestuff/hcsctl/internal/guestproto"
-	"golang.org/x/sys/unix"
+	"github.com/mdlayher/vsock"
 )
 
 // listen binds AF_VSOCK. A Linux guest has no service GUID: the host maps a VSOCK port into
 // a service ID through the template GUID, so the port here and the ServiceID on Windows are
 // two spellings of the same rendezvous.
 //
-// UNMEASURED as of 2026-08-08. #37 proved the Windows path host-to-guest; the Linux path has
-// never been exercised. Treat a failure here as a finding, not as a bug in this file.
+// mdlayher/vsock rather than a raw unix.Socket wrapped by net.FileListener. Measured
+// 2026-08-08: the raw socket, bind and listen all succeed, and then net.FileListener fails
+// with "getsockname: address family not supported by protocol". Go's net package only knows
+// the address families it implements, and AF_VSOCK is not one of them.
 func listen() (net.Listener, error) {
-	fd, err := unix.Socket(unix.AF_VSOCK, unix.SOCK_STREAM|unix.SOCK_CLOEXEC, 0)
+	l, err := vsock.Listen(guestproto.VsockPort, nil)
 	if err != nil {
-		return nil, fmt.Errorf("socket AF_VSOCK: %w", err)
-	}
-	sa := &unix.SockaddrVM{CID: unix.VMADDR_CID_ANY, Port: guestproto.VsockPort}
-	if err := unix.Bind(fd, sa); err != nil {
-		unix.Close(fd)
-		return nil, fmt.Errorf("bind vsock port %d: %w", guestproto.VsockPort, err)
-	}
-	if err := unix.Listen(fd, 16); err != nil {
-		unix.Close(fd)
-		return nil, fmt.Errorf("listen vsock: %w", err)
-	}
-	f := os.NewFile(uintptr(fd), "vsock")
-	l, err := net.FileListener(f)
-	// FileListener dups the descriptor, so the original is closed either way.
-	_ = f.Close()
-	if err != nil {
-		return nil, fmt.Errorf("file listener: %w", err)
+		return nil, fmt.Errorf("listen vsock port %d: %w", guestproto.VsockPort, err)
 	}
 	return l, nil
 }
