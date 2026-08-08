@@ -10,8 +10,11 @@
 //
 // Two rules this repo is built to:
 //
-//	Public packages only. pkg/*, the hcsshim root package, computestorage, osversion. Needing
-//	internal/ is a signal to reconsider the design, not to fork.
+//	Public hcsshim packages only. pkg/*, the hcsshim root package, computestorage, osversion.
+//	Needing internal/ is a signal to reconsider the design, not to fork. Where hcsshim exports
+//	no public equivalent -- today, the v2 compute-system API that `vm` needs -- bind the
+//	documented Windows entry point in vmcompute.dll directly (#34). Copying or vendoring
+//	hcsshim's internal/ source is still out.
 //
 //	Every verb honours the same contract: --json puts exactly one document on stdout with
 //	progress on stderr, and exit codes mean 0 ok, 1 ran and failed, 64 bad arguments with
@@ -30,6 +33,7 @@ import (
 	"github.com/joshmakestuff/hcsctl/internal/network"
 	"github.com/joshmakestuff/hcsctl/internal/storage"
 	"github.com/joshmakestuff/hcsctl/internal/sysinfo"
+	"github.com/joshmakestuff/hcsctl/internal/vm"
 )
 
 func main() { os.Exit(run(os.Args[1:])) }
@@ -60,7 +64,7 @@ func run(argv []string) int {
 		}
 	}
 
-	args, err := cli.Parse(argv, "--json", "--stream-json", "--blobs", "--keep", "--force", "--writable", "--follow")
+	args, err := cli.Parse(argv, "--json", "--stream-json", "--blobs", "--keep", "--force", "--writable", "--follow", "--no-copy-on-write")
 	if err != nil {
 		e.Failure("usage", err)
 		usage()
@@ -70,7 +74,7 @@ func run(argv []string) int {
 	if len(args.Words) == 0 {
 		// Failure before usage, so `hcsctl --json` still puts its one document on stdout --
 		// the contract holds on every path, including the empty one.
-		e.Failure("usage", cli.Usagef("a verb group is required (image, layer, container, network, info)"))
+		e.Failure("usage", cli.Usagef("a verb group is required (image, layer, container, vm, guest, network, storage, info)"))
 		usage()
 		return cli.Usage
 	}
@@ -85,6 +89,8 @@ func run(argv []string) int {
 		code, err = container.Dispatch(args, e)
 	case "network":
 		code, err = network.Dispatch(args, e)
+	case "vm":
+		code, err = vm.Dispatch(args, e)
 	case "guest":
 		code, err = guest.Dispatch(args, e)
 	case "storage":
@@ -92,7 +98,7 @@ func run(argv []string) int {
 	case "info":
 		code, err = sysinfo.Run(args, e)
 	default:
-		err = cli.Usagef("unknown verb group %q (expected: image, layer, container, network, storage, info)", args.Word(0))
+		err = cli.Usagef("unknown verb group %q (expected: image, layer, container, vm, guest, network, storage, info)", args.Word(0))
 		code = cli.Usage
 	}
 
@@ -253,6 +259,25 @@ usage: hcsctl <group> <verb> [options]
 
   network ls        Host compute networks, their subnets and endpoint counts. Unelevated.
   network endpoints [--network <name|id>]      Endpoints and their addresses. Unelevated.
+
+  vm create  --vhdx <path> [--id <guid>] [--cpus N] [--memory-mb N]
+             [--serial-pipe \\.\pipe\name] [--no-copy-on-write] [--store <dir>]
+               Make a Hyper-V VM that boots a Gen 2 VHDX. By default the disk is a
+               differencing child, so the image is never written to; --no-copy-on-write boots
+               the image itself and MUTATES it. The id is a GUID because it is also the VM's
+               hvsocket address -- guest info --vmid takes it unchanged. Unelevated;
+               Hyper-V Administrators is enough. Does not start it.
+  vm start   --id <guid>
+               Start returning means the firmware is running, NOT that the guest is up --
+               unlike a container. Ask guest info for guest readiness.
+  vm stop    --id <guid> [--force]
+               Without --force, asks the guest through the shutdown integration service; a
+               guest that lacks one cannot be asked. --force powers it off.
+  vm rm      --id <guid> [--force]
+               Terminates, then removes only what this tool made. A --no-copy-on-write VM's
+               base image is never removed.
+  vm ls      [--store <dir>]                   VMs and the state HCS reports for each.
+  vm inspect --id <guid>                       The store's record plus the HCS properties.
 
   guest info --vmid <guid> [--timeout 35s]     What a guest VM says about itself, over a
                                                Hyper-V socket. Needs no NIC, no DHCP lease
