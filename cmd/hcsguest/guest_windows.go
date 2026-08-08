@@ -5,6 +5,8 @@ package main
 import (
 	"net"
 	"os"
+	"os/exec"
+	"strconv"
 	"time"
 
 	"github.com/Microsoft/go-winio"
@@ -57,8 +59,37 @@ func gatherInfo() (guestproto.Info, error) {
 	}, nil
 }
 
-// ServiceName is what the image build registers with sc.exe.
+// ServiceName is what the image build registers with the service control manager.
 const ServiceName = "hcsguest"
+
+// shellFor runs an exec command line through cmd.exe, matching `hcsctl container exec --cmd`.
+// A caller who needs an exact argv would need a different request shape; nothing does yet.
+func shellFor(command string) (string, []string) {
+	return "cmd.exe", []string{"/c", command}
+}
+
+// setProcessGroup has nothing to do on Windows. The tree is killed by pid instead; see
+// killTree.
+func setProcessGroup(*exec.Cmd) {}
+
+// killTree ends the command AND its children.
+//
+// Killing only the process kills the shell and orphans what it started. Measured: a 5 s
+// timeout on `cmd /c ping -n 30 127.0.0.1` took 29.5 s to report, because the orphaned
+// PING.EXE inherited the stdout handle and the pipe did not close until it finished on its
+// own. The same behaviour is already recorded for the container path.
+//
+// taskkill /T rather than a job object: assigning a job after Start races the shell spawning
+// its child, and os/exec gives no hook between create and resume to close that race.
+func killTree(cmd *exec.Cmd) {
+	if cmd.Process == nil {
+		return
+	}
+	_ = exec.Command("taskkill.exe", "/T", "/F", "/PID", strconv.Itoa(cmd.Process.Pid)).Run()
+	// Belt and braces: if taskkill is unavailable the process itself still dies, and a
+	// half-killed tree is better than a command that never returns.
+	_ = cmd.Process.Kill()
+}
 
 // runUnderServiceManager runs the accept loop as a Windows service when Windows started us as
 // one, and reports handled=false when it did not, so the same binary still runs in a console.

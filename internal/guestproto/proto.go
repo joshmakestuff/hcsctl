@@ -32,6 +32,18 @@ type Request struct {
 	// Port is the guest-side TCP port for the forward verb. The agent dials it on loopback
 	// inside the guest, which is why a forward is not subject to the guest firewall.
 	Port int `json:"port,omitempty"`
+
+	// Command is the exec verb's command line, run by the guest's own shell: cmd.exe /c on
+	// Windows, /bin/sh -c on Linux. A single line rather than an argv, to match
+	// `hcsctl container exec --cmd`.
+	Command string `json:"command,omitempty"`
+	Cwd     string `json:"cwd,omitempty"`
+	// Env entries are NAME=value, added to the guest's own environment rather than replacing
+	// it: a command that lost PATH would fail for a reason nobody would guess from here.
+	Env []string `json:"env,omitempty"`
+	// TimeoutSeconds kills the process in the guest on expiry. Enforced guest-side as well as
+	// host-side, so a host that gives up does not leave the process running forever.
+	TimeoutSeconds int `json:"timeoutSeconds,omitempty"`
 }
 
 // ForwardOK is the agent's reply to a forward request, sent before any payload. The caller
