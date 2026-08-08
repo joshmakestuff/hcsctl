@@ -28,6 +28,20 @@ const Protocol = 1
 type Request struct {
 	Protocol int    `json:"protocol"`
 	Verb     string `json:"verb"`
+
+	// Port is the guest-side TCP port for the forward verb. The agent dials it on loopback
+	// inside the guest, which is why a forward is not subject to the guest firewall.
+	Port int `json:"port,omitempty"`
+}
+
+// ForwardOK is the agent's reply to a forward request, sent before any payload. The caller
+// needs to know the guest side connected before it starts copying, so a failed connect
+// surfaces as an error rather than as a connection that accepts bytes and drops them.
+type ForwardOK struct {
+	OK       bool   `json:"ok"`
+	Protocol int    `json:"protocol"`
+	Port     int    `json:"port"`
+	Target   string `json:"target"`
 }
 
 // Address is what the guest believes about its own addressing. This is the field that

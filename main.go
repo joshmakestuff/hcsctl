@@ -257,6 +257,10 @@ usage: hcsctl <group> <verb> [options]
   guest info --vmid <guid> [--timeout 35s]     What a guest VM says about itself, over a
                                                Hyper-V socket. Needs no NIC, no DHCP lease
                                                and no elevation; needs hcsguest in the image.
+  guest forward --vmid <guid> --port <n> [--listen 127.0.0.1:2222]
+                                               Publish a guest TCP port on the host. The
+                                               agent dials it on the guest's loopback, which
+                                               the guest firewall does not filter.
 
   info         [--store <dir>]
                Host build and capability: CimFS support, elevation, Hyper-V Administrators

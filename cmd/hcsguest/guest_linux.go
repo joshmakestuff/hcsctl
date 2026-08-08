@@ -31,6 +31,10 @@ func listen() (net.Listener, error) {
 	return l, nil
 }
 
+// runUnderServiceManager has nothing to do on Linux: systemd runs an ordinary process and
+// signals it, so the accept loop runs directly.
+func runUnderServiceManager(func(stop <-chan struct{}) error) (bool, error) { return false, nil }
+
 func gatherInfo() (guestproto.Info, error) {
 	host, err := os.Hostname()
 	if err != nil {

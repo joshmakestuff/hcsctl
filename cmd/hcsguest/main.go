@@ -15,8 +15,10 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/joshmakestuff/hcsctl/internal/guestproto"
@@ -54,7 +56,19 @@ func main() {
 	}
 }
 
+// serve runs the accept loop, under the platform's service manager if there is one. On
+// Windows that matters: a plain executable registered with sc.exe never answers the service
+// control manager and fails to start with error 1053.
 func serve() error {
+	handled, err := runUnderServiceManager(acceptLoop)
+	if handled {
+		return err
+	}
+	return acceptLoop(nil)
+}
+
+// acceptLoop serves until stop is closed, or forever if stop is nil.
+func acceptLoop(stop <-chan struct{}) error {
 	l, err := listen()
 	if err != nil {
 		return fmt.Errorf("listen: %w", err)
@@ -62,9 +76,23 @@ func serve() error {
 	defer l.Close()
 	fmt.Fprintf(os.Stderr, "hcsguest %s listening (protocol %d)\n", Version, guestproto.Protocol)
 
+	if stop != nil {
+		go func() {
+			<-stop
+			l.Close()
+		}()
+	}
+
 	for {
 		c, err := l.Accept()
 		if err != nil {
+			if stop != nil {
+				select {
+				case <-stop:
+					return nil
+				default:
+				}
+			}
 			// A single failed accept must not end the agent: the host reads a refused or
 			// timed-out connection as "not ready", and an agent that exited would look
 			// identical forever.
@@ -107,9 +135,49 @@ func handle(c net.Conn) {
 			return
 		}
 		writeJSON(c, doc)
+	case "forward":
+		forward(c, r, req.Port)
 	default:
 		writeFailure(c, fmt.Sprintf("unknown verb %q", req.Verb))
 	}
+}
+
+// forward joins the caller to a TCP port on the guest's own loopback.
+//
+// Loopback is the point. Windows does not filter loopback, so a forward reaches a service the
+// guest firewall would otherwise drop -- which is the fault that left RDP unreachable while
+// SSH worked on the same guest. It also means the guest needs no inbound rule, no NIC and no
+// DHCP lease for the host to reach a service inside it.
+func forward(c net.Conn, buffered *bufio.Reader, port int) {
+	if port < 1 || port > 65535 {
+		writeFailure(c, fmt.Sprintf("port %d out of range", port))
+		return
+	}
+	target := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
+	up, err := net.DialTimeout("tcp", target, 10*time.Second)
+	if err != nil {
+		writeFailure(c, fmt.Sprintf("dial %s: %v", target, err))
+		return
+	}
+	defer up.Close()
+
+	writeJSON(c, guestproto.ForwardOK{
+		OK:       true,
+		Protocol: guestproto.Protocol,
+		Port:     port,
+		Target:   target,
+	})
+
+	// A forward has no deadline: it lasts as long as the session it carries. An SSH session
+	// idles for minutes at a time and must not be cut off by the request deadline set above.
+	_ = c.SetDeadline(time.Time{})
+
+	done := make(chan struct{}, 2)
+	// buffered, not c: the JSON request line was read through a bufio.Reader, which may hold
+	// payload bytes that arrived in the same segment. Copying from c would silently drop them.
+	go func() { _, _ = io.Copy(up, buffered); done <- struct{}{} }()
+	go func() { _, _ = io.Copy(c, up); done <- struct{}{} }()
+	<-done
 }
 
 func writeJSON(c net.Conn, doc any) {
