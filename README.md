@@ -3,8 +3,8 @@
 A CLI over the Windows Host Compute Service, built on [Microsoft/hcsshim](https://github.com/Microsoft/hcsshim).
 
 The goal is to surface **all** of HCS as a tool you can drive from a shell or an agent. Images,
-layers, Hyper-V-isolated containers and read-only networking work today; the rest is ordered, not
-dropped. Near-term priority comes from what an Aspire integration needs — environment into the
+layers, Hyper-V-isolated containers, full virtual machines and read-only networking work today;
+the rest is ordered, not dropped. Near-term priority comes from what an Aspire integration needs — environment into the
 guest, an endpoint address, local file mounts. That sets the *order*, not the scope.
 
 **[Issue #1](https://github.com/joshmakestuff/hcsctl/issues/1)** is the live roadmap: the surface
@@ -59,6 +59,20 @@ hcsctl storage unmount    --scratch-dir <dir>                # see `hcsctl help`
 hcsctl storage export     --layer <volume> --dest <dir> [--writable]
 hcsctl storage import     --source <dir> --layer <dir>       # not yet seen working (#18)
 hcsctl storage destroy    --layer <dir>
+
+hcsctl vm create  --vhdx <path> [--id <guid>] [--cpus N] [--memory-mb N]
+                  [--serial-pipe \\.\pipe\name] [--no-copy-on-write]   # unelevated; boots a
+hcsctl vm start   --id <guid>                        # Gen 2 VHDX as a full VM. Copy-on-write
+hcsctl vm stop    --id <guid> [--force]              # by default, so the image is untouched.
+hcsctl vm rm      --id <guid> [--force]              # The id is also the hvsocket address.
+hcsctl vm ls
+hcsctl vm inspect --id <guid>
+hcsctl vm console --id <guid> [--no-input]           # serial console; no agent, no NIC
+
+hcsctl guest info    --vmid <guid>                   # unelevated; over a Hyper-V socket, so
+hcsctl guest exec    --vmid <guid> --cmd "..."       # no NIC, no DHCP lease, no firewall rule.
+hcsctl guest forward --vmid <guid> --port <n> [--listen 127.0.0.1:2222]
+                                                     # needs hcsguest in the image (hcs-images)
 
 hcsctl network ls                                    # unelevated; read-only today --
 hcsctl network endpoints [--network <name|id>]       # the hcn write surface is unbuilt (#15, #17)
