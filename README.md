@@ -8,9 +8,9 @@ dropped. Near-term priority comes from what an Aspire integration needs — envi
 guest, an endpoint address, local file mounts. That sets the *order*, not the scope.
 
 **[Issue #1](https://github.com/joshmakestuff/hcsctl/issues/1)** is the live roadmap: the surface
-inventory, the priority order, and the standing decisions. Two docs hold what issues shouldn't —
-[docs/findings.md](docs/findings.md) (what is known by measurement) and
-[docs/working-on-hcsctl.md](docs/working-on-hcsctl.md) (picking up work cold).
+inventory, the priority order, and the standing decisions. Work in progress lives in the
+[issues](https://github.com/joshmakestuff/hcsctl/issues); [docs/findings.md](docs/findings.md)
+holds what is known by measurement.
 
 Pull an image and run something in an isolated container:
 

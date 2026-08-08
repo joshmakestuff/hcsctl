@@ -50,7 +50,7 @@ function Assert([string]$name, [bool]$cond) {
     if ($cond) { $script:passed++; "  [ OK ] $name" }
     else { $script:failed++; "  [FAIL] $name" }
 }
-# $LASTEXITCODE is corrupted by any pipeline (docs/working-on-hcsctl.md), so every hcsctl
+# $LASTEXITCODE is corrupted by any pipeline (issue #39), so every hcsctl
 # call captures output on its own line and the code is read immediately after.
 
 # -- pull + import ------------------------------------------------------------------------
