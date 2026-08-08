@@ -27,10 +27,12 @@ func Dispatch(a *cli.Args, e cli.Emit) (int, error) {
 	switch a.Word(1) {
 	case "info":
 		return info(a, e)
+	case "forward":
+		return forward(a, e)
 	case "":
-		return cli.Usage, cli.Usagef("guest needs a subcommand: info")
+		return cli.Usage, cli.Usagef("guest needs a subcommand: info, forward")
 	default:
-		return cli.Usage, cli.Usagef("unknown guest subcommand %q (expected info)", a.Word(1))
+		return cli.Usage, cli.Usagef("unknown guest subcommand %q (expected info, forward)", a.Word(1))
 	}
 }
 
