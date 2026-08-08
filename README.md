@@ -9,8 +9,8 @@ guest, an endpoint address, local file mounts. That sets the *order*, not the sc
 
 **[Issue #1](https://github.com/joshmakestuff/hcsctl/issues/1)** is the live roadmap: the surface
 inventory, the priority order, and the standing decisions. Work in progress lives in the
-[issues](https://github.com/joshmakestuff/hcsctl/issues); [docs/findings.md](docs/findings.md)
-holds what is known by measurement.
+[issues](https://github.com/joshmakestuff/hcsctl/issues). What is known by measurement is in the
+workspace's `docs/findings.md`, beside this repo rather than inside it.
 
 Pull an image and run something in an isolated container:
 
