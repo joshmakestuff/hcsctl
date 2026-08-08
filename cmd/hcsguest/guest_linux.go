@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/joshmakestuff/hcsctl/internal/guestproto"
@@ -34,6 +36,29 @@ func listen() (net.Listener, error) {
 // runUnderServiceManager has nothing to do on Linux: systemd runs an ordinary process and
 // signals it, so the accept loop runs directly.
 func runUnderServiceManager(func(stop <-chan struct{}) error) (bool, error) { return false, nil }
+
+// shellFor runs an exec command line through /bin/sh, the Windows counterpart being cmd.exe.
+func shellFor(command string) (string, []string) {
+	return "/bin/sh", []string{"-c", command}
+}
+
+// setProcessGroup puts the command in its own process group, so killTree can signal the whole
+// group rather than only the shell.
+func setProcessGroup(cmd *exec.Cmd) {
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+}
+
+// killTree signals the negative pid, which is the process group -- the shell and everything
+// it started. Killing the shell alone leaves children holding the stdout pipe open, so the
+// command appears to run until they finish on their own.
+func killTree(cmd *exec.Cmd) {
+	if cmd.Process == nil {
+		return
+	}
+	if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil {
+		_ = cmd.Process.Kill()
+	}
+}
 
 func gatherInfo() (guestproto.Info, error) {
 	host, err := os.Hostname()

@@ -137,6 +137,8 @@ func handle(c net.Conn) {
 		writeJSON(c, doc)
 	case "forward":
 		forward(c, r, req.Port)
+	case "exec":
+		runExec(c, r, req)
 	default:
 		writeFailure(c, fmt.Sprintf("unknown verb %q", req.Verb))
 	}
