@@ -2,3 +2,5 @@ hcsctl.exe
 *.exe
 
 smoke/
+hcsguest.exe
+hcsguest-linux
