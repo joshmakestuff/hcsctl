@@ -87,8 +87,8 @@ func killTree(cmd *exec.Cmd) {
 		return
 	}
 	_ = exec.Command("taskkill.exe", "/T", "/F", "/PID", strconv.Itoa(cmd.Process.Pid)).Run()
-	// Belt and braces: if taskkill is unavailable the process itself still dies, and a
-	// half-killed tree is better than a command that never returns.
+	// Also kill the process directly. If taskkill is absent, the command still stops, and a
+	// partly killed tree is better than a command that never returns.
 	_ = cmd.Process.Kill()
 }
 
