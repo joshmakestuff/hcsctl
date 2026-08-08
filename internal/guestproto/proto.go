@@ -68,9 +68,13 @@ type Address struct {
 // successful read of this document means the guest booted, the transport is up, and the
 // agent is serving -- three things the host otherwise infers separately and slowly.
 type Info struct {
-	OK            bool      `json:"ok"`
-	Protocol      int       `json:"protocol"`
-	AgentVersion  string    `json:"agentVersion"`
+	OK           bool   `json:"ok"`
+	Protocol     int    `json:"protocol"`
+	AgentVersion string `json:"agentVersion"`
+	// AgentCommit is the hcsctl commit the agent was built from. Consumers pin a commit
+	// (hcsctl#35), so this is what says which agent a guest is actually running -- rather
+	// than what a build record claims it installed.
+	AgentCommit   string    `json:"agentCommit"`
 	OS            string    `json:"os"`
 	OSVersion     string    `json:"osVersion"`
 	Hostname      string    `json:"hostname"`
