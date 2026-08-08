@@ -41,10 +41,12 @@ func Dispatch(a *cli.Args, e cli.Emit) (int, error) {
 		return list(a, e)
 	case "inspect":
 		return inspect(a, e)
+	case "console":
+		return console(a, e)
 	case "":
-		return cli.Usage, cli.Usagef("vm needs a subcommand: create, start, stop, rm, ls, inspect")
+		return cli.Usage, cli.Usagef("vm needs a subcommand: create, start, stop, rm, ls, inspect, console")
 	default:
-		return cli.Usage, cli.Usagef("unknown vm subcommand %q (expected create, start, stop, rm, ls, inspect)", a.Word(1))
+		return cli.Usage, cli.Usagef("unknown vm subcommand %q (expected create, start, stop, rm, ls, inspect, console)", a.Word(1))
 	}
 }
 
@@ -221,9 +223,17 @@ func create(a *cli.Args, e cli.Emit) (int, error) {
 		}
 	}
 
+	// Every VM gets a COM port. It costs nothing to boot -- measured: a guest whose pipe
+	// nobody reads boots in the same time as one with no COM port at all -- and it is the
+	// only way into a guest whose agent is the broken thing.
+	pipe := a.Option("--serial-pipe")
+	if pipe == "" {
+		pipe = consolePipe(id)
+	}
+
 	record := state{
 		ID: id, BaseVHDX: base, DiskPath: disk, CopyOnWrite: copyOnWrite,
-		CPUs: cpus, MemoryMB: memoryMB, SerialPipe: a.Option("--serial-pipe"),
+		CPUs: cpus, MemoryMB: memoryMB, SerialPipe: pipe,
 		CreatedUTC: time.Now().UTC().Format(time.RFC3339),
 	}
 
