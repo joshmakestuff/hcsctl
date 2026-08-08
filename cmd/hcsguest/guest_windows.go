@@ -50,6 +50,7 @@ func gatherInfo() (guestproto.Info, error) {
 		OK:            true,
 		Protocol:      guestproto.Protocol,
 		AgentVersion:  Version,
+		AgentCommit:   commit(),
 		OS:            "windows",
 		OSVersion:     formatVersion(v.MajorVersion, v.MinorVersion, v.BuildNumber),
 		Hostname:      host,

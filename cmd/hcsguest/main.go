@@ -18,6 +18,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"runtime/debug"
 	"strconv"
 	"time"
 
@@ -27,6 +28,43 @@ import (
 // Version is the agent build. The host reports it in `guest info`, so a guest running a stale
 // agent is visible rather than mysterious.
 const Version = "0.1.0"
+
+// Commit is the hcsctl commit this agent was built from. Consumers pin a commit rather than a
+// release (hcsctl#35), so the commit is the agent's identity -- and stamping it here is what
+// makes that identity survive into the running guest instead of living only in whatever the
+// build recorded. Set by the linker; falls back to the VCS stamp Go embeds by default.
+var Commit = ""
+
+func commit() string {
+	if Commit != "" {
+		return Commit
+	}
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return "unknown"
+	}
+	rev, dirty := "", false
+	for _, s := range info.Settings {
+		switch s.Key {
+		case "vcs.revision":
+			rev = s.Value
+		case "vcs.modified":
+			dirty = s.Value == "true"
+		}
+	}
+	if rev == "" {
+		return "unknown"
+	}
+	if len(rev) > 12 {
+		rev = rev[:12]
+	}
+	if dirty {
+		// A dirty build is not the pinned commit, and saying so is the difference between
+		// "this guest runs pin X" and "this guest runs something like pin X".
+		return rev + "-dirty"
+	}
+	return rev
+}
 
 func main() {
 	verb := ""
@@ -49,7 +87,7 @@ func main() {
 		enc.SetIndent("", "  ")
 		_ = enc.Encode(doc)
 	case "version":
-		fmt.Printf("hcsguest %s protocol %d\n", Version, guestproto.Protocol)
+		fmt.Printf("hcsguest %s commit %s protocol %d\n", Version, commit(), guestproto.Protocol)
 	default:
 		fmt.Fprintln(os.Stderr, "usage: hcsguest serve|info|version")
 		os.Exit(64)

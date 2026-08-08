@@ -105,7 +105,7 @@ func info(a *cli.Args, e cli.Emit) (int, error) {
 	e.Result(res, func() {
 		fmt.Printf("guest %s  %s\n", vmid, doc.Hostname)
 		fmt.Printf("  os       %s %s\n", doc.OS, doc.OSVersion)
-		fmt.Printf("  agent    %s (protocol %d)\n", doc.AgentVersion, doc.Protocol)
+		fmt.Printf("  agent    %s commit %s (protocol %d)\n", doc.AgentVersion, doc.AgentCommit, doc.Protocol)
 		fmt.Printf("  uptime   %ds\n", doc.UptimeSeconds)
 		for _, ad := range doc.Addresses {
 			fmt.Printf("  address  %s %s\n", ad.Interface, ad.Address)
