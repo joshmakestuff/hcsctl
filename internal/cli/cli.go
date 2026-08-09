@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 )
@@ -342,4 +343,43 @@ func (e Emit) Failure(stage string, err error) {
 		return
 	}
 	fmt.Fprintf(os.Stderr, "error [%s]: %v\n", stage, err)
+}
+
+// labelKeyRe constrains a label key to something a consumer can use as a map key or a JSON
+// field without quoting games.
+var labelKeyRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
+
+// ParseLabels turns repeated --label key=value into the stored map. hcsctl assigns labels no
+// meaning: they are stored, reported, and never interpreted (#31). Ownership and run identity
+// are the consumer's policy -- record an owner pid, and scavenge only on proof it is dead.
+//
+// Values are stored verbatim, empty included -- unlike --env, nothing downstream deletes an
+// empty value. A repeated key is a usage error, matching --id's duplicate rule.
+//
+// reserved is the caller's own state-document field names. A label may not shadow one, because
+// a consumer that flattens the document would silently get the label instead of the field.
+// Each verb group carries its own set, since each has its own state shape.
+func ParseLabels(a *Args, reserved map[string]bool) (map[string]string, error) {
+	vals := a.Options("--label")
+	if len(vals) == 0 {
+		return nil, nil
+	}
+	labels := make(map[string]string, len(vals))
+	for _, v := range vals {
+		k, val, found := strings.Cut(v, "=")
+		if !found || k == "" {
+			return nil, Usagef("--label wants key=value, got %q", v)
+		}
+		if !labelKeyRe.MatchString(k) {
+			return nil, Usagef("--label key %q -- keys are alphanumeric with ._- after the first character", k)
+		}
+		if reserved[k] {
+			return nil, Usagef("--label key %q collides with a field the state document already carries", k)
+		}
+		if _, dup := labels[k]; dup {
+			return nil, Usagef("--label %q given more than once", k)
+		}
+		labels[k] = val
+	}
+	return labels, nil
 }

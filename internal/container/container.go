@@ -138,9 +138,13 @@ func containerDir(st *store.Store, id string) string { return filepath.Join(cont
 
 // scratchDir is a subdirectory rather than the container directory itself, because DestroyLayer
 // wants a layer directory and state.json is not part of a layer.
-func scratchDir(st *store.Store, id string) string { return filepath.Join(containerDir(st, id), "scratch") }
+func scratchDir(st *store.Store, id string) string {
+	return filepath.Join(containerDir(st, id), "scratch")
+}
 
-func statePath(st *store.Store, id string) string { return filepath.Join(containerDir(st, id), "state.json") }
+func statePath(st *store.Store, id string) string {
+	return filepath.Join(containerDir(st, id), "state.json")
+}
 
 func writeState(st *store.Store, s state) error {
 	// Failpoint (#19): the only way to reach a real state-write failure is after a real
@@ -347,34 +351,9 @@ var reservedLabelKeys = map[string]bool{
 	"ok": true, "command": true, "state": true, "hcs": true,
 }
 
-var labelKeyRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
-
-// parseLabels turns repeated --label key=value into the stored map. hcsctl assigns labels no
-// meaning. Values are stored verbatim, empty included -- unlike --env, nothing downstream
-// deletes an empty value. A repeated key is a usage error, matching --id's duplicate rule.
+// parseLabels is cli.ParseLabels with this package's reserved key set.
 func parseLabels(a *cli.Args) (map[string]string, error) {
-	vals := a.Options("--label")
-	if len(vals) == 0 {
-		return nil, nil
-	}
-	labels := make(map[string]string, len(vals))
-	for _, v := range vals {
-		k, val, found := strings.Cut(v, "=")
-		if !found || k == "" {
-			return nil, cli.Usagef("--label wants key=value, got %q", v)
-		}
-		if !labelKeyRe.MatchString(k) {
-			return nil, cli.Usagef("--label key %q -- keys are alphanumeric with ._- after the first character", k)
-		}
-		if reservedLabelKeys[k] {
-			return nil, cli.Usagef("--label key %q collides with a field the state document already carries", k)
-		}
-		if _, dup := labels[k]; dup {
-			return nil, cli.Usagef("--label %q given more than once", k)
-		}
-		labels[k] = val
-	}
-	return labels, nil
+	return cli.ParseLabels(a, reservedLabelKeys)
 }
 
 // -- create ------------------------------------------------------------------------------

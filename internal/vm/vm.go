@@ -82,6 +82,24 @@ type state struct {
 	NetworkName string `json:"networkName,omitempty"`
 	EndpointID  string `json:"endpointId,omitempty"`
 	MacAddress  string `json:"macAddress,omitempty"`
+
+	// Labels are stored and reported, never interpreted (#31, #44). Ownership and run identity
+	// are the consumer's policy: hcsctl has no scavenger and no opinion about what "dead"
+	// means, because it is a CLI that exits -- a stopped VM has no owning process to check.
+	// What it provides instead are the facts a consumer joins: a label here, the vm id in the
+	// endpoint's name, and `vm ls --all` for what HCS says is running.
+	Labels map[string]string `json:"labels,omitempty"`
+}
+
+// reservedLabelKeys are the field names a consumer sees when it flattens state.json or an
+// inspect document. A label may not shadow one. Grown alongside the structs in this file.
+var reservedLabelKeys = map[string]bool{
+	"id": true, "baseVhdx": true, "diskPath": true, "copyOnWrite": true, "cpus": true,
+	"memoryMb": true, "serialPipe": true, "createdUtc": true, "labels": true,
+	"networkId": true, "networkName": true, "network": true, "endpointId": true,
+	"macAddress": true, "addresses": true, "endpointError": true,
+	"ok": true, "command": true, "state": true, "hcs": true, "hcsError": true,
+	"store": true, "vms": true, "systems": true,
 }
 
 // Timeouts. Create and start are the two that wait on a guest-side event; the rest are
@@ -149,17 +167,21 @@ type createResult struct {
 	MemoryMB    uint64 `json:"memoryMb"`
 	SerialPipe  string `json:"serialPipe,omitempty"`
 
-	Network     string `json:"network,omitempty"`
-	NetworkID   string `json:"networkId,omitempty"`
-	EndpointID  string `json:"endpointId,omitempty"`
-	MacAddress  string `json:"macAddress,omitempty"`
+	Network    string `json:"network,omitempty"`
+	NetworkID  string `json:"networkId,omitempty"`
+	EndpointID string `json:"endpointId,omitempty"`
+	MacAddress string `json:"macAddress,omitempty"`
 	// Addresses is empty until the endpoint has one, and that is a real answer rather than a
 	// missing one -- a caller polls `vm inspect` for it. See addressesOf and #43.
 	Addresses []string `json:"addresses"`
 }
 
 func create(a *cli.Args, e cli.Emit) (int, error) {
-	if err := a.RejectUnknown("--id", "--vhdx", "--cpus", "--memory-mb", "--serial-pipe", "--store", "--no-copy-on-write", "--network"); err != nil {
+	if err := a.RejectUnknown("--id", "--vhdx", "--cpus", "--memory-mb", "--serial-pipe", "--store", "--no-copy-on-write", "--network", "--label"); err != nil {
+		return cli.Usage, err
+	}
+	labels, err := cli.ParseLabels(a, reservedLabelKeys)
+	if err != nil {
 		return cli.Usage, err
 	}
 
@@ -266,6 +288,7 @@ func create(a *cli.Args, e cli.Emit) (int, error) {
 		ID: id, BaseVHDX: base, DiskPath: disk, CopyOnWrite: copyOnWrite,
 		CPUs: cpus, MemoryMB: memoryMB, SerialPipe: pipe,
 		CreatedUTC: time.Now().UTC().Format(time.RFC3339),
+		Labels:     labels,
 	}
 
 	// The endpoint is made before the compute system, because the document names it. From here
@@ -739,22 +762,41 @@ func ip(a *cli.Args, e cli.Emit) (int, error) {
 // -- ls ----------------------------------------------------------------------------------
 
 type listEntry struct {
-	ID       string `json:"id"`
-	State    string `json:"state"`
-	DiskPath string `json:"diskPath"`
-	CPUs     uint64 `json:"cpus"`
-	MemoryMB uint64 `json:"memoryMb"`
-	Created  string `json:"createdUtc"`
+	ID       string            `json:"id"`
+	State    string            `json:"state"`
+	DiskPath string            `json:"diskPath"`
+	CPUs     uint64            `json:"cpus"`
+	MemoryMB uint64            `json:"memoryMb"`
+	Created  string            `json:"createdUtc"`
+	Labels   map[string]string `json:"labels,omitempty"`
+}
+
+// systemEntry is a compute system on the host, whether or not this store made it. Passed
+// through from HcsEnumerateComputeSystems rather than reshaped.
+//
+// This is half of what a consumer needs to judge a leftover (#44): an endpoint whose name
+// carries a vm id, and no running system with that id, is a candidate. hcsctl deliberately does
+// not draw the conclusion -- see the note on state.Labels.
+type systemEntry struct {
+	ID         string `json:"id"`
+	SystemType string `json:"systemType,omitempty"`
+	Owner      string `json:"owner,omitempty"`
+	RuntimeID  string `json:"runtimeId,omitempty"`
+	State      string `json:"state,omitempty"`
 }
 
 type listResult struct {
 	OK      bool        `json:"ok"`
 	Command string      `json:"command"`
 	VMs     []listEntry `json:"vms"`
+	// Systems is present only with --all, and is host-wide: other tools' VMs, WSL's, and
+	// anything else HCS is running. Absent without the flag rather than empty, so a consumer
+	// cannot mistake "not asked for" for "none".
+	Systems []systemEntry `json:"systems,omitempty"`
 }
 
 func list(a *cli.Args, e cli.Emit) (int, error) {
-	if err := a.RejectUnknown("--store"); err != nil {
+	if err := a.RejectUnknown("--store", "--all"); err != nil {
 		return cli.Usage, err
 	}
 	st, err := openStore(a)
@@ -779,9 +821,18 @@ func list(a *cli.Args, e cli.Emit) (int, error) {
 		res.VMs = append(res.VMs, listEntry{
 			ID: record.ID, State: hcsState(record.ID), DiskPath: record.DiskPath,
 			CPUs: record.CPUs, MemoryMB: record.MemoryMB, Created: record.CreatedUTC,
+			Labels: record.Labels,
 		})
 	}
 	sort.Slice(res.VMs, func(i, j int) bool { return res.VMs[i].Created < res.VMs[j].Created })
+
+	if a.Flag("--all") {
+		systems, serr := hostSystems()
+		if serr != nil {
+			return cli.Failed, serr
+		}
+		res.Systems = systems
+	}
 
 	e.Result(res, func() {
 		if len(res.VMs) == 0 {
@@ -792,6 +843,14 @@ func list(a *cli.Args, e cli.Emit) (int, error) {
 		for _, v := range res.VMs {
 			fmt.Printf("%-38s %-10s %-6d %-8d %s\n", v.ID, v.State, v.CPUs, v.MemoryMB, v.DiskPath)
 		}
+		if res.Systems == nil {
+			return
+		}
+		fmt.Printf("\nevery compute system on the host:\n")
+		fmt.Printf("%-38s %-24s %-16s %s\n", "ID", "OWNER", "STATE", "RUNTIMEID")
+		for _, s := range res.Systems {
+			fmt.Printf("%-38s %-24s %-16s %s\n", s.ID, orDash(s.Owner), orDash(s.State), s.RuntimeID)
+		}
 	})
 	return cli.OK, nil
 }
@@ -799,6 +858,33 @@ func list(a *cli.Args, e cli.Emit) (int, error) {
 // hcsState asks HCS what it thinks, so ls reports the live state rather than what this tool
 // last wrote. "stopped" is a store-side reading, not an HCS one: HCS has no stopped state,
 // it destroys the compute system when it exits, so what is measured is its absence.
+// hostSystems asks HCS what compute systems exist, host-wide. The Owner is whatever each
+// system's own document set -- hcsctl's VMs say "hcsctl", WSL's say "WSL" -- so this is also how
+// a consumer tells its own leftovers from another tool's.
+//
+// A system that has exited is simply absent: HCS destroys it rather than keeping a stopped
+// state. Absence is therefore the signal, and it is why this cannot be read as "everything that
+// was ever created".
+func hostSystems() ([]systemEntry, error) {
+	doc, err := vmcompute.Enumerate("")
+	if err != nil {
+		return nil, err
+	}
+	var systems []systemEntry
+	if err := json.Unmarshal([]byte(doc), &systems); err != nil {
+		return nil, fmt.Errorf("HcsEnumerateComputeSystems returned something unparseable: %w", err)
+	}
+	sort.Slice(systems, func(i, j int) bool { return systems[i].ID < systems[j].ID })
+	return systems, nil
+}
+
+func orDash(s string) string {
+	if s == "" {
+		return "-"
+	}
+	return s
+}
+
 func hcsState(id string) string {
 	sys, err := vmcompute.Open(id)
 	if vmcompute.IsNotFound(err) {
@@ -815,8 +901,14 @@ func hcsState(id string) string {
 	var p struct {
 		State string `json:"State"`
 	}
-	if json.Unmarshal([]byte(props), &p) != nil || p.State == "" {
+	if json.Unmarshal([]byte(props), &p) != nil {
 		return "unknown"
+	}
+	if p.State == "" {
+		// HCS omits State entirely for a compute system that exists but has never been started.
+		// Reporting "unknown" there is wrong: the system is right in front of us, and a consumer
+		// deciding whether a VM is abandoned needs "created" and "cannot tell" kept apart.
+		return "created"
 	}
 	return strings.ToLower(p.State)
 }
@@ -900,9 +992,23 @@ func inspect(a *cli.Args, e cli.Emit) (int, error) {
 				fmt.Printf("  address  %s\n", strings.Join(res.Addresses, ","))
 			}
 		}
+		for _, k := range sortedKeys(record.Labels) {
+			fmt.Printf("  label    %s=%s\n", k, record.Labels[k])
+		}
 		if res.HCSError != "" {
 			fmt.Printf("  hcs      %s\n", res.HCSError)
 		}
 	})
 	return cli.OK, nil
+}
+
+// sortedKeys gives label output a stable order. A map's iteration order is randomised, and a
+// consumer diffing two inspect outputs should not see spurious changes.
+func sortedKeys(m map[string]string) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
