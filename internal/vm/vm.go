@@ -277,7 +277,7 @@ func create(a *cli.Args, e cli.Emit) (int, error) {
 			_ = os.RemoveAll(dir)
 			return cli.Failed, merr
 		}
-		ep, eerr := createVMEndpoint(netw, id+"-ep", mac)
+		ep, eerr := createVMEndpoint(netw, "", endpointName(id), mac)
 		if eerr != nil {
 			_ = os.RemoveAll(dir)
 			return cli.Failed, eerr
@@ -465,6 +465,16 @@ func start(a *cli.Args, e cli.Emit) (int, error) {
 			return cli.Failed, rerr
 		}
 		e.Progress("%s is not running; recreating it over %s", id, record.DiskPath)
+		// The endpoint has to be remade with the system. An endpoint that was attached to the
+		// compute system that just exited cannot be attached to the new one -- HCS rejects the
+		// document with 0x803b0014, blaming a missing device. See remakeVMEndpoint.
+		if record.EndpointID != "" {
+			e.Progress("remaking endpoint %s so it can be attached again", record.EndpointID)
+			if rerr := remakeVMEndpoint(record.NetworkID, record.EndpointID,
+				endpointName(record.ID), record.MacAddress); rerr != nil {
+				return cli.Failed, rerr
+			}
+		}
 		if sys, err = createSystem(record); err != nil {
 			return cli.Failed, err
 		}

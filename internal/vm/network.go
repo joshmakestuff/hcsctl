@@ -90,6 +90,10 @@ func resolveVMNetwork(want string) (*hcn.HostComputeNetwork, error) {
 
 const defaultSwitchName = "Default Switch"
 
+// endpointName is derived from the VM id, so an endpoint left behind by a crashed run says which
+// VM it belonged to without a lookup. HNS does not require it to be unique.
+func endpointName(vmID string) string { return vmID + "-ep" }
+
 // generateMAC builds a locally-administered address in Microsoft's Hyper-V OUI (00-15-5D), which
 // is what the platform hands out for a synthetic NIC.
 //
@@ -105,8 +109,12 @@ func generateMAC() (string, error) {
 
 // createVMEndpoint puts a DHCP endpoint on the network. The endpoint carries no address at this
 // point -- see addressesOf.
-func createVMEndpoint(netw *hcn.HostComputeNetwork, name, mac string) (*hcn.HostComputeEndpoint, error) {
+//
+// An empty id lets HNS assign one. A non-empty id asks for that exact id back, which HNS honours
+// -- that is what makes a restart keep the endpoint id it was created with.
+func createVMEndpoint(netw *hcn.HostComputeNetwork, id, name, mac string) (*hcn.HostComputeEndpoint, error) {
 	ep := &hcn.HostComputeEndpoint{
+		Id:                 id,
 		Name:               name,
 		HostComputeNetwork: netw.Id,
 		SchemaVersion:      hcn.V2SchemaVersion(),
@@ -138,6 +146,31 @@ func deleteVMEndpoint(id string) error {
 		return fmt.Errorf("endpoint %s still exists after Delete returned success", id)
 	} else if !hcn.IsNotFoundError(err) {
 		return fmt.Errorf("confirming endpoint %s is gone: %w", id, err)
+	}
+	return nil
+}
+
+// remakeVMEndpoint destroys the VM's endpoint and makes an identical one.
+//
+// This is not housekeeping, it is a requirement. An endpoint that has been attached to a compute
+// system cannot be attached to another one: HCS rejects the document with 0x803b0014, "the system
+// cannot find the device specified", which names the wrong thing entirely. HCS destroys a compute
+// system when it exits, so every restart builds a new one -- and would hit that on the second
+// boot of any VM with a NIC. Measured 2026-08-09, #43.
+//
+// The id and the MAC are both preserved. The id because callers hold it; the MAC because the ICS
+// DHCP server keys the lease on it, and a restart that kept its address is the whole point --
+// measured, the guest comes back on the same address it had.
+func remakeVMEndpoint(networkID, endpointID, name, mac string) error {
+	netw, err := hcn.GetNetworkByID(networkID)
+	if err != nil {
+		return fmt.Errorf("the network %s this vm's endpoint was on is gone: %w", networkID, err)
+	}
+	if err := deleteVMEndpoint(endpointID); err != nil {
+		return err
+	}
+	if _, err := createVMEndpoint(netw, endpointID, name, mac); err != nil {
+		return err
 	}
 	return nil
 }
