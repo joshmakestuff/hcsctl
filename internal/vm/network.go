@@ -83,8 +83,8 @@ func resolveVMNetwork(want string) (*hcn.HostComputeNetwork, error) {
 		return nil, cli.Usagef("no network named %q, and %d ICS networks to choose from (%s) -- "+
 			"name one with --network", defaultSwitchName, len(ics), strings.Join(names, ", "))
 	}
-	return nil, cli.Usagef("no ICS network on this host, so `--network default` has nothing to "+
-		"choose. The Hyper-V Default Switch is a Windows client SKU feature; name a network "+
+	return nil, cli.Usagef("no ICS network on this host, so `--network default` has nothing to " +
+		"choose. The Hyper-V Default Switch is a Windows client SKU feature; name a network " +
 		"explicitly with --network, or see `hcsctl network ls`")
 }
 
