@@ -626,6 +626,21 @@ func remove(a *cli.Args, e cli.Emit) (int, error) {
 		res.Warnings = append(res.Warnings, "open: "+oerr.Error())
 	}
 
+	// Every grant create made comes back off. An ACE naming a VM that no longer exists is not
+	// a security problem, but nothing else ever removes one, so a base image that has backed a
+	// hundred VMs would carry a hundred dead "NT VIRTUAL MACHINE\<guid>" entries. Measured that
+	// way before this existed.
+	//
+	// Failures are warnings, not errors: the ACE is inert, and refusing to remove the VM over one
+	// would leave a compute system behind to fix a cosmetic problem.
+	if staterr == nil {
+		for _, p := range grantPaths(record.DiskPath, record.BaseVHDX, record.CopyOnWrite) {
+			if rerr := vmcompute.RevokeVmAccess(id, p); rerr != nil {
+				res.Warnings = append(res.Warnings, "revoke "+p+": "+rerr.Error())
+			}
+		}
+	}
+
 	// The endpoint goes after the terminate and before the store record. After, because an
 	// endpoint attached to a running VM is in use; before, because the record is the only thing
 	// that knows the endpoint's id -- delete the record first and a failure here leaks it with
