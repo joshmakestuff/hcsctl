@@ -1,0 +1,89 @@
+# Builds the artifact a consumer acquires. Tag-driven: pushing v* is the whole release
+# ceremony, and nothing else publishes.
+#
+# This does NOT prove the release works. Hosted runners have no Hyper-V, so the same caveat as
+# contract.yml applies -- a green tick here means "built, stamped and published". What "works"
+# means is the elevated smoke transcript on a real host (#38).
+name: release
+
+on:
+  push:
+    tags: ['v*']
+  # Manual runs build and check the artifact without publishing, which is how to test a change
+  # to this file without burning a version number.
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: build, stamp and publish
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      # The same gates contract.yml applies. A tag that cannot pass them should not become a
+      # release: the artifact is what a consumer pins, and an unpinnable-because-broken version
+      # is worse than a missing one.
+      - run: go vet ./...
+      - run: go test ./...
+
+      # CGO_ENABLED=0 keeps it a single file with no runtime dependency, which is the whole
+      # premise of "a consumer drops one exe somewhere and runs it".
+      - name: Build
+        env:
+          CGO_ENABLED: '0'
+          GOOS: windows
+          GOARCH: amd64
+        run: |
+          $version = if ($env:GITHUB_REF_TYPE -eq 'tag') { $env:GITHUB_REF_NAME } else { "dev-$($env:GITHUB_SHA.Substring(0,12))" }
+          "version=$version" >> $env:GITHUB_OUTPUT
+          go build -ldflags "-X github.com/joshmakestuff/hcsctl/internal/cli.ToolVersion=$version" -o hcsctl.exe .
+        id: build
+
+      # The stamp is checked, not assumed. A wrong -X path is silently ignored by the Go linker:
+      # the build succeeds, the binary reports "dev", and the release looks fine until someone
+      # tries to identify which build they have -- which is the one thing #29 exists for.
+      - name: Verify the version stamp took
+        run: |
+          $reported = (./hcsctl.exe version --json | ConvertFrom-Json).toolVersion
+          if ($reported -ne '${{ steps.build.outputs.version }}') {
+            throw "hcsctl reports '$reported' but this build is '${{ steps.build.outputs.version }}' -- the -ldflags -X path is wrong."
+          }
+          Write-Host "hcsctl reports $reported"
+
+      - name: Package
+        run: |
+          Compress-Archive -Path hcsctl.exe -DestinationPath hcsctl-windows-amd64.zip
+          # The hash a consumer pins. Format matches what Get-FileHash prints, because the
+          # consumer side (AspireHcs eng/Get-HcsCtl.ps1) compares against Get-FileHash output.
+          $hash = (Get-FileHash hcsctl-windows-amd64.zip -Algorithm SHA256).Hash
+          "$hash  hcsctl-windows-amd64.zip" | Out-File -FilePath SHA256SUMS -Encoding ascii
+          Write-Host "sha256 $hash"
+
+      - name: Publish
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            hcsctl-windows-amd64.zip
+            SHA256SUMS
+          # Everything before 1.0 is a preview by definition; saying so in the release keeps a
+          # consumer from reading a version number as a stability promise.
+          prerelease: ${{ startsWith(github.ref_name, 'v0.') }}
+          generate_release_notes: true
+
+      # A dispatch run produces no release, so the artifact is attached to the run instead --
+      # otherwise there is no way to check a change to this file without tagging.
+      - name: Attach the artifact to the run instead
+        if: github.ref_type != 'tag'
+        uses: actions/upload-artifact@v4
+        with:
+          name: hcsctl-windows-amd64
+          path: |
+            hcsctl-windows-amd64.zip
+            SHA256SUMS
