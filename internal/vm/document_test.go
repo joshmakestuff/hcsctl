@@ -92,3 +92,57 @@ func keys(m map[string]scsiController) []string {
 }
 
 func contains(haystack, needle string) bool { return strings.Contains(haystack, needle) }
+
+// A VM with no --network has no NetworkAdapters key at all. An empty map would be a different
+// document: the section is omitempty precisely so a VM without networking is byte-identical to
+// what booted before #43.
+func TestNoNetworkAdapterWithoutAnEndpoint(t *testing.T) {
+	d := buildDocument(testSpec())
+	if d.VirtualMachine.Devices.NetworkAdapters != nil {
+		t.Errorf("a VM with no endpoint has NetworkAdapters %v", d.VirtualMachine.Devices.NetworkAdapters)
+	}
+	b, err := json.Marshal(d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if contains(string(b), "NetworkAdapters") {
+		t.Errorf("NetworkAdapters is present in a document with no endpoint:\n%s", b)
+	}
+}
+
+// The adapter names an endpoint that already exists. HCS neither creates nor deletes it, so
+// both fields have to reach the document -- a missing MacAddress lets the platform pick its
+// own, which moves the DHCP lease off the address the endpoint was made with.
+func TestNetworkAdapterCarriesTheEndpointAndMac(t *testing.T) {
+	s := testSpec()
+	s.EndpointID = "11111111-2222-3333-4444-555555555555"
+	s.MacAddress = "02-15-5D-01-02-03"
+
+	adapters := buildDocument(s).VirtualMachine.Devices.NetworkAdapters
+	if len(adapters) != 1 {
+		t.Fatalf("want exactly one adapter, got %d: %v", len(adapters), adapters)
+	}
+	nic, ok := adapters[networkAdapter0]
+	if !ok {
+		t.Fatalf("no adapter under %q; adapters are %v", networkAdapter0, adapters)
+	}
+	if nic.EndpointId != s.EndpointID {
+		t.Errorf("adapter EndpointId is %q, want %q", nic.EndpointId, s.EndpointID)
+	}
+	if nic.MacAddress != s.MacAddress {
+		t.Errorf("adapter MacAddress is %q, want %q", nic.MacAddress, s.MacAddress)
+	}
+}
+
+// The MAC lives in the store record and is rebuilt into the document on every boot, so a
+// stop/start cycle presents the same address to the DHCP server and keeps the same lease.
+func TestSpecForCarriesTheEndpointFromTheRecord(t *testing.T) {
+	record := state{
+		DiskPath: `E:\vms\x\disk.vhdx`, CPUs: 2, MemoryMB: 2048,
+		EndpointID: "11111111-2222-3333-4444-555555555555", MacAddress: "02-15-5D-01-02-03",
+	}
+	s := specFor(record)
+	if s.EndpointID != record.EndpointID || s.MacAddress != record.MacAddress {
+		t.Errorf("specFor dropped the endpoint: %+v", s)
+	}
+}

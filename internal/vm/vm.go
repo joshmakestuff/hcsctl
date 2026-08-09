@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/Microsoft/go-winio/pkg/guid"
+	"github.com/Microsoft/hcsshim/hcn"
 	"github.com/joshmakestuff/hcsctl/internal/cli"
 	"github.com/joshmakestuff/hcsctl/internal/store"
 	"github.com/joshmakestuff/hcsctl/internal/vmcompute"
@@ -43,10 +44,12 @@ func Dispatch(a *cli.Args, e cli.Emit) (int, error) {
 		return inspect(a, e)
 	case "console":
 		return console(a, e)
+	case "ip":
+		return ip(a, e)
 	case "":
-		return cli.Usage, cli.Usagef("vm needs a subcommand: create, start, stop, rm, ls, inspect, console")
+		return cli.Usage, cli.Usagef("vm needs a subcommand: create, start, stop, rm, ls, inspect, ip, console")
 	default:
-		return cli.Usage, cli.Usagef("unknown vm subcommand %q (expected create, start, stop, rm, ls, inspect, console)", a.Word(1))
+		return cli.Usage, cli.Usagef("unknown vm subcommand %q (expected create, start, stop, rm, ls, inspect, ip, console)", a.Word(1))
 	}
 }
 
@@ -56,6 +59,8 @@ type spec struct {
 	CPUs       uint64
 	MemoryMB   uint64
 	SerialPipe string
+	EndpointID string
+	MacAddress string
 }
 
 // state is what a later invocation needs and HCS does not hold: where the disk came from and
@@ -69,6 +74,14 @@ type state struct {
 	MemoryMB    uint64 `json:"memoryMb"`
 	SerialPipe  string `json:"serialPipe,omitempty"`
 	CreatedUTC  string `json:"createdUtc"`
+
+	// The endpoint this tool made, and the adapter it is behind. The id has to survive the
+	// process: an endpoint is host-global, so a `vm rm` running in a later invocation -- or
+	// after a crash -- is the only thing that will ever delete it.
+	NetworkID   string `json:"networkId,omitempty"`
+	NetworkName string `json:"networkName,omitempty"`
+	EndpointID  string `json:"endpointId,omitempty"`
+	MacAddress  string `json:"macAddress,omitempty"`
 }
 
 // Timeouts. Create and start are the two that wait on a guest-side event; the rest are
@@ -135,10 +148,18 @@ type createResult struct {
 	CPUs        uint64 `json:"cpus"`
 	MemoryMB    uint64 `json:"memoryMb"`
 	SerialPipe  string `json:"serialPipe,omitempty"`
+
+	Network     string `json:"network,omitempty"`
+	NetworkID   string `json:"networkId,omitempty"`
+	EndpointID  string `json:"endpointId,omitempty"`
+	MacAddress  string `json:"macAddress,omitempty"`
+	// Addresses is empty until the endpoint has one, and that is a real answer rather than a
+	// missing one -- a caller polls `vm inspect` for it. See addressesOf and #43.
+	Addresses []string `json:"addresses"`
 }
 
 func create(a *cli.Args, e cli.Emit) (int, error) {
-	if err := a.RejectUnknown("--id", "--vhdx", "--cpus", "--memory-mb", "--serial-pipe", "--store", "--no-copy-on-write"); err != nil {
+	if err := a.RejectUnknown("--id", "--vhdx", "--cpus", "--memory-mb", "--serial-pipe", "--store", "--no-copy-on-write", "--network"); err != nil {
 		return cli.Usage, err
 	}
 
@@ -177,6 +198,16 @@ func create(a *cli.Args, e cli.Emit) (int, error) {
 	if s := a.Option("--memory-mb"); s != "" {
 		if memoryMB, err = cli.ParseUint(s, 1<<20); err != nil {
 			return cli.Usage, cli.Usagef("--memory-mb %v", err)
+		}
+	}
+
+	// Resolved before anything is made. This is argument validation -- a name that matches no
+	// network is exit 64, and 64 means nothing was attempted, so it cannot happen after a
+	// differencing disk has been written and rolled back.
+	var netw *hcn.HostComputeNetwork
+	if want := a.Option("--network"); want != "" {
+		if netw, err = resolveVMNetwork(want); err != nil {
+			return cli.Usage, err
 		}
 	}
 
@@ -237,10 +268,39 @@ func create(a *cli.Args, e cli.Emit) (int, error) {
 		CreatedUTC: time.Now().UTC().Format(time.RFC3339),
 	}
 
+	// The endpoint is made before the compute system, because the document names it. From here
+	// on every failure has to take it back down: it is host-global, and nothing in the store
+	// yet points at it, so an early return without this leaks it permanently.
+	if netw != nil {
+		mac, merr := generateMAC()
+		if merr != nil {
+			_ = os.RemoveAll(dir)
+			return cli.Failed, merr
+		}
+		ep, eerr := createVMEndpoint(netw, id+"-ep", mac)
+		if eerr != nil {
+			_ = os.RemoveAll(dir)
+			return cli.Failed, eerr
+		}
+		record.NetworkID, record.NetworkName = netw.Id, netw.Name
+		record.EndpointID, record.MacAddress = ep.Id, mac
+		e.Progress("endpoint:  %s on %s (mac %s)", ep.Id, netw.Name, mac)
+	}
+
+	// undo takes back everything made so far, in reverse. Used on every failure below.
+	undo := func() {
+		if record.EndpointID != "" {
+			if derr := deleteVMEndpoint(record.EndpointID); derr != nil {
+				e.Progress("WARNING: leaked endpoint %s: %v", record.EndpointID, derr)
+			}
+		}
+		_ = os.RemoveAll(dir)
+	}
+
 	e.Progress("creating compute system %s", id)
 	sys, err := createSystem(record)
 	if err != nil {
-		_ = os.RemoveAll(dir)
+		undo()
 		return cli.Failed, err
 	}
 	// Closing the handle does not stop the VM: the document sets
@@ -248,16 +308,42 @@ func create(a *cli.Args, e cli.Emit) (int, error) {
 	sys.Close()
 
 	if err := writeState(st, record); err != nil {
+		undo()
 		return cli.Failed, err
+	}
+
+	// Read the endpoint now that it is attached to a NIC but before anything has started. This
+	// is the measurement #43 is waiting on: an address here means HNS fills one in at attach
+	// time and no wait verb is needed; nothing here means it comes from the guest's own DHCP
+	// client and a caller has to wait for it.
+	var addrs []string
+	if record.EndpointID != "" {
+		var aerr error
+		if addrs, aerr = addressesOf(record.EndpointID); aerr != nil {
+			e.Progress("WARNING: reading endpoint %s: %v", record.EndpointID, aerr)
+		}
+		e.Progress("addresses after attach, before start: %v", addrs)
 	}
 
 	e.Result(createResult{
 		OK: true, Command: "vm create", ID: id, DiskPath: disk, CopyOnWrite: copyOnWrite,
 		CPUs: cpus, MemoryMB: memoryMB, SerialPipe: record.SerialPipe,
+		Network: record.NetworkName, NetworkID: record.NetworkID,
+		EndpointID: record.EndpointID, MacAddress: record.MacAddress,
+		Addresses: addrs,
 	}, func() {
 		fmt.Printf("created %s\n", id)
 		fmt.Printf("  disk    %s\n", disk)
 		fmt.Printf("  cpus    %d\n  memory  %d MB\n", cpus, memoryMB)
+		if record.EndpointID != "" {
+			fmt.Printf("  network %s\n", record.NetworkName)
+			fmt.Printf("  mac     %s\n", record.MacAddress)
+			if len(addrs) == 0 {
+				fmt.Printf("  address none yet -- the guest has not leased one\n")
+			} else {
+				fmt.Printf("  address %s\n", strings.Join(addrs, ","))
+			}
+		}
 		fmt.Printf("start it with: hcsctl vm start --id %s\n", id)
 	})
 	return cli.OK, nil
@@ -312,13 +398,20 @@ func samePath(a, b string) bool {
 // through it: a VM that has exited no longer exists as a compute system, so starting one again
 // is literally creating it again over the same disk.
 func createSystem(record state) (*vmcompute.System, error) {
-	doc := buildDocument(spec{
+	doc := buildDocument(specFor(record))
+	return vmcompute.Create(record.ID, doc, createTimeout)
+}
+
+// spec for the record, so create and start build the same document from the same source.
+func specFor(record state) spec {
+	return spec{
 		DiskPath:   record.DiskPath,
 		CPUs:       record.CPUs,
 		MemoryMB:   record.MemoryMB,
 		SerialPipe: record.SerialPipe,
-	})
-	return vmcompute.Create(record.ID, doc, createTimeout)
+		EndpointID: record.EndpointID,
+		MacAddress: record.MacAddress,
+	}
 }
 
 func grantPaths(disk, base string, copyOnWrite bool) []string {
@@ -500,6 +593,22 @@ func remove(a *cli.Args, e cli.Emit) (int, error) {
 		res.Warnings = append(res.Warnings, "open: "+oerr.Error())
 	}
 
+	// The endpoint goes after the terminate and before the store record. After, because an
+	// endpoint attached to a running VM is in use; before, because the record is the only thing
+	// that knows the endpoint's id -- delete the record first and a failure here leaks it with
+	// nothing left pointing at it.
+	if record.EndpointID != "" {
+		if derr := deleteVMEndpoint(record.EndpointID); derr != nil {
+			if !a.Flag("--force") {
+				return cli.Failed, fmt.Errorf("%w -- the store record is kept so the endpoint can "+
+					"still be found; --force removes the vm anyway and leaks it", derr)
+			}
+			res.Warnings = append(res.Warnings, "endpoint "+record.EndpointID+": "+derr.Error())
+		} else {
+			res.Removed = append(res.Removed, "endpoint "+record.EndpointID)
+		}
+	}
+
 	// Only what this tool made. A --no-copy-on-write VM points at the caller's own image, and
 	// removing the VM must never remove that.
 	dir := vmDir(st, id)
@@ -528,6 +637,93 @@ func remove(a *cli.Args, e cli.Emit) (int, error) {
 		}
 	})
 	return cli.OK, nil
+}
+
+// -- ip ----------------------------------------------------------------------------------
+
+type ipResult struct {
+	OK         bool     `json:"ok"`
+	Command    string   `json:"command"`
+	ID         string   `json:"id"`
+	EndpointID string   `json:"endpointId"`
+	Addresses  []string `json:"addresses"`
+	WaitedMS   int64    `json:"waitedMs"`
+}
+
+// ipPollInterval is how often the endpoint is re-read. A DHCP handshake is not fast enough for
+// a tighter loop to find the answer sooner, and each read is an HNS call.
+const ipPollInterval = 2 * time.Second
+
+// ip waits for the address the guest leases.
+//
+// This verb exists because of a measurement, not a guess: an endpoint carries no address when it
+// is created, none when it is attached to a NIC, and none while the compute system runs without
+// a guest OS in it (#43, 2026-08-09). The address can only come from the guest's own DHCP
+// client, so a consumer that wants one has to wait, and doing that by polling `vm inspect` in a
+// shell loop is worse than doing it here.
+//
+// It waits, deliberately, rather than answering once. `vm start` returning means the firmware is
+// running -- the guest has not booted, let alone leased -- so a single-shot read would answer
+// "none" for every caller who did the obvious thing.
+func ip(a *cli.Args, e cli.Emit) (int, error) {
+	if err := a.RejectUnknown("--id", "--timeout", "--store"); err != nil {
+		return cli.Usage, err
+	}
+	id, err := requireID(a)
+	if err != nil {
+		return cli.Usage, err
+	}
+
+	timeout := 60 * time.Second
+	if s := a.Option("--timeout"); s != "" {
+		d, perr := time.ParseDuration(s)
+		if perr != nil || d <= 0 {
+			return cli.Usage, cli.Usagef("--timeout must be a positive duration, e.g. 60s")
+		}
+		timeout = d
+	}
+
+	st, err := openStore(a)
+	if err != nil {
+		return cli.Failed, err
+	}
+	record, err := readState(st, id)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return cli.Failed, fmt.Errorf("no vm %s in the store", id)
+		}
+		return cli.Failed, err
+	}
+	if record.EndpointID == "" {
+		return cli.Failed, fmt.Errorf("vm %s has no network endpoint -- it was created without --network", id)
+	}
+
+	began := time.Now()
+	deadline := began.Add(timeout)
+	for {
+		addrs, aerr := addressesOf(record.EndpointID)
+		if aerr != nil {
+			return cli.Failed, fmt.Errorf("reading endpoint %s: %w", record.EndpointID, aerr)
+		}
+		if len(addrs) > 0 {
+			waited := time.Since(began).Milliseconds()
+			e.Result(ipResult{OK: true, Command: "vm ip", ID: id, EndpointID: record.EndpointID,
+				Addresses: addrs, WaitedMS: waited}, func() {
+				fmt.Printf("%s\n", strings.Join(addrs, "\n"))
+			})
+			return cli.OK, nil
+		}
+		if time.Now().After(deadline) {
+			// Named as the guest's failure, because that is what it is: the endpoint is fine
+			// and HNS is fine, and nothing on the host can produce an address on its own.
+			return cli.Failed, fmt.Errorf(
+				"vm %s has no address after %s -- the guest has not taken a DHCP lease. Check that "+
+					"it booted (hcsctl vm console --id %s) and that its NIC is configured for DHCP",
+				id, timeout, id)
+		}
+		e.Progress("no address yet; waiting")
+		time.Sleep(ipPollInterval)
+	}
 }
 
 // -- ls ----------------------------------------------------------------------------------
@@ -628,6 +824,11 @@ type inspectResult struct {
 	// HCSError records why the HCS half is missing, instead of an empty object that reads
 	// like the VM has no properties.
 	HCSError string `json:"hcsError,omitempty"`
+	// Addresses is what the endpoint holds right now, which is the field a consumer polls
+	// while it waits for the guest to take a lease. Empty for a VM with no endpoint, and
+	// empty for one whose guest has not leased yet -- EndpointError tells those apart.
+	Addresses     []string `json:"addresses"`
+	EndpointError string   `json:"endpointError,omitempty"`
 }
 
 func inspect(a *cli.Args, e cli.Emit) (int, error) {
@@ -650,7 +851,14 @@ func inspect(a *cli.Args, e cli.Emit) (int, error) {
 		return cli.Failed, err
 	}
 
-	res := inspectResult{OK: true, Command: "vm inspect", ID: id, Store: record}
+	res := inspectResult{OK: true, Command: "vm inspect", ID: id, Store: record, Addresses: []string{}}
+	if record.EndpointID != "" {
+		if addrs, aerr := addressesOf(record.EndpointID); aerr != nil {
+			res.EndpointError = aerr.Error()
+		} else {
+			res.Addresses = addrs
+		}
+	}
 	if sys, oerr := vmcompute.Open(id); oerr == nil {
 		props, perr := sys.Properties("")
 		sys.Close()
@@ -670,6 +878,18 @@ func inspect(a *cli.Args, e cli.Emit) (int, error) {
 		fmt.Printf("  cow      %t\n", record.CopyOnWrite)
 		fmt.Printf("  cpus     %d\n  memory   %d MB\n", record.CPUs, record.MemoryMB)
 		fmt.Printf("  state    %s\n", hcsState(id))
+		if record.EndpointID != "" {
+			fmt.Printf("  network  %s\n", record.NetworkName)
+			fmt.Printf("  endpoint %s (mac %s)\n", record.EndpointID, record.MacAddress)
+			switch {
+			case res.EndpointError != "":
+				fmt.Printf("  address  %s\n", res.EndpointError)
+			case len(res.Addresses) == 0:
+				fmt.Printf("  address  none yet\n")
+			default:
+				fmt.Printf("  address  %s\n", strings.Join(res.Addresses, ","))
+			}
+		}
 		if res.HCSError != "" {
 			fmt.Printf("  hcs      %s\n", res.HCSError)
 		}
