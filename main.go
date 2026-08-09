@@ -64,7 +64,7 @@ func run(argv []string) int {
 		}
 	}
 
-	args, err := cli.Parse(argv, "--json", "--stream-json", "--blobs", "--keep", "--force", "--writable", "--follow", "--no-copy-on-write", "--no-input")
+	args, err := cli.Parse(argv, "--json", "--stream-json", "--blobs", "--keep", "--force", "--writable", "--follow", "--no-copy-on-write", "--no-input", "--all")
 	if err != nil {
 		e.Failure("usage", err)
 		usage()
@@ -260,13 +260,22 @@ usage: hcsctl <group> <verb> [options]
   network ls        Host compute networks, their subnets and endpoint counts. Unelevated.
   network endpoints [--network <name|id>]      Endpoints and their addresses. Unelevated.
 
-  vm create  --vhdx <path> [--id <guid>] [--cpus N] [--memory-mb N]
-             [--serial-pipe \\.\pipe\name] [--no-copy-on-write] [--store <dir>]
+  vm create  --vhdx <path> [--id <guid>] [--cpus N] [--memory-mb N] [--network <name|id|default>]
+             [--serial-pipe \\.\pipe\name] [--no-copy-on-write] [--label key=value]...
+             [--store <dir>]
                Make a Hyper-V VM that boots a Gen 2 VHDX. By default the disk is a
                differencing child, so the image is never written to; --no-copy-on-write boots
                the image itself and MUTATES it. The id is a GUID because it is also the VM's
                hvsocket address -- guest info --vmid takes it unchanged. Unelevated;
                Hyper-V Administrators is enough. Does not start it.
+               --network attaches a DHCP endpoint on an EXISTING network; --network default
+               picks the Hyper-V Default Switch, which is the ICS network whose built-in DHCP
+               serves an arbitrary guest image. A full VM's guest runs its own DHCP client, so
+               unlike a container the address is not configured into it -- vm create reports
+               whatever the endpoint holds, which is nothing until the guest leases one. Wait
+               for it with vm ip. The endpoint is deleted by vm rm and nothing else.
+               --label stores opaque key=value pairs in state.json, reported by ls and inspect
+               and never interpreted -- record an owner pid; scavenge only on proof it is dead.
   vm start   --id <guid>
                Start returning means the firmware is running, NOT that the guest is up --
                unlike a container. Ask guest info for guest readiness.
@@ -276,7 +285,17 @@ usage: hcsctl <group> <verb> [options]
   vm rm      --id <guid> [--force]
                Terminates, then removes only what this tool made. A --no-copy-on-write VM's
                base image is never removed.
-  vm ls      [--store <dir>]                   VMs and the state HCS reports for each.
+  vm ip      --id <guid> [--timeout 60s]
+               Wait for the address the guest leases, and print it. An endpoint carries no
+               address when it is created, none when it is attached, and none while the VM runs
+               without a guest -- measured -- so this waits rather than answering once. A VM
+               made without --network has nothing to wait for and fails saying so.
+  vm ls      [--all] [--store <dir>]           VMs and the state HCS reports for each.
+               --all also lists every compute system on the host with its owner, state and
+               runtime id -- other tools' VMs included. hcsctl does not scavenge and holds no
+               opinion about what a dead run is; it reports facts. A consumer joins three of
+               them: its own --label on a vm, the vm id carried in the endpoint's name, and
+               this list. See issue #44.
   vm inspect --id <guid>                       The store's record plus the HCS properties.
   vm console --id <guid> [--no-input] [--timeout 15s]
                Attach to the VM's serial console over its COM1 named pipe. This is the

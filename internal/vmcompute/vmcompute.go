@@ -51,6 +51,7 @@ var (
 	procRegister   = dll.NewProc("HcsRegisterComputeSystemCallback")
 	procUnregister = dll.NewProc("HcsUnregisterComputeSystemCallback")
 	procGrant      = dll.NewProc("GrantVmAccess")
+	procRevoke     = dll.NewProc("RevokeVmAccess")
 
 	ole32             = windows.NewLazySystemDLL("ole32.dll")
 	procCoTaskMemFree = ole32.NewProc("CoTaskMemFree")
@@ -390,6 +391,22 @@ func GrantVmAccess(vmID, path string) error {
 	hr, _, _ := procGrant.Call(utf16(vmID), utf16(path))
 	if !ok(hr) {
 		return &Error{Op: "GrantVmAccess", Code: uint32(hr), Result: path}
+	}
+	return nil
+}
+
+// RevokeVmAccess removes the ACE GrantVmAccess added.
+//
+// Without it every create leaves a permanent "NT VIRTUAL MACHINE\<guid>" entry on the base
+// image, one per VM, and nothing ever removes them -- a base image that has backed a hundred
+// VMs carries a hundred dead grants. Measured: three named grants survived three create/rm
+// cycles against one image.
+//
+// Exported from vmcompute.dll under the bare name, like GrantVmAccess.
+func RevokeVmAccess(vmID, path string) error {
+	hr, _, _ := procRevoke.Call(utf16(vmID), utf16(path))
+	if !ok(hr) {
+		return &Error{Op: "RevokeVmAccess", Code: uint32(hr), Result: path}
 	}
 	return nil
 }

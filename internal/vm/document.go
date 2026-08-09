@@ -63,10 +63,22 @@ type vmProcessor struct {
 }
 
 type devices struct {
-	Scsi     map[string]scsiController `json:"Scsi,omitempty"`
-	ComPorts map[string]comPort        `json:"ComPorts,omitempty"`
-	HvSocket *hvSocket                 `json:"HvSocket,omitempty"`
+	Scsi            map[string]scsiController `json:"Scsi,omitempty"`
+	ComPorts        map[string]comPort        `json:"ComPorts,omitempty"`
+	HvSocket        *hvSocket                 `json:"HvSocket,omitempty"`
+	NetworkAdapters map[string]networkAdapter `json:"NetworkAdapters,omitempty"`
 }
+
+// networkAdapter names an HCN endpoint that already exists. HCS does not create it and does not
+// delete it: the endpoint is host-global, made before the compute system and removed after it.
+type networkAdapter struct {
+	EndpointId string `json:"EndpointId"`
+	MacAddress string `json:"MacAddress"`
+}
+
+// networkAdapter0 is the key of the one adapter. Unlike the SCSI controller's key it is not
+// referenced from anywhere else in the document, so it is a label and nothing more.
+const networkAdapter0 = "ext"
 
 type hvSocket struct {
 	HvSocketConfig hvSocketSystemConfig `json:"HvSocketConfig"`
@@ -156,6 +168,11 @@ func buildDocument(spec spec) document {
 	}
 	if spec.SerialPipe != "" {
 		d.VirtualMachine.Devices.ComPorts = map[string]comPort{"0": {NamedPipe: spec.SerialPipe}}
+	}
+	if spec.EndpointID != "" {
+		d.VirtualMachine.Devices.NetworkAdapters = map[string]networkAdapter{
+			networkAdapter0: {EndpointId: spec.EndpointID, MacAddress: spec.MacAddress},
+		}
 	}
 	return d
 }
