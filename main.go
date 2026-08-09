@@ -260,13 +260,19 @@ usage: hcsctl <group> <verb> [options]
   network ls        Host compute networks, their subnets and endpoint counts. Unelevated.
   network endpoints [--network <name|id>]      Endpoints and their addresses. Unelevated.
 
-  vm create  --vhdx <path> [--id <guid>] [--cpus N] [--memory-mb N]
+  vm create  --vhdx <path> [--id <guid>] [--cpus N] [--memory-mb N] [--network <name|id|default>]
              [--serial-pipe \\.\pipe\name] [--no-copy-on-write] [--store <dir>]
                Make a Hyper-V VM that boots a Gen 2 VHDX. By default the disk is a
                differencing child, so the image is never written to; --no-copy-on-write boots
                the image itself and MUTATES it. The id is a GUID because it is also the VM's
                hvsocket address -- guest info --vmid takes it unchanged. Unelevated;
                Hyper-V Administrators is enough. Does not start it.
+               --network attaches a DHCP endpoint on an EXISTING network; --network default
+               picks the Hyper-V Default Switch, which is the ICS network whose built-in DHCP
+               serves an arbitrary guest image. A full VM's guest runs its own DHCP client, so
+               unlike a container the address is not configured into it -- vm create reports
+               whatever the endpoint holds, which is nothing until the guest leases one. Wait
+               for it with vm ip. The endpoint is deleted by vm rm and nothing else.
   vm start   --id <guid>
                Start returning means the firmware is running, NOT that the guest is up --
                unlike a container. Ask guest info for guest readiness.
@@ -276,6 +282,11 @@ usage: hcsctl <group> <verb> [options]
   vm rm      --id <guid> [--force]
                Terminates, then removes only what this tool made. A --no-copy-on-write VM's
                base image is never removed.
+  vm ip      --id <guid> [--timeout 60s]
+               Wait for the address the guest leases, and print it. An endpoint carries no
+               address when it is created, none when it is attached, and none while the VM runs
+               without a guest -- measured -- so this waits rather than answering once. A VM
+               made without --network has nothing to wait for and fails saying so.
   vm ls      [--store <dir>]                   VMs and the state HCS reports for each.
   vm inspect --id <guid>                       The store's record plus the HCS properties.
   vm console --id <guid> [--no-input] [--timeout 15s]
