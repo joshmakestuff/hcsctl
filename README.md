@@ -86,29 +86,18 @@ and failed, `64` bad arguments with nothing attempted. A guest process's own exi
 reported as `exitCode` in the result document, never as hcsctl's exit code — those two things
 mean different things and conflating them makes `--json` unusable.
 
-## Two rules
-
-**Public hcsshim packages only** — `pkg/*`, the root package, `computestorage`, `osversion`.
-Needing `internal/` is a signal to reconsider the design, not to fork.
+## Elevation and isolation
 
 **`image import` is elevated, permanently.** Extraction needs `SeBackupPrivilege` +
 `SeRestorePrivilege`, both UAC filtering triggers. `ProcessBaseLayer` additionally needs an
 enabled `BUILTIN\Administrators` SID — a group check no user-rights assignment satisfies in a
 filtered token. `hcsctl info` reports what your token actually holds.
 
-## Why Hyper-V isolation first
-
-`container` builds Hyper-V-isolated (xenon) containers. The host creates a scratch layer and
-hands it, plus the read-only layer directories, to a utility VM that does the stacking inside
-the guest — so there is no `ActivateLayer`/`PrepareLayer` on the host and no host volume path.
-
-Process isolation (argon) is the other shape, and it is not first because `PrepareLayer` runs at
-*every* container start and needs an enabled `BUILTIN\Administrators` SID. That makes an
-unprivileged argon impossible, not merely awkward. A xenon never touches that path.
-
-Measured on Windows 11 build 26200 with an `ltsc2022` image: the guest reports
-`10.0.20348.5386` while the host is `10.0.26200.8894`. A version mismatch like that is only
-possible because the guest is a separate VM.
+`container` builds Hyper-V-isolated (xenon) containers, so the guest can be an older Windows
+build than the host. Process isolation (argon) is out of scope and refused up front with the
+reason named — the reason is in
+[#8](https://github.com/joshmakestuff/hcsctl/issues/8) and the workspace's
+`docs/decisions.md`.
 
 ## Build
 
