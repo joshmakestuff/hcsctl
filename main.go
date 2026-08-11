@@ -309,9 +309,9 @@ usage: hcsctl <group> <verb> [options]
                                                Hyper-V socket. Needs no NIC, no DHCP lease
                                                and no elevation; needs hcsguest in the image.
   guest exec --vmid <guid> --cmd "..." [--cwd D] [--env NAME=value]... [--timeout 30s]
-                                               Run a command in the guest. The guest's exit
-                                               code is exitCode in the document, never
-                                               hcsctl's.
+                                               Run a command in the guest. --timeout must be at
+                                               least one second. The guest's exit code is exitCode
+                                               in the document, never hcsctl's.
   guest forward --vmid <guid> --port <n> [--listen 127.0.0.1:2222]
                                                Publish a guest TCP port on the host. The
                                                agent dials it on the guest's loopback, which
