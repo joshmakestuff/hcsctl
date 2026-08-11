@@ -68,6 +68,8 @@ hcsctl vm stop    --id <guid> [--force]              # by default, so the image 
 hcsctl vm rm      --id <guid> [--force]              # The id is also the hvsocket address.
 hcsctl vm ls
 hcsctl vm inspect --id <guid>
+hcsctl vm netconfig --id <guid> [--dns <ip,ip>]      # program the guest with its endpoint's
+                                                     # allocation (hcsctl-owned networks, #60)
 hcsctl vm console --id <guid> [--no-input]           # serial console; no agent, no NIC
 
 hcsctl guest info    --vmid <guid>                   # unelevated; over a Hyper-V socket, so

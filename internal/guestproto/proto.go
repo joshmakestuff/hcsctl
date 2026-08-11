@@ -20,6 +20,10 @@ const VsockPort = 5731
 
 // Protocol is the wire version. A mismatch is a hard failure and is never negotiated: nothing
 // in this workspace has users, so an old agent is a bug to fix rather than a case to support.
+//
+// Adding a verb is NOT a bump -- the same rule as cli.ContractVersion. An old agent answers an
+// unknown verb with a Failure document naming it, which is already the right error. The number
+// moves only when an existing verb's wire shape or meaning changes.
 const Protocol = 1
 
 // Request is one JSON object, newline-terminated, sent as the first thing on a connection.
@@ -44,6 +48,38 @@ type Request struct {
 	// TimeoutSeconds kills the process in the guest on expiry. Enforced guest-side as well as
 	// host-side, so a host that gives up does not leave the process running forever.
 	TimeoutSeconds int `json:"timeoutSeconds,omitempty"`
+
+	// NetConfig is the netconfig verb's payload.
+	NetConfig *NetConfig `json:"netConfig,omitempty"`
+}
+
+// NetConfig asks the agent to program an interface with the addressing the host already knows
+// (#60): on an hcsctl-owned network, HNS allocates the endpoint's address at create and no
+// DHCP server exists to deliver it, so the host sends it through this verb instead.
+//
+// The agent applies it through the guest's own network manager, never around it. Measured
+// 2026-08-11 (natlab nmprobe): an address added with raw `ip addr add` is torn down when
+// NetworkManager's DHCP transaction fails 45 s later; a connection-profile change holds.
+type NetConfig struct {
+	// Interface is the connection to modify. Empty means eth0, which is what the hcs-images
+	// guests have.
+	Interface string `json:"interface,omitempty"`
+	// Addresses in CIDR form. At least one is required -- an empty netconfig has no meaning.
+	Addresses []string `json:"addresses"`
+	Gateway   string   `json:"gateway,omitempty"`
+	DNS       []string `json:"dns,omitempty"`
+}
+
+// NetConfigResult reports what the guest observes AFTER applying, not what was requested.
+// This is the attestation that lets `vm ip` say what the guest has rather than what HNS
+// allocated (#59).
+type NetConfigResult struct {
+	OK       bool   `json:"ok"`
+	Protocol int    `json:"protocol"`
+	// Applied names the mechanism, e.g. "nmcli". A reader of a transcript should not have to
+	// guess how the guest was configured.
+	Applied   string    `json:"applied"`
+	Addresses []Address `json:"addresses"`
 }
 
 // ForwardOK is the agent's reply to a forward request, sent before any payload. The caller
