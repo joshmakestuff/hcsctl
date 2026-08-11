@@ -64,7 +64,7 @@ func run(argv []string) int {
 		}
 	}
 
-	args, err := cli.Parse(argv, "--json", "--stream-json", "--blobs", "--keep", "--force", "--writable", "--follow", "--no-copy-on-write", "--no-input", "--all")
+	args, err := cli.Parse(argv, "--json", "--stream-json", "--blobs", "--keep", "--force", "--writable", "--follow", "--no-copy-on-write", "--no-input", "--all", "--interactive", "--tty")
 	if err != nil {
 		e.Failure("usage", err)
 		usage()
@@ -209,10 +209,10 @@ usage: hcsctl <group> <verb> [options]
                until the primary exits or the pump dies. Under --stream-json, followed lines
                are framed {"stream":"log"} (the file merges guest stdout and stderr).
   container exec   --id <id> --cmd "<cmdline>" [--cwd D] [--user U] [--env NAME=value]...
-                   [--timeout 30s]
-               Without --timeout, waits for the guest process forever -- that is how a
-               caller follows a long-running app's output. With it, the process is killed
-               on expiry and the result reports timedOut=true with a null exitCode.
+                   [--timeout 30s] [--interactive [--tty]]
+               Default stdin closes immediately. --interactive forwards this process's stdin
+               and closes the guest side on EOF; --tty adds an emulated console. Neither can
+               be used with --json or --stream-json. Ctrl-C kills only the exec process.
 
   container kill   --id <id> --pid <pid>
                Kill one guest process and confirm it is gone. PIDs come from container ps

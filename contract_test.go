@@ -130,6 +130,8 @@ var usageCases = []struct {
 	{"timeout not a duration", []string{"container", "exec", "--id", "a", "--cmd", "c", "--timeout", "soon"}},
 	{"timeout not positive", []string{"container", "exec", "--id", "a", "--cmd", "c", "--timeout", "-3s"}},
 	{"guest exec timeout below one second", []string{"guest", "exec", "--vmid", "00000000-0000-0000-0000-000000000000", "--cmd", "c", "--timeout", "500ms"}},
+	{"tty requires interactive", []string{"container", "exec", "--id", "a", "--cmd", "c", "--tty"}},
+	{"interactive rejects stream json", []string{"container", "exec", "--id", "a", "--cmd", "c", "--interactive", "--stream-json"}},
 	{"kill without pid", []string{"container", "kill", "--id", "a"}},
 	{"kill pid not a number", []string{"container", "kill", "--id", "a", "--pid", "abc"}},
 	{"id with traversal", []string{"container", "start", "--id", `..\..\x`}},
@@ -180,6 +182,27 @@ func TestUsageErrorsEmitOneJSONDocument(t *testing.T) {
 				t.Fatalf("exit %d, want 64\nstderr: %s", r.code, r.stderr)
 			}
 			oneDoc(t, r.stdout, false)
+		})
+	}
+}
+
+func TestInteractiveRejectsJSONOutputContracts(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+		json bool
+	}{
+		{"json", []string{"container", "exec", "--id", "a", "--cmd", "c", "--interactive", "--json"}, true},
+		{"stream json", []string{"container", "exec", "--id", "a", "--cmd", "c", "--interactive", "--json", "--stream-json"}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := invoke(t, tc.args...)
+			if r.code != 64 {
+				t.Fatalf("exit %d, want 64\nstderr: %s", r.code, r.stderr)
+			}
+			if tc.json {
+				oneDoc(t, r.stdout, false)
+			}
 		})
 	}
 }
