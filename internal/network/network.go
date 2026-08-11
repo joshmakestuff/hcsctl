@@ -15,11 +15,11 @@ package network
 
 import (
 	"fmt"
-	"sort"
-	"strings"
-
 	"github.com/Microsoft/hcsshim/hcn"
 	"github.com/joshmakestuff/hcsctl/internal/cli"
+	"net/netip"
+	"sort"
+	"strings"
 )
 
 func Dispatch(a *cli.Args, e cli.Emit) (int, error) {
@@ -28,10 +28,14 @@ func Dispatch(a *cli.Args, e cli.Emit) (int, error) {
 		return list(a, e)
 	case "endpoints":
 		return endpoints(a, e)
+	case "create":
+		return create(a, e)
+	case "rm":
+		return remove(a, e)
 	case "":
-		return cli.Usage, cli.Usagef("network needs a subcommand: ls, endpoints")
+		return cli.Usage, cli.Usagef("network needs a subcommand: ls, endpoints, create, rm")
 	default:
-		return cli.Usage, cli.Usagef("unknown network subcommand %q (expected ls, endpoints)", a.Word(1))
+		return cli.Usage, cli.Usagef("unknown network subcommand %q (expected ls, endpoints, create, rm)", a.Word(1))
 	}
 }
 
@@ -176,4 +180,197 @@ func trunc(s string, n int) string {
 		return s
 	}
 	return s[:n-1] + "~"
+}
+
+// -- create -------------------------------------------------------------------------------
+
+type networkMutationResult struct {
+	OK      bool     `json:"ok"`
+	Command string   `json:"command"`
+	ID      string   `json:"id"`
+	Name    string   `json:"name"`
+	Type    string   `json:"type"`
+	Subnets []string `json:"subnets"`
+}
+
+func create(a *cli.Args, e cli.Emit) (int, error) {
+	if err := a.RejectUnknown("--name", "--type", "--subnet", "--gateway"); err != nil {
+		return cli.Usage, err
+	}
+	name, err := a.Require("--name")
+	if err != nil {
+		return cli.Usage, err
+	}
+	kind, err := a.Require("--type")
+	if err != nil {
+		return cli.Usage, err
+	}
+	network, err := newNetwork(name, kind, a.Option("--subnet"), a.Option("--gateway"))
+	if err != nil {
+		return cli.Usage, err
+	}
+
+	existing, err := hcn.GetNetworkByName(name)
+	switch {
+	case err == nil:
+		return cli.Failed, fmt.Errorf("network named %q already exists (id %s)", name, existing.Id)
+	case !hcn.IsNotFoundError(err):
+		return cli.Failed, fmt.Errorf("GetNetworkByName(%q): %w", name, err)
+	}
+
+	created, err := network.Create()
+	if err != nil {
+		return cli.Failed, fmt.Errorf("Create network %q: %w", name, err)
+	}
+	res := networkMutationResult{
+		OK: true, Command: "network create", ID: created.Id, Name: created.Name,
+		Type: string(created.Type), Subnets: networkSubnets(created),
+	}
+	e.Result(res, func() {
+		fmt.Printf("created %s network %s (%s)\n", res.Type, res.Name, res.ID)
+	})
+	return cli.OK, nil
+}
+
+func newNetwork(name, kind, subnet, gateway string) (*hcn.HostComputeNetwork, error) {
+	if strings.TrimSpace(name) == "" {
+		return nil, cli.Usagef("--name must not be empty")
+	}
+
+	switch strings.ToLower(kind) {
+	case "private":
+		if subnet != "" || gateway != "" {
+			return nil, cli.Usagef("--type private does not take --subnet or --gateway")
+		}
+		return &hcn.HostComputeNetwork{
+			Name: name, Type: hcn.Private, SchemaVersion: hcn.SchemaVersion{Major: 2, Minor: 0},
+		}, nil
+	case "nat":
+		if subnet == "" {
+			return nil, cli.Usagef("--subnet is required for --type nat")
+		}
+		if gateway == "" {
+			return nil, cli.Usagef("--gateway is required for --type nat")
+		}
+		prefix, nextHop, err := validateNatSubnet(subnet, gateway)
+		if err != nil {
+			return nil, err
+		}
+		return &hcn.HostComputeNetwork{
+			Name: name, Type: hcn.NAT, SchemaVersion: hcn.SchemaVersion{Major: 2, Minor: 0},
+			Ipams: []hcn.Ipam{{
+				Type: "Static",
+				Subnets: []hcn.Subnet{{
+					IpAddressPrefix: prefix,
+					Routes:          []hcn.Route{{NextHop: nextHop, DestinationPrefix: "0.0.0.0/0"}},
+				}},
+			}},
+		}, nil
+	default:
+		return nil, cli.Usagef("--type must be nat or private, got %q", kind)
+	}
+}
+
+func validateNatSubnet(subnet, gateway string) (string, string, error) {
+	prefix, err := netip.ParsePrefix(subnet)
+	if err != nil || !prefix.Addr().Is4() {
+		return "", "", cli.Usagef("--subnet must be an IPv4 CIDR, got %q", subnet)
+	}
+	if prefix != prefix.Masked() {
+		return "", "", cli.Usagef("--subnet must name the network address, got %q", subnet)
+	}
+	prefix = prefix.Masked()
+	if prefix.Bits() == 0 || prefix.Bits() > 30 {
+		return "", "", cli.Usagef("--subnet must leave a gateway and an address, got %q", subnet)
+	}
+
+	nextHop, err := netip.ParseAddr(gateway)
+	if err != nil || !nextHop.Is4() {
+		return "", "", cli.Usagef("--gateway must be an IPv4 address, got %q", gateway)
+	}
+	if !prefix.Contains(nextHop) {
+		return "", "", cli.Usagef("--gateway %s is outside --subnet %s", nextHop, prefix)
+	}
+
+	networkAddress := prefix.Addr()
+	bits := uint32(prefix.Bits())
+	addresses := uint32(1) << (32 - bits)
+	lastAddress := networkAddress.As4()
+	value := uint32(lastAddress[0])<<24 | uint32(lastAddress[1])<<16 | uint32(lastAddress[2])<<8 | uint32(lastAddress[3])
+	lastAddress = [4]byte{byte((value + addresses - 1) >> 24), byte((value + addresses - 1) >> 16),
+		byte((value + addresses - 1) >> 8), byte(value + addresses - 1)}
+	if nextHop == networkAddress || nextHop == netip.AddrFrom4(lastAddress) {
+		return "", "", cli.Usagef("--gateway %s is not a usable address in --subnet %s", nextHop, prefix)
+	}
+	return prefix.String(), nextHop.String(), nil
+}
+
+func networkSubnets(network *hcn.HostComputeNetwork) []string {
+	subnets := []string{}
+	for _, ipam := range network.Ipams {
+		for _, subnet := range ipam.Subnets {
+			if subnet.IpAddressPrefix != "" {
+				subnets = append(subnets, subnet.IpAddressPrefix)
+			}
+		}
+	}
+	return subnets
+}
+
+// -- rm -----------------------------------------------------------------------------------
+
+func remove(a *cli.Args, e cli.Emit) (int, error) {
+	if err := a.RejectUnknown("--id", "--name"); err != nil {
+		return cli.Usage, err
+	}
+	id, name := a.Option("--id"), a.Option("--name")
+	if (id == "") == (name == "") {
+		return cli.Usage, cli.Usagef("network rm requires exactly one of --id or --name")
+	}
+
+	var (
+		network *hcn.HostComputeNetwork
+		err     error
+	)
+	if id != "" {
+		network, err = hcn.GetNetworkByID(id)
+	} else {
+		network, err = hcn.GetNetworkByName(name)
+	}
+	if err != nil {
+		return cli.Failed, err
+	}
+
+	endpoints, err := hcn.ListEndpoints()
+	if err != nil {
+		return cli.Failed, fmt.Errorf("ListEndpoints before deleting network %s: %w", network.Id, err)
+	}
+	count := 0
+	for _, endpoint := range endpoints {
+		if strings.EqualFold(endpoint.HostComputeNetwork, network.Id) {
+			count++
+		}
+	}
+	if count != 0 {
+		return cli.Failed, fmt.Errorf("network %q (%s) has %d endpoint(s); remove them before deleting it",
+			network.Name, network.Id, count)
+	}
+
+	if err := network.Delete(); err != nil {
+		return cli.Failed, fmt.Errorf("Delete network %q (%s): %w", network.Name, network.Id, err)
+	}
+	if _, err := hcn.GetNetworkByID(network.Id); err == nil {
+		return cli.Failed, fmt.Errorf("network %q (%s) still exists after Delete returned success", network.Name, network.Id)
+	} else if !hcn.IsNotFoundError(err) {
+		return cli.Failed, fmt.Errorf("GetNetworkByID(%s) after Delete: %w", network.Id, err)
+	}
+
+	res := networkMutationResult{
+		OK: true, Command: "network rm", ID: network.Id, Name: network.Name,
+		Type: string(network.Type), Subnets: networkSubnets(network),
+	}
+	e.Result(res, func() {
+		fmt.Printf("removed %s network %s (%s)\n", res.Type, res.Name, res.ID)
+	})
+	return cli.OK, nil
 }
