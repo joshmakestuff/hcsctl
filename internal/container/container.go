@@ -626,7 +626,7 @@ func start(a *cli.Args, e cli.Emit) (int, error) {
 			e.Progress("recording primary pid: %v", werr)
 		}
 	}
-	res, execErr := execIn(c, e, s.Primary.Cmd, "", "", nil, 0, outSink, errSink, onStart)
+	res, execErr := execIn(c, e, s.Primary.Cmd, "", "", nil, 0, outSink, errSink, onStart, execMode{})
 	closeFraming()
 
 	s.Primary.PumpPid = 0
@@ -763,20 +763,21 @@ func parseTimeout(a *cli.Args) (time.Duration, error) {
 // long is a failure to report, not a thing to wait harder on.
 const killWait = 10 * time.Second
 
-// execResult is what execIn measured. ExitCode is meaningful only when TimedOut is false: a
-// killed process's code is an invention of the kill, not something the guest produced.
+// execResult is what execIn measured. ExitCode is meaningful only when neither TimedOut nor
+// Interrupted is true: a killed process's code is an invention of the kill, not something the
+// guest produced.
 type execResult struct {
-	ExitCode int
-	Pid      int
-	TimedOut bool
+	ExitCode    int
+	Pid         int
+	TimedOut    bool
+	Interrupted bool
 }
 
-// execIn launches a process, streams its output, and returns its exit code. Stdin is closed
-// immediately: nothing here is interactive, and a process blocked on a stdin that never closes
-// looks exactly like a hung container. A non-zero timeout kills the process on expiry.
-// onStart, when non-nil, runs with the guest pid as soon as the process exists -- the
-// primary-process path records it in state.json while the process is still running (#33).
-func execIn(c hcsshim.Container, e cli.Emit, cmdline, cwd, user string, env map[string]string, timeout time.Duration, outSink, errSink io.Writer, onStart func(pid int)) (execResult, error) {
+// execIn launches a process, streams its output, and returns its exit code. The default closes
+// stdin immediately; only explicit interactive mode forwards host input. A non-zero timeout
+// kills the process on expiry. onStart, when non-nil, runs with the guest pid as soon as the
+// process exists -- the primary-process path records it in state.json while it is still running.
+func execIn(c hcsshim.Container, e cli.Emit, cmdline, cwd, user string, env map[string]string, timeout time.Duration, outSink, errSink io.Writer, onStart func(pid int), mode execMode) (execResult, error) {
 	var res execResult
 	res.ExitCode = -1
 	pc := &hcsshim.ProcessConfig{
@@ -784,6 +785,8 @@ func execIn(c hcsshim.Container, e cli.Emit, cmdline, cwd, user string, env map[
 		WorkingDirectory: cwd,
 		User:             user,
 		Environment:      env,
+		EmulateConsole:   mode.tty,
+		ConsoleSize:      mode.consoleSize,
 		CreateStdInPipe:  true,
 		CreateStdOutPipe: true,
 		CreateStdErrPipe: true,
@@ -802,15 +805,20 @@ func execIn(c hcsshim.Container, e cli.Emit, cmdline, cwd, user string, env map[
 	if err != nil {
 		return res, fmt.Errorf("Stdio: %w", err)
 	}
-	if stdin != nil {
-		stdin.Close()
+	var closeStdinOnce sync.Once
+	closeStdin := func() {
+		closeStdinOnce.Do(func() {
+			if stdin != nil {
+				_ = stdin.Close()
+			}
+			_ = p.CloseStdin()
+		})
 	}
-	_ = p.CloseStdin()
 
 	// Both streams are drained concurrently. Draining them in sequence deadlocks as soon as the
 	// guest fills the pipe this side is not reading. The sinks are separate so --stream-json
-	// can attribute guest stdout and stderr individually (#28); without it both are the same
-	// merged writer, exactly as before.
+	// can attribute guest stdout and stderr individually, while interactive mode sends both
+	// streams directly to the terminal.
 	var wg sync.WaitGroup
 	for _, s := range []struct {
 		r    io.ReadCloser
@@ -823,37 +831,58 @@ func execIn(c hcsshim.Container, e cli.Emit, cmdline, cwd, user string, env map[
 		go func(r io.ReadCloser, sink io.Writer) {
 			defer wg.Done()
 			defer r.Close()
-			io.Copy(sink, r)
+			_, _ = io.Copy(sink, r)
 		}(s.r, s.sink)
 	}
 
-	if timeout > 0 {
-		if err := p.WaitTimeout(timeout); err != nil {
-			if !hcsshim.IsTimeout(err) {
-				wg.Wait()
-				return res, fmt.Errorf("process WaitTimeout: %w", err)
-			}
-			// Expired: kill, then confirm the kill landed rather than trusting it. "We gave
-			// up on it" and "it exited" must stay distinguishable, so the exit code is not
-			// collected -- it would be the kill's invention, not the guest's.
-			res.TimedOut = true
-			e.Progress("timeout %s expired, killing pid %d", timeout, res.Pid)
-			if err := p.Kill(); err != nil {
-				wg.Wait()
-				return res, fmt.Errorf("Kill after %s timeout: %w", timeout, err)
-			}
-			if err := p.WaitTimeout(killWait); err != nil {
-				wg.Wait()
-				return res, fmt.Errorf("pid %d still running %s after Kill: %w", res.Pid, killWait, err)
-			}
-			wg.Wait()
+	if mode.interactive {
+		if stdin == nil {
+			return res, fmt.Errorf("interactive process has no stdin pipe")
+		}
+		interrupt, stopInterrupt := interruptContext()
+		defer stopInterrupt()
+		forwardStdin(os.Stdin, stdin, closeStdin, mode.tty, stopInterrupt)
+
+		timedOut, interrupted, waitErr := waitInteractive(p, e, timeout, interrupt.Done(), closeStdin, res.Pid)
+		res.TimedOut = timedOut
+		res.Interrupted = interrupted
+		wg.Wait()
+		if waitErr != nil {
+			return res, waitErr
+		}
+		if res.TimedOut || res.Interrupted {
 			return res, nil
 		}
-	} else if err := p.Wait(); err != nil {
+	} else {
+		closeStdin()
+		if timeout > 0 {
+			if err := p.WaitTimeout(timeout); err != nil {
+				if !hcsshim.IsTimeout(err) {
+					wg.Wait()
+					return res, fmt.Errorf("process WaitTimeout: %w", err)
+				}
+				// Expired: kill, then confirm the kill landed rather than trusting it. "We gave
+				// up on it" and "it exited" must stay distinguishable, so the exit code is not
+				// collected -- it would be the kill's invention, not the guest's.
+				res.TimedOut = true
+				e.Progress("timeout %s expired, killing pid %d", timeout, res.Pid)
+				if err := p.Kill(); err != nil {
+					wg.Wait()
+					return res, fmt.Errorf("Kill after %s timeout: %w", timeout, err)
+				}
+				if err := p.WaitTimeout(killWait); err != nil {
+					wg.Wait()
+					return res, fmt.Errorf("pid %d still running %s after Kill: %w", res.Pid, killWait, err)
+				}
+				wg.Wait()
+				return res, nil
+			}
+		} else if err := p.Wait(); err != nil {
+			wg.Wait()
+			return res, fmt.Errorf("process Wait: %w", err)
+		}
 		wg.Wait()
-		return res, fmt.Errorf("process Wait: %w", err)
 	}
-	wg.Wait()
 
 	code, err := p.ExitCode()
 	if err != nil {
@@ -863,9 +892,69 @@ func execIn(c hcsshim.Container, e cli.Emit, cmdline, cwd, user string, env map[
 	return res, nil
 }
 
+func waitInteractive(p hcsshim.Process, e cli.Emit, timeout time.Duration, interrupted <-chan struct{}, closeStdin func(), pid int) (timedOut, wasInterrupted bool, err error) {
+	exited := make(chan error, 1)
+	go func() { exited <- p.Wait() }()
+
+	var deadline <-chan time.Time
+	var timer *time.Timer
+	if timeout > 0 {
+		timer = time.NewTimer(timeout)
+		defer timer.Stop()
+		deadline = timer.C
+	}
+
+	select {
+	case err := <-exited:
+		if err != nil {
+			return false, false, fmt.Errorf("process Wait: %w", err)
+		}
+		return false, false, nil
+	case <-interrupted:
+		closeStdin()
+		e.Progress("interrupt received, killing pid %d", pid)
+		if err := p.Kill(); err != nil {
+			return false, true, fmt.Errorf("Kill after interrupt: %w", err)
+		}
+		if err := waitAfterKill(exited, pid); err != nil {
+			return false, true, err
+		}
+		return false, true, nil
+	case <-deadline:
+		closeStdin()
+		e.Progress("timeout %s expired, killing pid %d", timeout, pid)
+		if err := p.Kill(); err != nil {
+			return true, false, fmt.Errorf("Kill after %s timeout: %w", timeout, err)
+		}
+		if err := waitAfterKill(exited, pid); err != nil {
+			return true, false, err
+		}
+		return true, false, nil
+	}
+}
+
+func waitAfterKill(exited <-chan error, pid int) error {
+	select {
+	case err := <-exited:
+		if err != nil {
+			return fmt.Errorf("process Wait after Kill: %w", err)
+		}
+		return nil
+	case <-time.After(killWait):
+		return fmt.Errorf("pid %d still running %s after Kill", pid, killWait)
+	}
+}
+
 func exec(a *cli.Args, e cli.Emit) (int, error) {
-	if err := a.RejectUnknown("--id", "--ref", "--store", "--cmd", "--cwd", "--user", "--env", "--timeout"); err != nil {
+	if err := a.RejectUnknown("--id", "--ref", "--store", "--cmd", "--cwd", "--user", "--env", "--timeout", "--interactive", "--tty"); err != nil {
 		return cli.Usage, err
+	}
+	interactive, tty := a.Flag("--interactive"), a.Flag("--tty")
+	if tty && !interactive {
+		return cli.Usage, cli.Usagef("--tty requires --interactive")
+	}
+	if interactive && (e.JSON || e.StreamJSON) {
+		return cli.Usage, cli.Usagef("--interactive cannot be used with --json or --stream-json")
 	}
 	st, id, err := resolve(a)
 	if err != nil {
@@ -892,9 +981,34 @@ func exec(a *cli.Args, e cli.Emit) (int, error) {
 	}
 	defer c.Close()
 
+	mode := execMode{interactive: interactive, tty: tty}
+	restoreTerminal := func() {}
+	if mode.tty {
+		restore, consoleSize, terr := prepareTerminal()
+		if terr != nil {
+			return cli.Failed, fmt.Errorf("--tty requires attached stdin and stdout terminals: %w", terr)
+		}
+		var restoreOnce sync.Once
+		restoreTerminal = func() { restoreOnce.Do(restore) }
+		defer restoreTerminal()
+		mode.consoleSize = consoleSize
+	}
+	if mode.interactive {
+		res, err := execIn(c, e, cmdline, a.Option("--cwd"), a.Option("--user"), env, timeout, os.Stdout, os.Stderr, nil, mode)
+		if err != nil {
+			return cli.Failed, err
+		}
+		restoreTerminal()
+		printExec(res)
+		if res.Interrupted {
+			return cli.Failed, nil
+		}
+		return cli.OK, nil
+	}
+
 	out := &captured{json: e.JSON}
 	outSink, errSink, closeFraming := guestSinks(e, out)
-	res, err := execIn(c, e, cmdline, a.Option("--cwd"), a.Option("--user"), env, timeout, outSink, errSink, nil)
+	res, err := execIn(c, e, cmdline, a.Option("--cwd"), a.Option("--user"), env, timeout, outSink, errSink, nil, mode)
 	closeFraming()
 	if err != nil {
 		return cli.Failed, err
@@ -940,6 +1054,10 @@ func execDoc(command, id, cmdline string, res execResult, out *captured) map[str
 }
 
 func printExec(res execResult) {
+	if res.Interrupted {
+		fmt.Printf("interrupted, killed pid %d\n", res.Pid)
+		return
+	}
 	if res.TimedOut {
 		fmt.Printf("timed out, killed pid %d\n", res.Pid)
 		return
@@ -1064,7 +1182,7 @@ func run(a *cli.Args, e cli.Emit) (int, error) {
 
 	out := &captured{json: e.JSON}
 	outSink, errSink, closeFraming := guestSinks(e, out)
-	res, execErr := execIn(c, e, cmdline, a.Option("--cwd"), a.Option("--user"), env, timeout, outSink, errSink, nil)
+	res, execErr := execIn(c, e, cmdline, a.Option("--cwd"), a.Option("--user"), env, timeout, outSink, errSink, nil, execMode{})
 	closeFraming()
 	cleanup()
 	if execErr != nil {
