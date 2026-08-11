@@ -259,6 +259,12 @@ usage: hcsctl <group> <verb> [options]
 
   network ls        Host compute networks, their subnets and endpoint counts. Unelevated.
   network endpoints [--network <name|id>]      Endpoints and their addresses. Unelevated.
+  network create --name <name> --type nat --subnet <IPv4/CIDR> --gateway <IPv4>
+                    Create an explicit NAT network. Does not alter existing networks.
+  network create --name <name> --type private
+                    Create an isolated private network.
+  network rm (--id <guid> | --name <name>)
+                    Remove an empty network. Refuses to remove its endpoints.
 
   vm create  --vhdx <path> [--id <guid>] [--cpus N] [--memory-mb N] [--network <name|id|default>]
              [--serial-pipe \\.\pipe\name] [--no-copy-on-write] [--label key=value]...
