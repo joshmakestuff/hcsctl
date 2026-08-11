@@ -27,7 +27,7 @@ import (
 
 // Version is the agent build. The host reports it in `guest info`, so a guest running a stale
 // agent is visible rather than mysterious.
-const Version = "0.1.0"
+const Version = "0.2.0"
 
 // Commit is the hcsctl commit this agent was built from. Consumers pin a commit rather than a
 // release (hcsctl#35), so the commit is the agent's identity -- and stamping it here is what
@@ -177,6 +177,13 @@ func handle(c net.Conn) {
 		forward(c, r, req.Port)
 	case "exec":
 		runExec(c, r, req)
+	case "netconfig":
+		doc, err := applyNetConfig(req.NetConfig)
+		if err != nil {
+			writeFailure(c, err.Error())
+			return
+		}
+		writeJSON(c, doc)
 	default:
 		writeFailure(c, fmt.Sprintf("unknown verb %q", req.Verb))
 	}

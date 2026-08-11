@@ -47,10 +47,12 @@ func Dispatch(a *cli.Args, e cli.Emit) (int, error) {
 		return console(a, e)
 	case "ip":
 		return ip(a, e)
+	case "netconfig":
+		return netconfig(a, e)
 	case "":
-		return cli.Usage, cli.Usagef("vm needs a subcommand: create, start, stop, rm, ls, inspect, ip, console")
+		return cli.Usage, cli.Usagef("vm needs a subcommand: create, start, stop, rm, ls, inspect, ip, netconfig, console")
 	default:
-		return cli.Usage, cli.Usagef("unknown vm subcommand %q (expected create, start, stop, rm, ls, inspect, ip, console)", a.Word(1))
+		return cli.Usage, cli.Usagef("unknown vm subcommand %q (expected create, start, stop, rm, ls, inspect, ip, netconfig, console)", a.Word(1))
 	}
 }
 

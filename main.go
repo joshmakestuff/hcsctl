@@ -299,6 +299,11 @@ usage: hcsctl <group> <verb> [options]
                address when it is created, none when it is attached, and none while the VM runs
                without a guest -- measured -- so this waits rather than answering once. A VM
                made without --network has nothing to wait for and fails saying so.
+  vm netconfig --id <guid> [--dns <ip,ip>] [--interface eth0] [--timeout 45s]
+               Program the guest's interface with the endpoint's HNS allocation, through the
+               agent and the guest's own NetworkManager. For hcsctl-owned networks (NAT),
+               which have no DHCP server -- measured, see issue #60. The result reports what
+               the interface holds afterwards, not what was asked.
   vm ls      [--all] [--store <dir>]           VMs and the state HCS reports for each.
                --all also lists every compute system on the host with its owner, state and
                runtime id -- other tools' VMs included. hcsctl does not scavenge and holds no
