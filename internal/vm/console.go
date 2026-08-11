@@ -83,15 +83,9 @@ func console(a *cli.Args, e cli.Emit) (int, error) {
 		go func() { _, _ = io.Copy(conn, os.Stdin) }()
 	}
 
-	// guest -> stdout. Under --stream-json the output is framed per line so a consumer can
-	// tell console output from hcsctl's own voice; otherwise it is passed through untouched,
-	// control characters and all, because that is what a console is.
-	var sink io.Writer = os.Stdout
-	if e.JSON && e.StreamJSON {
-		w := cli.NewStreamWriter(e, "console")
-		defer w.Close()
-		sink = w
-	}
+	// The serial stream needs a home that does not corrupt the output mode it runs under.
+	sink, closeSink := consoleSink(e)
+	defer closeSink()
 	n, copyErr := io.Copy(sink, conn)
 
 	reason := "the guest closed the console"
@@ -103,6 +97,25 @@ func console(a *cli.Args, e cli.Emit) (int, error) {
 		fmt.Fprintf(os.Stderr, "\ndetached from %s: %s\n", id, reason)
 	})
 	return cli.OK, nil
+}
+
+// consoleSink picks where the guest's serial bytes go, per output mode. By default it is
+// stdout, untouched, control characters and all, because that is what a console is. Under
+// --json alone, stdout is reserved for the single final result document, so the bytes move
+// to stderr where progress already lives -- the same rule guest exec applies to guest
+// output. Under --json --stream-json they are framed per line as {"stream":"console"} so a
+// consumer can tell them from hcsctl's own voice. The closer flushes the stream writer,
+// if there is one.
+func consoleSink(e cli.Emit) (io.Writer, func()) {
+	switch {
+	case e.JSON && e.StreamJSON:
+		w := cli.NewStreamWriter(e, "console")
+		return w, func() { _ = w.Close() }
+	case e.JSON:
+		return os.Stderr, func() {}
+	default:
+		return os.Stdout, func() {}
+	}
 }
 
 // dialConsole retries, because the pipe is created by the VM worker process and a console
