@@ -155,6 +155,13 @@ var usageCases = []struct {
 	{"label bad key", []string{"container", "create", "--ref", "r", "--label", "a b=v"}},
 	{"label reserved key", []string{"container", "create", "--ref", "r", "--label", "id=x"}},
 	{"label duplicate key", []string{"container", "run", "--ref", "r", "--label", "a=1", "--label", "a=2"}},
+	{"network create missing name", []string{"network", "create", "--type", "private"}},
+	{"network create unsupported type", []string{"network", "create", "--name", "x", "--type", "overlay"}},
+	{"network create NAT missing subnet", []string{"network", "create", "--name", "x", "--type", "nat", "--gateway", "192.168.1.1"}},
+	{"network create NAT gateway outside subnet", []string{"network", "create", "--name", "x", "--type", "nat", "--subnet", "192.168.1.0/24", "--gateway", "192.168.2.1"}},
+	{"network create private with subnet", []string{"network", "create", "--name", "x", "--type", "private", "--subnet", "192.168.1.0/24"}},
+	{"network rm missing identity", []string{"network", "rm"}},
+	{"network rm ambiguous identity", []string{"network", "rm", "--id", "x", "--name", "x"}},
 }
 
 func TestUsageErrorsExit64(t *testing.T) {
@@ -212,9 +219,9 @@ func TestInteractiveRejectsJSONOutputContracts(t *testing.T) {
 // the first thing an attempt would create.
 func TestUsageErrorAttemptsNothing(t *testing.T) {
 	cases := [][]string{
-		{"image", "pull"},                    // missing --ref
-		{"image", "ls", "--bogus", "x"},      // unknown option
-		{"image", "rm", "--ref", "no/such"},  // no record
+		{"image", "pull"},                   // missing --ref
+		{"image", "ls", "--bogus", "x"},     // unknown option
+		{"image", "rm", "--ref", "no/such"}, // no record
 		{"container", "exec", "--id", "a", "--cmd", "c", "--env", "BAD"},
 		{"container", "run", "--ref", "r", "--dns-search", "d"},
 		{"container", "run", "--ref", "r", "--cpus", "two"},
