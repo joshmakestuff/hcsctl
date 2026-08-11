@@ -53,8 +53,8 @@ func execVerb(a *cli.Args, e cli.Emit) (int, error) {
 	var timeout time.Duration
 	if s := a.Option("--timeout"); s != "" {
 		d, perr := time.ParseDuration(s)
-		if perr != nil || d <= 0 {
-			return cli.Usage, cli.Usagef("--timeout must be a positive duration, e.g. 30s")
+		if perr != nil || d < time.Second {
+			return cli.Usage, cli.Usagef("--timeout must be a duration of at least one second, e.g. 30s")
 		}
 		timeout = d
 	}

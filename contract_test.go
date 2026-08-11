@@ -129,6 +129,7 @@ var usageCases = []struct {
 	{"scratch-size zero", []string{"layer", "mount", "--ref", "r", "--scratch-size", "0GB"}},
 	{"timeout not a duration", []string{"container", "exec", "--id", "a", "--cmd", "c", "--timeout", "soon"}},
 	{"timeout not positive", []string{"container", "exec", "--id", "a", "--cmd", "c", "--timeout", "-3s"}},
+	{"guest exec timeout below one second", []string{"guest", "exec", "--vmid", "00000000-0000-0000-0000-000000000000", "--cmd", "c", "--timeout", "500ms"}},
 	{"kill without pid", []string{"container", "kill", "--id", "a"}},
 	{"kill pid not a number", []string{"container", "kill", "--id", "a", "--pid", "abc"}},
 	{"id with traversal", []string{"container", "start", "--id", `..\..\x`}},
