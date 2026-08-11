@@ -1,19 +1,22 @@
 //go:build windows
 
-// Package network is the `hcsctl network` verb group: reading the Host Compute Network state
-// that containers attach to.
+// Package network is the `hcsctl network` verb group over the Host Compute Network (HCN)
+// object surface: ls, endpoints, inspect, create, rm.
 //
-// Read-only for now, and unelevated. Measured 2026-08-05 against HNS schema 16.0: listing
-// networks, endpoints and namespaces all work from a filtered token. `hcn.GetGlobals` is the one
-// call that needs elevation, which is why it is reported as optional detail rather than as the
+// Reads are unelevated. Measured 2026-08-05 against HNS schema 16.0: listing networks,
+// endpoints and namespaces all work from a filtered token. `hcn.GetGlobals` is the one call
+// that needs elevation, which is why it is reported as optional detail rather than as the
 // header it looks like it should be.
 //
-// Creating and deleting networks is deliberately absent. Windows permits one NAT network per
-// host, hosts that run Docker already have it, and a second one plausibly breaks Docker and WSL.
-// That is a decision to make explicitly, not a verb to add quietly.
+// Writes are explicit commands, never side effects. Windows permits one NAT network per host;
+// hosts that run Docker already have it, and a second one plausibly breaks Docker and WSL.
+// The NAT create/attach lifecycle is measured on a disposable host under issue #15 — do not
+// exercise `create --type nat` on a development host that runs Docker or WSL.
 package network
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/Microsoft/hcsshim/hcn"
 	"github.com/joshmakestuff/hcsctl/internal/cli"
@@ -28,14 +31,16 @@ func Dispatch(a *cli.Args, e cli.Emit) (int, error) {
 		return list(a, e)
 	case "endpoints":
 		return endpoints(a, e)
+	case "inspect":
+		return inspect(a, e)
 	case "create":
 		return create(a, e)
 	case "rm":
 		return remove(a, e)
 	case "":
-		return cli.Usage, cli.Usagef("network needs a subcommand: ls, endpoints, create, rm")
+		return cli.Usage, cli.Usagef("network needs a subcommand: ls, endpoints, inspect, create, rm")
 	default:
-		return cli.Usage, cli.Usagef("unknown network subcommand %q (expected ls, endpoints, create, rm)", a.Word(1))
+		return cli.Usage, cli.Usagef("unknown network subcommand %q (expected ls, endpoints, inspect, create, rm)", a.Word(1))
 	}
 }
 
@@ -170,6 +175,198 @@ func endpoints(a *cli.Args, e cli.Emit) (int, error) {
 			fmt.Printf("%-26s %-20s %-19s %-18s %s\n",
 				trunc(r.Name, 26), trunc(r.Network, 20),
 				strings.Join(r.Addresses, ","), r.MAC, r.ID)
+		}
+	})
+	return cli.OK, nil
+}
+
+// resolveNetwork turns the (--id | --name) pair into one network. Exactly one of the two must
+// be set; that rule is a usage error so it is reported before anything is attempted.
+func resolveNetwork(subcommand, id, name string) (*hcn.HostComputeNetwork, error) {
+	if (id == "") == (name == "") {
+		return nil, cli.Usagef("network %s requires exactly one of --id or --name", subcommand)
+	}
+	if id != "" {
+		network, err := hcn.GetNetworkByID(id)
+		if err != nil {
+			return nil, fmt.Errorf("GetNetworkByID(%s): %w", id, err)
+		}
+		return network, nil
+	}
+	network, err := hcn.GetNetworkByName(name)
+	if err != nil {
+		return nil, fmt.Errorf("GetNetworkByName(%q): %w", name, err)
+	}
+	return network, nil
+}
+
+// -- inspect ------------------------------------------------------------------------------
+
+type inspectRoute struct {
+	NextHop           string `json:"nextHop"`
+	DestinationPrefix string `json:"destinationPrefix"`
+	Metric            uint16 `json:"metric,omitempty"`
+}
+
+type inspectSubnet struct {
+	Prefix string         `json:"prefix"`
+	Routes []inspectRoute `json:"routes"`
+}
+
+type inspectIpam struct {
+	Type    string          `json:"type"`
+	Subnets []inspectSubnet `json:"subnets"`
+}
+
+type inspectPolicy struct {
+	Type     string          `json:"type"`
+	Settings json.RawMessage `json:"settings,omitempty"`
+}
+
+type networkInspectResult struct {
+	OK            bool            `json:"ok"`
+	Command       string          `json:"command"`
+	ID            string          `json:"id"`
+	Name          string          `json:"name"`
+	Type          string          `json:"type"`
+	SchemaVersion string          `json:"schemaVersion"`
+	Flags         uint32          `json:"flags"`
+	FlagNames     []string        `json:"flagNames"`
+	Ipams         []inspectIpam   `json:"ipams"`
+	MacRanges     []string        `json:"macRanges"`
+	Dns           inspectDns      `json:"dns"`
+	Policies      []inspectPolicy `json:"policies"`
+	// Endpoints is the attached endpoint IDs, from one ListEndpoints enumeration. When that
+	// enumeration fails the IDs are unknown, not zero -- EndpointsError says why.
+	Endpoints      []string `json:"endpoints"`
+	EndpointsError string   `json:"endpointsError,omitempty"`
+}
+
+type inspectDns struct {
+	Domain     string   `json:"domain"`
+	Search     []string `json:"search"`
+	ServerList []string `json:"serverList"`
+	Options    []string `json:"options"`
+}
+
+// flagNames decodes the HCN network flag bits that have measured meanings. 32 (EnableDhcp) is
+// returned by HNS but absent from hcn's constants -- see docs/findings.md. Bits with no name
+// stay visible through the numeric Flags field.
+func flagNames(flags uint32) []string {
+	names := []string{}
+	for _, bit := range []struct {
+		value uint32
+		name  string
+	}{
+		{8, "EnableNonPersistent"},
+		{32, "EnableDhcp"},
+		{1024, "DisableHostPort"},
+		{8192, "EnableIov"},
+	} {
+		if flags&bit.value != 0 {
+			names = append(names, bit.name)
+		}
+	}
+	return names
+}
+
+// newNetworkInspectResult shapes an HCN network document into the inspect result. Pure: every
+// HCN call happens in the caller, so this is the unit-testable seam.
+func newNetworkInspectResult(n *hcn.HostComputeNetwork, eps []hcn.HostComputeEndpoint, epErr error) networkInspectResult {
+	res := networkInspectResult{
+		OK: true, Command: "network inspect",
+		ID: n.Id, Name: n.Name, Type: string(n.Type),
+		SchemaVersion: fmt.Sprintf("%d.%d", n.SchemaVersion.Major, n.SchemaVersion.Minor),
+		Flags:         uint32(n.Flags), FlagNames: flagNames(uint32(n.Flags)),
+		Ipams: []inspectIpam{}, MacRanges: []string{}, Policies: []inspectPolicy{},
+		Dns: inspectDns{
+			Domain: n.Dns.Domain,
+			Search: emptyNotNil(n.Dns.Search), ServerList: emptyNotNil(n.Dns.ServerList),
+			Options: emptyNotNil(n.Dns.Options),
+		},
+		Endpoints: []string{},
+	}
+	for _, ipam := range n.Ipams {
+		ip := inspectIpam{Type: ipam.Type, Subnets: []inspectSubnet{}}
+		for _, s := range ipam.Subnets {
+			routes := make([]inspectRoute, 0, len(s.Routes))
+			for _, r := range s.Routes {
+				routes = append(routes, inspectRoute{NextHop: r.NextHop, DestinationPrefix: r.DestinationPrefix, Metric: r.Metric})
+			}
+			ip.Subnets = append(ip.Subnets, inspectSubnet{Prefix: s.IpAddressPrefix, Routes: routes})
+		}
+		res.Ipams = append(res.Ipams, ip)
+	}
+	for _, r := range n.MacPool.Ranges {
+		res.MacRanges = append(res.MacRanges, fmt.Sprintf("%s-%s", r.StartMacAddress, r.EndMacAddress))
+	}
+	for _, p := range n.Policies {
+		res.Policies = append(res.Policies, inspectPolicy{Type: string(p.Type), Settings: p.Settings})
+	}
+	if epErr != nil {
+		res.EndpointsError = epErr.Error()
+		return res
+	}
+	for _, ep := range eps {
+		if strings.EqualFold(ep.HostComputeNetwork, n.Id) {
+			res.Endpoints = append(res.Endpoints, ep.Id)
+		}
+	}
+	sort.Strings(res.Endpoints)
+	return res
+}
+
+func emptyNotNil(s []string) []string {
+	if s == nil {
+		return []string{}
+	}
+	return s
+}
+
+func inspect(a *cli.Args, e cli.Emit) (int, error) {
+	if err := a.RejectUnknown("--id", "--name"); err != nil {
+		return cli.Usage, err
+	}
+	network, err := resolveNetwork("inspect", a.Option("--id"), a.Option("--name"))
+	if err != nil {
+		var usage *cli.UsageError
+		if errors.As(err, &usage) {
+			return cli.Usage, err
+		}
+		return cli.Failed, err
+	}
+
+	eps, epErr := hcn.ListEndpoints()
+	res := newNetworkInspectResult(network, eps, epErr)
+	e.Result(res, func() {
+		fmt.Printf("%-14s %s\n", "id", res.ID)
+		fmt.Printf("%-14s %s\n", "name", res.Name)
+		fmt.Printf("%-14s %s\n", "type", res.Type)
+		fmt.Printf("%-14s %s\n", "schemaVersion", res.SchemaVersion)
+		fmt.Printf("%-14s %d (%s)\n", "flags", res.Flags, strings.Join(res.FlagNames, ","))
+		for _, ipam := range res.Ipams {
+			for _, s := range ipam.Subnets {
+				routes := make([]string, 0, len(s.Routes))
+				for _, r := range s.Routes {
+					routes = append(routes, fmt.Sprintf("%s via %s", r.DestinationPrefix, r.NextHop))
+				}
+				fmt.Printf("%-14s %s %s (%s)\n", "subnet", ipam.Type, s.Prefix, strings.Join(routes, ","))
+			}
+		}
+		fmt.Printf("%-14s %s\n", "macRanges", strings.Join(res.MacRanges, ","))
+		if res.Dns.Domain != "" || len(res.Dns.ServerList) > 0 {
+			fmt.Printf("%-14s domain=%s servers=%s\n", "dns", res.Dns.Domain, strings.Join(res.Dns.ServerList, ","))
+		}
+		for _, p := range res.Policies {
+			fmt.Printf("%-14s %s %s\n", "policy", p.Type, string(p.Settings))
+		}
+		if res.EndpointsError != "" {
+			fmt.Printf("%-14s unknown: %s\n", "endpoints", res.EndpointsError)
+		} else {
+			fmt.Printf("%-14s %d\n", "endpoints", len(res.Endpoints))
+			for _, id := range res.Endpoints {
+				fmt.Printf("%-14s %s\n", "", id)
+			}
 		}
 	})
 	return cli.OK, nil
@@ -323,21 +520,12 @@ func remove(a *cli.Args, e cli.Emit) (int, error) {
 	if err := a.RejectUnknown("--id", "--name"); err != nil {
 		return cli.Usage, err
 	}
-	id, name := a.Option("--id"), a.Option("--name")
-	if (id == "") == (name == "") {
-		return cli.Usage, cli.Usagef("network rm requires exactly one of --id or --name")
-	}
-
-	var (
-		network *hcn.HostComputeNetwork
-		err     error
-	)
-	if id != "" {
-		network, err = hcn.GetNetworkByID(id)
-	} else {
-		network, err = hcn.GetNetworkByName(name)
-	}
+	network, err := resolveNetwork("rm", a.Option("--id"), a.Option("--name"))
 	if err != nil {
+		var usage *cli.UsageError
+		if errors.As(err, &usage) {
+			return cli.Usage, err
+		}
 		return cli.Failed, err
 	}
 

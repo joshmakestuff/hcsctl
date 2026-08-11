@@ -3,7 +3,8 @@
 A CLI over the Windows Host Compute Service, built on [Microsoft/hcsshim](https://github.com/Microsoft/hcsshim).
 
 The goal is to surface **all** of HCS as a tool you can drive from a shell or an agent. Images,
-layers, Hyper-V-isolated containers, full virtual machines and read-only networking work today;
+layers, Hyper-V-isolated containers, full virtual machines and the HCN network lifecycle
+(list, inspect, create, remove) work today;
 the rest is ordered, not dropped. Near-term priority comes from what an Aspire integration needs — environment into the
 guest, an endpoint address, local file mounts. That sets the *order*, not the scope.
 
@@ -79,6 +80,7 @@ hcsctl network endpoints [--network <name|id>]
 hcsctl network create --name <name> --type nat --subnet <IPv4/CIDR> --gateway <IPv4>
 hcsctl network create --name <name> --type private
 hcsctl network rm (--id <guid> | --name <name>)      # refuses a network with endpoints
+hcsctl network inspect (--id <guid> | --name <name>) # effective HCN document; unelevated
 
 hcsctl info                                          # host capability + toolVersion/contractVersion
 hcsctl help | version
