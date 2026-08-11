@@ -138,6 +138,25 @@ Assert "primary exit code recorded" ($logsDoc.status -eq 'exited' -and $logsDoc.
 & $bin container rm --id $id --store $Store --force 2>&1 | Out-Null
 Assert "primary container rm exits 0" ($LASTEXITCODE -eq 0)
 
+# -- interactive exec (#7): piped host stdin reaches the guest and then closes ----------------
+$interactiveId = "$id-interactive"
+$interactiveInput = Join-Path $Store 'interactive-input.txt'
+$interactiveOutput = Join-Path $Store 'interactive-output.txt'
+"== container exec with forwarded stdin (#7) =="
+& $bin container create --ref $Ref --id $interactiveId --store $Store 2>&1 | Out-Null
+Assert "interactive container create exits 0" ($LASTEXITCODE -eq 0)
+& $bin container start --id $interactiveId --store $Store 2>&1 | Out-Null
+Assert "interactive container start exits 0" ($LASTEXITCODE -eq 0)
+[System.IO.File]::WriteAllText($interactiveInput, 'interactive-smoke')
+$hostCommand = "type `"$interactiveInput`" | `"$bin`" container exec --id $interactiveId --store `"$Store`" --cmd `"findstr .`" --interactive > `"$interactiveOutput`" 2>&1"
+& cmd.exe /d /c $hostCommand
+$code = $LASTEXITCODE
+$interactiveText = [System.IO.File]::ReadAllText($interactiveOutput)
+Assert "interactive exec exits 0 after stdin EOF" ($code -eq 0)
+Assert "interactive stdin reaches the guest" ($interactiveText -match 'interactive-smoke')
+& $bin container rm --id $interactiveId --store $Store --force 2>&1 | Out-Null
+Assert "interactive container rm exits 0" ($LASTEXITCODE -eq 0)
+
 # -- image rm (fresh stores only: the working store is a shared fixture) ------------------
 if (-not $SkipAcquire) {
     "== image rm =="
