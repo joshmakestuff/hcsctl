@@ -6,7 +6,9 @@ require (
 	github.com/Microsoft/go-winio v0.6.2
 	github.com/Microsoft/hcsshim v0.14.1
 	github.com/google/go-containerregistry v0.21.9
+	github.com/mdlayher/vsock v1.3.0
 	golang.org/x/sys v0.47.0
+	golang.org/x/term v0.43.0
 )
 
 require (
@@ -20,7 +22,6 @@ require (
 	github.com/golang/groupcache v0.0.0-20210331224755-41bb18bfe9da // indirect
 	github.com/klauspost/compress v1.19.1 // indirect
 	github.com/mdlayher/socket v0.6.0 // indirect
-	github.com/mdlayher/vsock v1.3.0 // indirect
 	github.com/opencontainers/go-digest v1.0.0 // indirect
 	github.com/opencontainers/image-spec v1.1.1 // indirect
 	github.com/pkg/errors v0.9.1 // indirect

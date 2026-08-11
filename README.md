@@ -42,7 +42,7 @@ hcsctl container create --ref <ref> [--cmd "..."] [--cpus N] [--memory-mb N] [--
 hcsctl container start  --id <id>                    # launches a recorded --cmd and pumps it
 hcsctl container logs   --id <id> [--follow]         # its retained output, from any invocation
 hcsctl container exec   --id <id> --cmd "..." [--cwd D] [--user U] [--env NAME=value]...
-                        [--timeout 30s]
+                        [--timeout 30s] [--interactive [--tty]]
 hcsctl container kill   --id <id> --pid <pid>        # one process, not a tree
 hcsctl container stop   --id <id> [--force]
 hcsctl container rm     --id <id> [--force]

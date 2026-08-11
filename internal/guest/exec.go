@@ -96,6 +96,16 @@ func execVerb(a *cli.Args, e cli.Emit) (int, error) {
 	return cli.OK, nil
 }
 
+// writeExecRequest sends the request followed by stdin EOF. Guest exec has no interactive
+// mode, so leaving stdin open would make a command that reads until EOF wait forever.
+func writeExecRequest(w io.Writer, req guestproto.Request) error {
+	body, _ := json.Marshal(req)
+	if _, err := w.Write(append(body, '\n')); err != nil {
+		return err
+	}
+	return guestproto.WriteFrame(w, guestproto.ChanStdin, nil)
+}
+
 func runRemote(vmid, svc guid.GUID, req guestproto.Request, e cli.Emit) (execResult, error) {
 	res := execResult{ExitCode: -1}
 
@@ -107,8 +117,7 @@ func runRemote(vmid, svc guid.GUID, req guestproto.Request, e cli.Emit) (execRes
 	}
 	defer conn.Close()
 
-	body, _ := json.Marshal(req)
-	if _, err := conn.Write(append(body, '\n')); err != nil {
+	if err := writeExecRequest(conn, req); err != nil {
 		return res, err
 	}
 
