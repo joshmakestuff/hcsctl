@@ -74,8 +74,11 @@ hcsctl guest exec    --vmid <guid> --cmd "..."       # no NIC, no DHCP lease, no
 hcsctl guest forward --vmid <guid> --port <n> [--listen 127.0.0.1:2222]
                                                      # needs hcsguest in the image (hcs-images)
 
-hcsctl network ls                                    # unelevated; read-only today --
-hcsctl network endpoints [--network <name|id>]       # the hcn write surface is unbuilt (#15, #17)
+hcsctl network ls                                    # unelevated
+hcsctl network endpoints [--network <name|id>]
+hcsctl network create --name <name> --type nat --subnet <IPv4/CIDR> --gateway <IPv4>
+hcsctl network create --name <name> --type private
+hcsctl network rm (--id <guid> | --name <name>)      # refuses a network with endpoints
 
 hcsctl info                                          # host capability + toolVersion/contractVersion
 hcsctl help | version
