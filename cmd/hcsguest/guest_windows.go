@@ -3,6 +3,7 @@
 package main
 
 import (
+	"fmt"
 	"net"
 	"os"
 	"os/exec"
@@ -28,6 +29,16 @@ func listen() (net.Listener, error) {
 		VMID:      winio.HvsockGUIDWildcard(),
 		ServiceID: svc,
 	})
+}
+
+// applyNetConfig is not implemented for Windows guests. The measured NetworkManager contract
+// is Linux; a Windows guest needs its own measurement (netsh or CIM) before a mechanism is
+// chosen -- an explicit refusal now beats an unmeasured implementation.
+func applyNetConfig(nc *guestproto.NetConfig) (guestproto.NetConfigResult, error) {
+	if err := validateNetConfig(nc); err != nil {
+		return guestproto.NetConfigResult{}, err
+	}
+	return guestproto.NetConfigResult{}, fmt.Errorf("netconfig is not implemented for windows guests")
 }
 
 func gatherInfo() (guestproto.Info, error) {

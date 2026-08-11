@@ -60,6 +60,32 @@ func killTree(cmd *exec.Cmd) {
 	}
 }
 
+// applyNetConfig programs the interface through NetworkManager. nmcli only, no raw-ip
+// fallback: raw addresses are torn down at NM's DHCP failure (measured, natlab nmprobe
+// 2026-08-11), and a guest without NM is unmeasured -- it gets an explicit error rather
+// than a silently different mechanism.
+func applyNetConfig(nc *guestproto.NetConfig) (guestproto.NetConfigResult, error) {
+	if err := validateNetConfig(nc); err != nil {
+		return guestproto.NetConfigResult{}, err
+	}
+	nmcli, err := exec.LookPath("nmcli")
+	if err != nil {
+		return guestproto.NetConfigResult{}, fmt.Errorf("nmcli not found: this agent configures through NetworkManager only")
+	}
+	if out, err := exec.Command(nmcli, nmcliModArgs(nc)...).CombinedOutput(); err != nil {
+		return guestproto.NetConfigResult{}, fmt.Errorf("nmcli con mod %s: %v: %s", nc.Interface, err, strings.TrimSpace(string(out)))
+	}
+	if out, err := exec.Command(nmcli, "con", "up", nc.Interface).CombinedOutput(); err != nil {
+		return guestproto.NetConfigResult{}, fmt.Errorf("nmcli con up %s: %v: %s", nc.Interface, err, strings.TrimSpace(string(out)))
+	}
+	return guestproto.NetConfigResult{
+		OK:        true,
+		Protocol:  guestproto.Protocol,
+		Applied:   "nmcli",
+		Addresses: observedAddresses(nc.Interface),
+	}, nil
+}
+
 func gatherInfo() (guestproto.Info, error) {
 	host, err := os.Hostname()
 	if err != nil {
