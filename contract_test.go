@@ -162,6 +162,9 @@ var usageCases = []struct {
 	{"network create private with subnet", []string{"network", "create", "--name", "x", "--type", "private", "--subnet", "192.168.1.0/24"}},
 	{"network rm missing identity", []string{"network", "rm"}},
 	{"network rm ambiguous identity", []string{"network", "rm", "--id", "x", "--name", "x"}},
+	{"network inspect missing identity", []string{"network", "inspect"}},
+	{"network inspect ambiguous identity", []string{"network", "inspect", "--id", "x", "--name", "x"}},
+	{"network inspect unknown option", []string{"network", "inspect", "--name", "x", "--force"}},
 }
 
 func TestUsageErrorsExit64(t *testing.T) {

@@ -157,6 +157,26 @@ Assert "interactive stdin reaches the guest" ($interactiveText -match 'interacti
 & $bin container rm --id $interactiveId --store $Store --force 2>&1 | Out-Null
 Assert "interactive container rm exits 0" ($LASTEXITCODE -eq 0)
 
+# -- network inspect + private lifecycle (#15) --------------------------------------------
+# Read-only inspect against the shared nat network, then a private create/inspect/rm
+# round-trip. Private only: NAT create is measured on a disposable host, never here.
+"== network inspect + private create/rm (#15) =="
+$natInspect = (& $bin network inspect --name $Network --json 2>$null) | Out-String | ConvertFrom-Json
+Assert "inspect by name exits 0" ($LASTEXITCODE -eq 0)
+Assert "inspect returns the requested network" ($natInspect.name -eq $Network -and $natInspect.id)
+$natById = (& $bin network inspect --id $natInspect.id --json 2>$null) | Out-String | ConvertFrom-Json
+Assert "inspect by id resolves the same network" ($natById.id -eq $natInspect.id)
+$privateName = "hcsctl-smoke-$PID"
+$created = (& $bin network create --name $privateName --type private --json 2>$null) | Out-String | ConvertFrom-Json
+Assert "private create exits 0" ($LASTEXITCODE -eq 0)
+$privInspect = (& $bin network inspect --name $privateName --json 2>$null) | Out-String | ConvertFrom-Json
+Assert "created network inspects by name" ($privInspect.id -eq $created.id -and $privInspect.type -eq 'Private')
+Assert "created network has no endpoints" ($privInspect.endpoints.Count -eq 0)
+& $bin network rm --id $created.id 2>&1 | Out-Null
+Assert "private rm exits 0" ($LASTEXITCODE -eq 0)
+& $bin network inspect --id $created.id 2>&1 | Out-Null
+Assert "removed network no longer inspects" ($LASTEXITCODE -eq 1)
+
 # -- image rm (fresh stores only: the working store is a shared fixture) ------------------
 if (-not $SkipAcquire) {
     "== image rm =="

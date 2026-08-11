@@ -265,6 +265,9 @@ usage: hcsctl <group> <verb> [options]
                     Create an isolated private network.
   network rm (--id <guid> | --name <name>)
                     Remove an empty network. Refuses to remove its endpoints.
+  network inspect (--id <guid> | --name <name>)
+                    The effective HCN document: subnets, routes, MAC pool, DNS, policies,
+                    flags, schema version, attached endpoint IDs. Unelevated.
 
   vm create  --vhdx <path> [--id <guid>] [--cpus N] [--memory-mb N] [--network <name|id|default>]
              [--serial-pipe \\.\pipe\name] [--no-copy-on-write] [--label key=value]...
@@ -339,6 +342,6 @@ exit codes: 0 ok, 1 ran and failed, 64 bad arguments (nothing attempted)
              a guest process's own exit code is reported as exitCode in the result, not as
              hcsctl's exit code
 
-Planned, not built: the hcn write surface (network create/delete, policies -- the reads above
-exist), CimFS, process-isolated containers. See the roadmap issue.
+Deferred behind issues: HCN policies, load balancers, routes, namespaces (#17), CimFS (#16),
+process-isolated containers (#8). See the roadmap issue.
 `
