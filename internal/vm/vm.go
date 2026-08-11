@@ -14,6 +14,7 @@ package vm
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -130,6 +131,12 @@ func readState(s *store.Store, id string) (state, error) {
 }
 
 func writeState(s *store.Store, st state) error {
+	// Failpoint (#48): a state-write failure happens only after vm create has acquired a
+	// differencing disk, VHDX grants, and a compute system. This makes that rollback
+	// observable in the local smoke test without manufacturing an HCS failure.
+	if os.Getenv("HCSCTL_TEST_FAIL_WRITESTATE") != "" {
+		return fmt.Errorf("injected failure: HCSCTL_TEST_FAIL_WRITESTATE is set")
+	}
 	if err := os.MkdirAll(vmDir(s, st.ID), 0o755); err != nil {
 		return err
 	}
@@ -269,11 +276,14 @@ func create(a *cli.Args, e cli.Emit) (int, error) {
 
 	// Both the child and the parent need the grant. The VM worker opens the whole chain, and
 	// a missing grant on the parent fails at start with the child's path in the message.
-	for _, p := range grantPaths(disk, base, copyOnWrite) {
-		if err := vmcompute.GrantVmAccess(id, p); err != nil {
-			_ = os.RemoveAll(dir)
-			return cli.Failed, err
-		}
+	revokeAccess, err := grantPathsWithRollback(
+		grantPaths(disk, base, copyOnWrite),
+		func(path string) error { return vmcompute.GrantVmAccess(id, path) },
+		func(path string) error { return vmcompute.RevokeVmAccess(id, path) },
+	)
+	if err != nil {
+		_ = os.RemoveAll(dir)
+		return cli.Failed, err
 	}
 
 	// Every VM gets a COM port. It costs nothing to boot -- measured: a guest whose pipe
@@ -290,19 +300,41 @@ func create(a *cli.Args, e cli.Emit) (int, error) {
 		CreatedUTC: time.Now().UTC().Format(time.RFC3339),
 		Labels:     labels,
 	}
+	var sys *vmcompute.System
+
+	// undo takes back every resource acquired so far, in reverse. It exists before the
+	// endpoint so failures creating it, or anything after it, also revoke the VHDX grants.
+	undo := func() {
+		if sys != nil {
+			if terr := sys.Terminate(terminateTimeout); terr != nil {
+				e.Progress("WARNING: leaked compute system %s: %v", id, terr)
+			}
+			sys.Close()
+			sys = nil
+		}
+		if record.EndpointID != "" {
+			if derr := deleteVMEndpoint(record.EndpointID); derr != nil {
+				e.Progress("WARNING: leaked endpoint %s: %v", record.EndpointID, derr)
+			}
+		}
+		if rerr := revokeAccess(); rerr != nil {
+			e.Progress("WARNING: leaked VHDX access grant: %v", rerr)
+		}
+		_ = os.RemoveAll(dir)
+	}
 
 	// The endpoint is made before the compute system, because the document names it. From here
-	// on every failure has to take it back down: it is host-global, and nothing in the store
-	// yet points at it, so an early return without this leaks it permanently.
+	// on every failure uses undo: the endpoint and access grants are host-global, and no store
+	// record points at them until writeState succeeds.
 	if netw != nil {
 		mac, merr := generateMAC()
 		if merr != nil {
-			_ = os.RemoveAll(dir)
+			undo()
 			return cli.Failed, merr
 		}
 		ep, eerr := createVMEndpoint(netw, "", endpointName(id), mac)
 		if eerr != nil {
-			_ = os.RemoveAll(dir)
+			undo()
 			return cli.Failed, eerr
 		}
 		record.NetworkID, record.NetworkName = netw.Id, netw.Name
@@ -310,30 +342,21 @@ func create(a *cli.Args, e cli.Emit) (int, error) {
 		e.Progress("endpoint:  %s on %s (mac %s)", ep.Id, netw.Name, mac)
 	}
 
-	// undo takes back everything made so far, in reverse. Used on every failure below.
-	undo := func() {
-		if record.EndpointID != "" {
-			if derr := deleteVMEndpoint(record.EndpointID); derr != nil {
-				e.Progress("WARNING: leaked endpoint %s: %v", record.EndpointID, derr)
-			}
-		}
-		_ = os.RemoveAll(dir)
+	e.Progress("creating compute system %s", id)
+	sys, err = createSystem(record)
+	if err != nil {
+		undo()
+		return cli.Failed, err
 	}
 
-	e.Progress("creating compute system %s", id)
-	sys, err := createSystem(record)
-	if err != nil {
+	if err := writeState(st, record); err != nil {
 		undo()
 		return cli.Failed, err
 	}
 	// Closing the handle does not stop the VM: the document sets
 	// ShouldTerminateOnLastHandleClosed false precisely so it survives this process exiting.
 	sys.Close()
-
-	if err := writeState(st, record); err != nil {
-		undo()
-		return cli.Failed, err
-	}
+	sys = nil
 
 	// Read the endpoint now that it is attached to a NIC but before anything has started. This
 	// is the measurement #43 is waiting on: an address here means HNS fills one in at attach
@@ -442,6 +465,29 @@ func grantPaths(disk, base string, copyOnWrite bool) []string {
 		return []string{disk}
 	}
 	return []string{disk, base}
+}
+
+// grantPathsWithRollback acquires every VHDX access grant or revokes the successful prefix.
+// Its returned closure is the caller's rollback once every grant has been acquired.
+func grantPathsWithRollback(paths []string, grant func(string) error, revoke func(string) error) (func() error, error) {
+	granted := make([]string, 0, len(paths))
+	rollback := func() error {
+		var errs []error
+		for i := len(granted) - 1; i >= 0; i-- {
+			if err := revoke(granted[i]); err != nil {
+				errs = append(errs, fmt.Errorf("revoke %s: %w", granted[i], err))
+			}
+		}
+		return errors.Join(errs...)
+	}
+
+	for _, path := range paths {
+		if err := grant(path); err != nil {
+			return nil, errors.Join(err, rollback())
+		}
+		granted = append(granted, path)
+	}
+	return rollback, nil
 }
 
 // -- start -------------------------------------------------------------------------------
