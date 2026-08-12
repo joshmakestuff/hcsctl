@@ -28,8 +28,8 @@ func TestNewNetConfig(t *testing.T) {
 		if nc.Gateway != "172.29.130.1" {
 			t.Fatalf("gateway = %q", nc.Gateway)
 		}
-		if nc.Interface != "eth0" {
-			t.Fatalf("interface = %q, want eth0 default", nc.Interface)
+		if nc.Interface != "" {
+			t.Fatalf("interface = %q, want empty -- the guest's default is the agent's call, not the host's", nc.Interface)
 		}
 		if len(nc.DNS) != 2 || nc.DNS[0] != "1.1.1.1" || nc.DNS[1] != "8.8.8.8" {
 			t.Fatalf("dns = %v", nc.DNS)

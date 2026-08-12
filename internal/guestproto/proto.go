@@ -57,12 +57,15 @@ type Request struct {
 // (#60): on an hcsctl-owned network, HNS allocates the endpoint's address at create and no
 // DHCP server exists to deliver it, so the host sends it through this verb instead.
 //
-// The agent applies it through the guest's own network manager, never around it. Measured
+// The agent applies it through the guest's own network mechanism, never around it. Measured
 // 2026-08-11 (natlab nmprobe): an address added with raw `ip addr add` is torn down when
 // NetworkManager's DHCP transaction fails 45 s later; a connection-profile change holds.
+// Measured 2026-08-11 (winnetprobe): on Windows, netsh static config holds indefinitely,
+// because manual assignment itself moves the interface off DHCP.
 type NetConfig struct {
-	// Interface is the connection to modify. Empty means eth0, which is what the hcs-images
-	// guests have.
+	// Interface is the connection to modify. Empty means the guest's default: eth0 on Linux
+	// (what the hcs-images guests have), the single connected adapter on Windows (whose name
+	// is an enumeration accident and not worth wiring into a contract).
 	Interface string `json:"interface,omitempty"`
 	// Addresses in CIDR form. At least one is required -- an empty netconfig has no meaning.
 	Addresses []string `json:"addresses"`

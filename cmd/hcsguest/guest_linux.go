@@ -60,6 +60,10 @@ func killTree(cmd *exec.Cmd) {
 	}
 }
 
+// defaultInterface is what an empty NetConfig.Interface means: eth0, which is what the
+// hcs-images Linux guests have.
+func defaultInterface() string { return "eth0" }
+
 // applyNetConfig programs the interface through NetworkManager. nmcli only, no raw-ip
 // fallback: raw addresses are torn down at NM's DHCP failure (measured, natlab nmprobe
 // 2026-08-11), and a guest without NM is unmeasured -- it gets an explicit error rather
