@@ -47,10 +47,10 @@ type infoResult struct {
 	Reachable bool `json:"reachable"`
 	// State is the reading of that failure: absent, unreachable, or ready. See #37 -- the
 	// errnos discriminate, so this is measured rather than guessed.
-	State     string             `json:"state"`
-	Detail    string             `json:"detail,omitempty"`
-	ElapsedMS int64              `json:"elapsedMs"`
-	Guest     *guestproto.Info   `json:"guest,omitempty"`
+	State     string           `json:"state"`
+	Detail    string           `json:"detail,omitempty"`
+	ElapsedMS int64            `json:"elapsedMs"`
+	Guest     *guestproto.Info `json:"guest,omitempty"`
 }
 
 func info(a *cli.Args, e cli.Emit) (int, error) {
@@ -112,6 +112,15 @@ func info(a *cli.Args, e cli.Emit) (int, error) {
 		}
 	})
 	return cli.OK, nil
+}
+
+// ReadInfo waits for a guest agent response.
+func ReadInfo(vmid guid.GUID, timeout time.Duration) (*guestproto.Info, error) {
+	doc, _, _, err := dialAny(vmid, timeout)
+	if err != nil {
+		return nil, fmt.Errorf("guest agent unavailable: %w", err)
+	}
+	return doc, nil
 }
 
 // dialAny reaches the agent without being told which OS the guest runs. A Windows guest

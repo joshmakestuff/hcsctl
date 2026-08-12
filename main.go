@@ -269,7 +269,7 @@ usage: hcsctl <group> <verb> [options]
                     The effective HCN document: subnets, routes, MAC pool, DNS, policies,
                     flags, schema version, attached endpoint IDs. Unelevated.
 
-  vm create  --vhdx <path> [--id <guid>] [--cpus N] [--memory-mb N] [--network <name|id|default>]
+  vm create  --vhdx <path> [--id <guid>] [--cpus N] [--memory-mb N] [--network <name|id|default>] [--dns <IPv4,...>]
              [--serial-pipe \\.\pipe\name] [--no-copy-on-write] [--label key=value]...
              [--store <dir>]
                Make a Hyper-V VM that boots a Gen 2 VHDX. By default the disk is a
@@ -277,17 +277,15 @@ usage: hcsctl <group> <verb> [options]
                the image itself and MUTATES it. The id is a GUID because it is also the VM's
                hvsocket address -- guest info --vmid takes it unchanged. Unelevated;
                Hyper-V Administrators is enough. Does not start it.
-               --network attaches a DHCP endpoint on an EXISTING network; --network default
-               picks the Hyper-V Default Switch, which is the ICS network whose built-in DHCP
-               serves an arbitrary guest image. A full VM's guest runs its own DHCP client, so
-               unlike a container the address is not configured into it -- vm create reports
-               whatever the endpoint holds, which is nothing until the guest leases one. Wait
-               for it with vm ip. The endpoint is deleted by vm rm and nothing else.
+               --network default picks the Hyper-V Default Switch, whose DHCP configures an
+               arbitrary guest image. NAT and non-Default-Switch ICS networks require --dns;
+               vm start programs their HCN allocation in the guest and succeeds only after its
+               agent attests the address. The endpoint is deleted by vm rm and nothing else.
                --label stores opaque key=value pairs in state.json, reported by ls and inspect
                and never interpreted -- record an owner pid; scavenge only on proof it is dead.
   vm start   --id <guid>
-               Start returning means the firmware is running, NOT that the guest is up --
-               unlike a container. Ask guest info for guest readiness.
+               On NAT and non-Default-Switch ICS networks, success means the guest agent has
+               applied and attested static IPv4 networking. Other starts mean firmware running.
   vm stop    --id <guid> [--force]
                Without --force, asks the guest through the shutdown integration service; a
                guest that lacks one cannot be asked. --force powers it off.
@@ -295,10 +293,8 @@ usage: hcsctl <group> <verb> [options]
                Terminates, then removes only what this tool made. A --no-copy-on-write VM's
                base image is never removed.
   vm ip      --id <guid> [--timeout 60s]
-               Wait for the address the guest leases, and print it. An endpoint carries no
-               address when it is created, none when it is attached, and none while the VM runs
-               without a guest -- measured -- so this waits rather than answering once. A VM
-               made without --network has nothing to wait for and fails saying so.
+               Wait for guest-reported IPv4 addresses and print them. Endpoint allocations are
+               used only to identify the guest address, never returned without guest evidence.
   vm netconfig --id <guid> [--dns <ip,ip>] [--interface eth0] [--timeout 45s]
                Program the guest's interface with the endpoint's HNS allocation, through the
                agent and the guest's own NetworkManager. For hcsctl-owned networks (NAT),

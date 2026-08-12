@@ -21,7 +21,7 @@ func natNetwork() *hcn.HostComputeNetwork {
 
 func TestNewNetConfig(t *testing.T) {
 	t.Run("derives gateway from the subnet holding the allocation", func(t *testing.T) {
-		nc, err := newNetConfig([]string{"172.29.130.74/24"}, natNetwork(), "", "1.1.1.1, 8.8.8.8")
+		nc, err := newNetConfig([]string{"172.29.130.74/24"}, natNetwork(), "", []string{"1.1.1.1", "8.8.8.8"})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -37,14 +37,14 @@ func TestNewNetConfig(t *testing.T) {
 	})
 
 	t.Run("no allocation is an explicit error, not an empty config", func(t *testing.T) {
-		_, err := newNetConfig(nil, natNetwork(), "", "")
+		_, err := newNetConfig(nil, natNetwork(), "", nil)
 		if err == nil || !strings.Contains(err.Error(), "no allocation") {
 			t.Fatalf("error = %v", err)
 		}
 	})
 
 	t.Run("allocation outside every subnet yields no gateway", func(t *testing.T) {
-		nc, err := newNetConfig([]string{"10.9.9.9/24"}, natNetwork(), "", "")
+		nc, err := newNetConfig([]string{"10.9.9.9/24"}, natNetwork(), "", nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -54,14 +54,14 @@ func TestNewNetConfig(t *testing.T) {
 	})
 
 	t.Run("bad dns entry is a usage error", func(t *testing.T) {
-		_, err := newNetConfig([]string{"172.29.130.74/24"}, natNetwork(), "", "1.1.1.1,not-an-ip")
-		if err == nil || !strings.Contains(err.Error(), "not an IP address") {
+		_, err := parseDNS("1.1.1.1,not-an-ip")
+		if err == nil || !strings.Contains(err.Error(), "not an IPv4 address") {
 			t.Fatalf("error = %v", err)
 		}
 	})
 
 	t.Run("dns is empty, never nil, when unset", func(t *testing.T) {
-		nc, err := newNetConfig([]string{"172.29.130.74/24"}, natNetwork(), "", "")
+		nc, err := newNetConfig([]string{"172.29.130.74/24"}, natNetwork(), "", []string{})
 		if err != nil {
 			t.Fatal(err)
 		}

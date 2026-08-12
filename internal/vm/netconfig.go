@@ -42,7 +42,7 @@ type netconfigResult struct {
 // newNetConfig derives the wire payload from the endpoint's allocation and the network
 // document. Pure, so the derivation is testable without HCN: addrs is addressesOf's result,
 // netw the network the endpoint is on.
-func newNetConfig(addrs []string, netw *hcn.HostComputeNetwork, iface, dnsCSV string) (guestproto.NetConfig, error) {
+func newNetConfig(addrs []string, netw *hcn.HostComputeNetwork, iface string, dns []string) (guestproto.NetConfig, error) {
 	if len(addrs) == 0 {
 		return guestproto.NetConfig{}, fmt.Errorf("the endpoint has no allocation to program -- " +
 			"on an ICS network the guest leases for itself, and netconfig has nothing to do")
@@ -70,16 +70,6 @@ func newNetConfig(addrs []string, netw *hcn.HostComputeNetwork, iface, dnsCSV st
 		}
 	}
 
-	dns := []string{}
-	if dnsCSV != "" {
-		for _, d := range strings.Split(dnsCSV, ",") {
-			d = strings.TrimSpace(d)
-			if _, err := netip.ParseAddr(d); err != nil {
-				return guestproto.NetConfig{}, cli.Usagef("--dns entry %q is not an IP address", d)
-			}
-			dns = append(dns, d)
-		}
-	}
 	// An empty interface stays empty on the wire: it means the guest's own default (eth0 on
 	// Linux, the single connected adapter on Windows), and only the agent knows which OS it
 	// is. The host inventing eth0 here is what made netconfig Linux-only.
@@ -129,7 +119,11 @@ func netconfig(a *cli.Args, e cli.Emit) (int, error) {
 		return cli.Failed, fmt.Errorf("the network %s this vm's endpoint is on: %w", st.NetworkID, err)
 	}
 
-	nc, err := newNetConfig(addrs, netw, a.Option("--interface"), a.Option("--dns"))
+	dns, derr := parseDNS(a.Option("--dns"))
+	if derr != nil {
+		return cli.Usage, derr
+	}
+	nc, err := newNetConfig(addrs, netw, a.Option("--interface"), dns)
 	if err != nil {
 		var usage *cli.UsageError
 		if errors.As(err, &usage) {

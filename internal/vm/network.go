@@ -15,11 +15,49 @@ package vm
 import (
 	"crypto/rand"
 	"fmt"
+	"net/netip"
 	"strings"
 
 	"github.com/Microsoft/hcsshim/hcn"
 	"github.com/joshmakestuff/hcsctl/internal/cli"
 )
+
+type networkMode int
+
+const (
+	networkPrivate networkMode = iota
+	networkDHCP
+	networkStatic
+)
+
+func modeOf(netw *hcn.HostComputeNetwork) networkMode {
+	if netw == nil || strings.EqualFold(string(netw.Type), "Private") {
+		return networkPrivate
+	}
+	if strings.EqualFold(netw.Name, defaultSwitchName) {
+		return networkDHCP
+	}
+	if netw.Type == hcn.NAT || strings.EqualFold(string(netw.Type), "ICS") {
+		return networkStatic
+	}
+	return networkPrivate
+}
+
+func parseDNS(dnsCSV string) ([]string, error) {
+	dns := []string{}
+	if dnsCSV == "" {
+		return dns, nil
+	}
+	for _, raw := range strings.Split(dnsCSV, ",") {
+		d := strings.TrimSpace(raw)
+		ip, err := netip.ParseAddr(d)
+		if err != nil || !ip.Is4() {
+			return nil, cli.Usagef("--dns entry %q is not an IPv4 address", d)
+		}
+		dns = append(dns, ip.String())
+	}
+	return dns, nil
+}
 
 // endpointFlagsEnableDhcp is 32. hcsshim's EndpointFlags enum defines only None (0) and
 // RemoteEndpoint (1), so the value is carried here rather than imported.

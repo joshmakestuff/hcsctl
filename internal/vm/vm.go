@@ -25,6 +25,7 @@ import (
 	"github.com/Microsoft/go-winio/pkg/guid"
 	"github.com/Microsoft/hcsshim/hcn"
 	"github.com/joshmakestuff/hcsctl/internal/cli"
+	"github.com/joshmakestuff/hcsctl/internal/guest"
 	"github.com/joshmakestuff/hcsctl/internal/store"
 	"github.com/joshmakestuff/hcsctl/internal/vmcompute"
 )
@@ -81,10 +82,11 @@ type state struct {
 	// The endpoint this tool made, and the adapter it is behind. The id has to survive the
 	// process: an endpoint is host-global, so a `vm rm` running in a later invocation -- or
 	// after a crash -- is the only thing that will ever delete it.
-	NetworkID   string `json:"networkId,omitempty"`
-	NetworkName string `json:"networkName,omitempty"`
-	EndpointID  string `json:"endpointId,omitempty"`
-	MacAddress  string `json:"macAddress,omitempty"`
+	NetworkID   string   `json:"networkId,omitempty"`
+	NetworkName string   `json:"networkName,omitempty"`
+	EndpointID  string   `json:"endpointId,omitempty"`
+	MacAddress  string   `json:"macAddress,omitempty"`
+	DNS         []string `json:"dns,omitempty"`
 
 	// Labels are stored and reported, never interpreted (#31, #44). Ownership and run identity
 	// are the consumer's policy: hcsctl has no scavenger and no opinion about what "dead"
@@ -100,7 +102,7 @@ var reservedLabelKeys = map[string]bool{
 	"id": true, "baseVhdx": true, "diskPath": true, "copyOnWrite": true, "cpus": true,
 	"memoryMb": true, "serialPipe": true, "createdUtc": true, "labels": true,
 	"networkId": true, "networkName": true, "network": true, "endpointId": true,
-	"macAddress": true, "addresses": true, "endpointError": true,
+	"macAddress": true, "dns": true, "addresses": true, "endpointError": true,
 	"ok": true, "command": true, "state": true, "hcs": true, "hcsError": true,
 	"store": true, "vms": true, "systems": true,
 }
@@ -176,17 +178,18 @@ type createResult struct {
 	MemoryMB    uint64 `json:"memoryMb"`
 	SerialPipe  string `json:"serialPipe,omitempty"`
 
-	Network    string `json:"network,omitempty"`
-	NetworkID  string `json:"networkId,omitempty"`
-	EndpointID string `json:"endpointId,omitempty"`
-	MacAddress string `json:"macAddress,omitempty"`
+	Network    string   `json:"network,omitempty"`
+	NetworkID  string   `json:"networkId,omitempty"`
+	EndpointID string   `json:"endpointId,omitempty"`
+	MacAddress string   `json:"macAddress,omitempty"`
+	DNS        []string `json:"dns,omitempty"`
 	// Addresses is empty until the endpoint has one, and that is a real answer rather than a
 	// missing one -- a caller polls `vm inspect` for it. See addressesOf and #43.
 	Addresses []string `json:"addresses"`
 }
 
 func create(a *cli.Args, e cli.Emit) (int, error) {
-	if err := a.RejectUnknown("--id", "--vhdx", "--cpus", "--memory-mb", "--serial-pipe", "--store", "--no-copy-on-write", "--network", "--label"); err != nil {
+	if err := a.RejectUnknown("--id", "--vhdx", "--cpus", "--memory-mb", "--serial-pipe", "--store", "--no-copy-on-write", "--network", "--dns", "--label"); err != nil {
 		return cli.Usage, err
 	}
 	labels, err := cli.ParseLabels(a, reservedLabelKeys)
@@ -240,6 +243,16 @@ func create(a *cli.Args, e cli.Emit) (int, error) {
 		if netw, err = resolveVMNetwork(want); err != nil {
 			return cli.Usage, err
 		}
+	}
+	dns, err := parseDNS(a.Option("--dns"))
+	if err != nil {
+		return cli.Usage, err
+	}
+	if netw == nil && len(dns) != 0 {
+		return cli.Usage, cli.Usagef("--dns only means something with --network")
+	}
+	if netw != nil && modeOf(netw) == networkStatic && len(dns) == 0 {
+		return cli.Usage, cli.Usagef("--dns is required for NAT and non-Default-Switch ICS networks")
 	}
 
 	st, err := openStore(a)
@@ -300,7 +313,7 @@ func create(a *cli.Args, e cli.Emit) (int, error) {
 		ID: id, BaseVHDX: base, DiskPath: disk, CopyOnWrite: copyOnWrite,
 		CPUs: cpus, MemoryMB: memoryMB, SerialPipe: pipe,
 		CreatedUTC: time.Now().UTC().Format(time.RFC3339),
-		Labels:     labels,
+		Labels:     labels, DNS: dns,
 	}
 	var sys *vmcompute.System
 
@@ -378,6 +391,7 @@ func create(a *cli.Args, e cli.Emit) (int, error) {
 		CPUs: cpus, MemoryMB: memoryMB, SerialPipe: record.SerialPipe,
 		Network: record.NetworkName, NetworkID: record.NetworkID,
 		EndpointID: record.EndpointID, MacAddress: record.MacAddress,
+		DNS:       record.DNS,
 		Addresses: addrs,
 	}, func() {
 		fmt.Printf("created %s\n", id)
@@ -505,7 +519,8 @@ type startResult struct {
 	// Recreated says the compute system had to be made again from the store record, because
 	// the previous one exited. The disk is the same one, so this is a power cycle and not a
 	// fresh VM -- but it is worth reporting, since the id is all HCS ever held.
-	Recreated bool `json:"recreated"`
+	Recreated bool                `json:"recreated"`
+	Network   *startNetworkResult `json:"network,omitempty"`
 }
 
 func start(a *cli.Args, e cli.Emit) (int, error) {
@@ -517,6 +532,18 @@ func start(a *cli.Args, e cli.Emit) (int, error) {
 		return cli.Usage, err
 	}
 
+	st, err := openStore(a)
+	if err != nil {
+		return cli.Failed, err
+	}
+	record, err := readState(st, id)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return cli.Failed, fmt.Errorf("no vm %s in this store", id)
+		}
+		return cli.Failed, err
+	}
+
 	recreated := false
 	sys, err := vmcompute.Open(id)
 	if vmcompute.IsNotFound(err) {
@@ -524,17 +551,6 @@ func start(a *cli.Args, e cli.Emit) (int, error) {
 		// simply not there any more -- "stopped" is not a state HCS keeps. The store record
 		// and the disk are what survive a power cycle, so start rebuilds the system from
 		// them rather than reporting a VM the caller can plainly see in `vm ls` as missing.
-		st, serr := openStore(a)
-		if serr != nil {
-			return cli.Failed, serr
-		}
-		record, rerr := readState(st, id)
-		if rerr != nil {
-			if os.IsNotExist(rerr) {
-				return cli.Failed, fmt.Errorf("no vm %s: not running, and no record in the store", id)
-			}
-			return cli.Failed, rerr
-		}
 		e.Progress("%s is not running; recreating it over %s", id, record.DiskPath)
 		// The endpoint has to be remade with the system. An endpoint that was attached to the
 		// compute system that just exited cannot be attached to the new one -- HCS rejects the
@@ -560,10 +576,24 @@ func start(a *cli.Args, e cli.Emit) (int, error) {
 	if err := sys.Start(startTimeout); err != nil {
 		return cli.Failed, err
 	}
+	var network *startNetworkResult
+	if record.EndpointID != "" {
+		netw, nerr := hcn.GetNetworkByID(record.NetworkID)
+		if nerr != nil {
+			return cli.Failed, fmt.Errorf("the network %s this vm's endpoint is on: %w", record.NetworkID, nerr)
+		}
+		if modeOf(netw) == networkStatic {
+			configured, cerr := configureStartNetwork(id, record, netw, startTimeout)
+			if cerr != nil {
+				return cli.Failed, cerr
+			}
+			network = &configured
+		}
+	}
 	elapsed := time.Since(began).Milliseconds()
 
 	e.Result(startResult{OK: true, Command: "vm start", ID: id, ElapsedMS: elapsed,
-		Started: true, Recreated: recreated}, func() {
+		Started: true, Recreated: recreated, Network: network}, func() {
 		fmt.Printf("started %s in %d ms\n", id, elapsed)
 		fmt.Printf("the firmware is running; the guest OS is not necessarily up yet\n")
 		fmt.Printf("wait for it with: hcsctl guest info --vmid %s\n", id)
@@ -797,17 +827,22 @@ func ip(a *cli.Args, e cli.Emit) (int, error) {
 	began := time.Now()
 	deadline := began.Add(timeout)
 	for {
-		addrs, aerr := addressesOf(record.EndpointID)
+		expected, aerr := addressesOf(record.EndpointID)
 		if aerr != nil {
 			return cli.Failed, fmt.Errorf("reading endpoint %s: %w", record.EndpointID, aerr)
 		}
-		if len(addrs) > 0 {
-			waited := time.Since(began).Milliseconds()
-			e.Result(ipResult{OK: true, Command: "vm ip", ID: id, EndpointID: record.EndpointID,
-				Addresses: addrs, WaitedMS: waited}, func() {
-				fmt.Printf("%s\n", strings.Join(addrs, "\n"))
-			})
-			return cli.OK, nil
+		vmid, _ := guid.FromString(id)
+		info, ierr := guest.ReadInfo(vmid, ipPollInterval)
+		if ierr == nil {
+			addrs := guestIPv4Addresses(info.Addresses, expected)
+			if len(addrs) > 0 {
+				waited := time.Since(began).Milliseconds()
+				e.Result(ipResult{OK: true, Command: "vm ip", ID: id, EndpointID: record.EndpointID,
+					Addresses: addrs, WaitedMS: waited}, func() {
+					fmt.Printf("%s\n", strings.Join(addrs, "\n"))
+				})
+				return cli.OK, nil
+			}
 		}
 		if time.Now().After(deadline) {
 			// Named as the guest's failure, because that is what it is: the endpoint is fine
