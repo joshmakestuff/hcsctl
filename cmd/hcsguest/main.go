@@ -27,7 +27,7 @@ import (
 
 // Version is the agent build. The host reports it in `guest info`, so a guest running a stale
 // agent is visible rather than mysterious.
-const Version = "0.2.0"
+const Version = "0.3.0"
 
 // Commit is the hcsctl commit this agent was built from. Consumers pin a commit rather than a
 // release (hcsctl#35), so the commit is the agent's identity -- and stamping it here is what
