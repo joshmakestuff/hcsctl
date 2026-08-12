@@ -5,10 +5,13 @@ package main
 import (
 	"fmt"
 	"net"
+	"net/netip"
 	"os"
 	"os/exec"
 	"strconv"
+	"strings"
 	"time"
+	"unsafe"
 
 	"github.com/Microsoft/go-winio"
 	"github.com/Microsoft/go-winio/pkg/guid"
@@ -31,14 +34,144 @@ func listen() (net.Listener, error) {
 	})
 }
 
-// applyNetConfig is not implemented for Windows guests. The measured NetworkManager contract
-// is Linux; a Windows guest needs its own measurement (netsh or CIM) before a mechanism is
-// chosen -- an explicit refusal now beats an unmeasured implementation.
+// defaultInterface is what an empty NetConfig.Interface means on Windows: nothing named --
+// applyNetConfig selects the single connected adapter instead. Windows has no stable eth0
+// analogue; the synthetic NIC's name ("Ethernet 2" on the current image) is an enumeration
+// accident, not a contract.
+func defaultInterface() string { return "" }
+
+// applyNetConfig programs the adapter through netsh, the measured Windows mechanism
+// (winnetprobe arm b, 2026-08-11): a static address set this way holds address and dataplane
+// through the whole observation window, because manual assignment itself moves the interface
+// off DHCP -- there is no NetworkManager-analogue teardown to defend against.
+//
+// The same measurement caught the dataplane failing right after apply and recovering within
+// the next minute: the address exists but is still in duplicate address detection. So this
+// waits for the applied addresses to reach Preferred before attesting -- the host must never
+// be handed an allocation the guest cannot yet use.
 func applyNetConfig(nc *guestproto.NetConfig) (guestproto.NetConfigResult, error) {
 	if err := validateNetConfig(nc); err != nil {
 		return guestproto.NetConfigResult{}, err
 	}
-	return guestproto.NetConfigResult{}, fmt.Errorf("netconfig is not implemented for windows guests")
+	iface, err := resolveAdapter(nc.Interface)
+	if err != nil {
+		return guestproto.NetConfigResult{}, err
+	}
+	for _, args := range netshCmds(nc, iface.Index) {
+		if out, err := exec.Command("netsh", args...).CombinedOutput(); err != nil {
+			return guestproto.NetConfigResult{}, fmt.Errorf("netsh %s: %v: %s",
+				strings.Join(args, " "), err, strings.TrimSpace(string(out)))
+		}
+	}
+	if err := waitPreferred(uint32(iface.Index), nc.Addresses, 30*time.Second); err != nil {
+		return guestproto.NetConfigResult{}, err
+	}
+	return guestproto.NetConfigResult{
+		OK:        true,
+		Protocol:  guestproto.Protocol,
+		Applied:   "netsh",
+		Addresses: observedAddresses(iface.Name),
+	}, nil
+}
+
+// resolveAdapter picks the adapter to program. A name selects it directly. An empty name
+// selects the single up, non-loopback adapter -- the hcs-images guests have exactly one
+// synthetic NIC -- and anything else is refused rather than guessed at.
+func resolveAdapter(name string) (net.Interface, error) {
+	if name != "" {
+		i, err := net.InterfaceByName(name)
+		if err != nil {
+			return net.Interface{}, fmt.Errorf("interface %q: %w", name, err)
+		}
+		return *i, nil
+	}
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return net.Interface{}, err
+	}
+	var up []net.Interface
+	for _, i := range ifaces {
+		if i.Flags&net.FlagLoopback == 0 && i.Flags&net.FlagUp != 0 {
+			up = append(up, i)
+		}
+	}
+	if len(up) != 1 {
+		names := make([]string, len(up))
+		for j, i := range up {
+			names[j] = i.Name
+		}
+		return net.Interface{}, fmt.Errorf(
+			"cannot choose among %d connected adapters (%s) -- name one in the request",
+			len(up), strings.Join(names, ", "))
+	}
+	return up[0], nil
+}
+
+// waitPreferred blocks until every applied address passes duplicate address detection, polls
+// every 500ms until the timeout. A Duplicate verdict fails immediately: another host holds
+// the address, and reporting success would attest a dataplane that cannot work.
+func waitPreferred(ifIndex uint32, cidrs []string, timeout time.Duration) error {
+	want := []netip.Addr{}
+	for _, c := range cidrs {
+		want = append(want, netip.MustParsePrefix(c).Addr()) // validated
+	}
+	deadline := time.Now().Add(timeout)
+	for {
+		states, err := dadStates(ifIndex)
+		if err != nil {
+			return err
+		}
+		pending := []string{}
+		for _, a := range want {
+			switch states[a] {
+			case windows.IpDadStateDuplicate:
+				return fmt.Errorf("address %s is already held by another host on the network", a)
+			case windows.IpDadStatePreferred:
+			default:
+				pending = append(pending, a.String())
+			}
+		}
+		if len(pending) == 0 {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("addresses %s still in duplicate address detection after %s",
+				strings.Join(pending, ","), timeout)
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+}
+
+// dadStates reads each IPv4 unicast address's duplicate-address-detection state on one
+// adapter. net.Interface cannot see DAD, so this is the one place the agent asks iphlpapi
+// directly.
+func dadStates(ifIndex uint32) (map[netip.Addr]int32, error) {
+	size := uint32(16 * 1024)
+	for {
+		buf := make([]byte, size)
+		aa := (*windows.IpAdapterAddresses)(unsafe.Pointer(&buf[0]))
+		err := windows.GetAdaptersAddresses(windows.AF_INET, 0, 0, aa, &size)
+		if err == windows.ERROR_BUFFER_OVERFLOW {
+			continue // size now holds the needed length; the next make uses it
+		}
+		if err != nil {
+			return nil, fmt.Errorf("GetAdaptersAddresses: %w", err)
+		}
+		out := map[netip.Addr]int32{}
+		for ; aa != nil; aa = aa.Next {
+			if aa.IfIndex != ifIndex {
+				continue
+			}
+			for ua := aa.FirstUnicastAddress; ua != nil; ua = ua.Next {
+				if ip := ua.Address.IP().To4(); ip != nil {
+					if a, ok := netip.AddrFromSlice(ip); ok {
+						out[a] = ua.DadState
+					}
+				}
+			}
+		}
+		return out, nil
+	}
 }
 
 func gatherInfo() (guestproto.Info, error) {

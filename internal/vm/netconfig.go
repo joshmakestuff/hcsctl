@@ -8,8 +8,9 @@ package vm
 // at create and nothing delivers it to the guest (measured, docs/findings.md "The NAT
 // lifecycle, measured"). This verb reads that allocation from the endpoint document, derives
 // the gateway from the network's route, and hands both to the agent over hvsocket. The agent
-// applies them through the guest's own NetworkManager and answers with what the interface
-// actually holds, so the result attests the guest's state rather than restating the request.
+// applies them through the guest's own mechanism -- NetworkManager on Linux, netsh on
+// Windows, both measured -- and answers with what the interface actually holds, so the
+// result attests the guest's state rather than restating the request.
 
 import (
 	"errors"
@@ -79,9 +80,9 @@ func newNetConfig(addrs []string, netw *hcn.HostComputeNetwork, iface, dnsCSV st
 			dns = append(dns, d)
 		}
 	}
-	if iface == "" {
-		iface = "eth0"
-	}
+	// An empty interface stays empty on the wire: it means the guest's own default (eth0 on
+	// Linux, the single connected adapter on Windows), and only the agent knows which OS it
+	// is. The host inventing eth0 here is what made netconfig Linux-only.
 	return guestproto.NetConfig{
 		Interface: iface,
 		Addresses: addrs,
@@ -141,7 +142,11 @@ func netconfig(a *cli.Args, e cli.Emit) (int, error) {
 	if err != nil {
 		return cli.Usage, cli.Usagef("--id is not a GUID: %v", err)
 	}
-	e.Progress("programming %s on %s via the agent", strings.Join(nc.Addresses, ","), nc.Interface)
+	ifaceLabel := nc.Interface
+	if ifaceLabel == "" {
+		ifaceLabel = "the guest's default interface"
+	}
+	e.Progress("programming %s on %s via the agent", strings.Join(nc.Addresses, ","), ifaceLabel)
 	res, err := guest.ApplyNetConfig(vmid, nc, timeout)
 	if err != nil {
 		return cli.Failed, err
@@ -154,8 +159,13 @@ func netconfig(a *cli.Args, e cli.Emit) (int, error) {
 	if out.Addresses == nil {
 		out.Addresses = []guestproto.Address{}
 	}
+	// The agent's attestation names the interface it actually programmed; prefer that over
+	// the request, which may not have named one.
+	if len(out.Addresses) > 0 {
+		ifaceLabel = out.Addresses[0].Interface
+	}
 	e.Result(out, func() {
-		fmt.Printf("applied via %s on %s\n", out.Applied, nc.Interface)
+		fmt.Printf("applied via %s on %s\n", out.Applied, ifaceLabel)
 		for _, ad := range out.Addresses {
 			fmt.Printf("  %s %s\n", ad.Interface, ad.Address)
 		}
