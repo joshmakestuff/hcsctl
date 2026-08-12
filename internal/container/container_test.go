@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Microsoft/hcsshim/hcn"
 	"github.com/joshmakestuff/hcsctl/internal/cli"
 	"github.com/joshmakestuff/hcsctl/internal/store"
 )
@@ -137,6 +138,67 @@ func TestParseMounts(t *testing.T) {
 			t.Fatal("relative host path accepted")
 		}
 	})
+}
+
+func TestParsePublishedPorts(t *testing.T) {
+	parse := func(t *testing.T, specs ...string) ([]publishedPort, error) {
+		t.Helper()
+		var argv []string
+		for _, s := range specs {
+			argv = append(argv, "--publish", s)
+		}
+		a, err := cli.Parse(argv)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return parsePublishedPorts(a)
+	}
+
+	t.Run("multiple protocols and ports", func(t *testing.T) {
+		got, err := parse(t, "39082:8082/tcp", "39083:8082/udp")
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := []publishedPort{{Protocol: "tcp", HostPort: 39082, ContainerPort: 8082}, {Protocol: "udp", HostPort: 39083, ContainerPort: 8082}}
+		if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+			t.Fatalf("got %#v, want %#v", got, want)
+		}
+	})
+
+	for _, spec := range []string{"39082:8082", "39082:8082/TCP", "0:8082/tcp", "39082:65536/tcp", "x:8082/tcp", "39082:8082/sctp"} {
+		t.Run("reject "+spec, func(t *testing.T) {
+			if _, err := parse(t, spec); err == nil {
+				t.Fatalf("accepted %q", spec)
+			}
+		})
+	}
+
+	t.Run("same protocol and host port is rejected", func(t *testing.T) {
+		if _, err := parse(t, "39082:8082/tcp", "39082:8083/tcp"); err == nil {
+			t.Fatal("duplicate TCP host port accepted")
+		}
+	})
+	t.Run("same host port across protocols is valid", func(t *testing.T) {
+		if _, err := parse(t, "39082:8082/tcp", "39082:8082/udp"); err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
+func TestValidatePublishNetwork(t *testing.T) {
+	published := []publishedPort{{Protocol: "tcp", HostPort: 39082, ContainerPort: 8082}}
+	if err := validatePublishNetwork(nil, nil); err != nil {
+		t.Fatalf("no publish: %v", err)
+	}
+	if err := validatePublishNetwork(published, nil); err == nil || !strings.Contains(err.Error(), "--network") {
+		t.Fatalf("nil network error = %v", err)
+	}
+	if err := validatePublishNetwork(published, &hcn.HostComputeNetwork{Name: "private", Type: hcn.Private}); err == nil || !strings.Contains(err.Error(), "NAT") {
+		t.Fatalf("private network error = %v", err)
+	}
+	if err := validatePublishNetwork(published, &hcn.HostComputeNetwork{Name: "nat", Type: hcn.NAT}); err != nil {
+		t.Fatalf("NAT network: %v", err)
+	}
 }
 
 func TestParseEnvKeepsValueAfterFirstEquals(t *testing.T) {

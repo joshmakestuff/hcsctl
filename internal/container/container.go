@@ -34,6 +34,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -105,6 +106,10 @@ type state struct {
 	// `rm` after a crash must delete an endpoint it did not create.
 	Endpoint  string   `json:"endpoint,omitempty"`
 	Addresses []string `json:"addresses,omitempty"`
+	// Published records the NAT port mappings supplied when this endpoint was created. HCN
+	// owns their effective lifetime; this is the requested creation contract reported again by
+	// inspect after the creating invocation is gone.
+	Published []publishedPort `json:"published,omitempty"`
 	// Primary is the container's main workload (#33), recorded by `create --cmd` so a fresh
 	// invocation can say what a running container is running, follow its retained output,
 	// and report its exit after the starting invocation is gone.
@@ -268,17 +273,111 @@ func resolveNetwork(want string) (*hcn.HostComputeNetwork, error) {
 
 // createEndpoint puts a new endpoint on the network. The returned document carries the
 // address HNS allocated, which is the thing the caller wants reported.
-func createEndpoint(netw *hcn.HostComputeNetwork, name string) (*hcn.HostComputeEndpoint, error) {
+func createEndpoint(netw *hcn.HostComputeNetwork, name string, published []publishedPort) (*hcn.HostComputeEndpoint, error) {
 	ep := &hcn.HostComputeEndpoint{
 		Name:               name,
 		HostComputeNetwork: netw.Id,
 		SchemaVersion:      hcn.V2SchemaVersion(),
 	}
-	created, err := ep.Create()
+	for _, p := range published {
+		settings, err := json.Marshal(hcn.PortMappingPolicySetting{
+			Protocol: p.protocolNumber(), InternalPort: p.ContainerPort, ExternalPort: p.HostPort,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("marshal port mapping %s: %w", p, err)
+		}
+		ep.Policies = append(ep.Policies, hcn.EndpointPolicy{Type: hcn.PortMapping, Settings: settings})
+	}
+	// Port mappings only reached a working NAT dataplane on the measured host when the
+	// endpoint was created through its owning network's create path. The bare endpoint Create
+	// call accepted and reported the policy but did not allocate a forwarding mapping.
+	created, err := netw.CreateEndpoint(ep)
 	if err != nil {
 		return nil, fmt.Errorf("endpoint Create on %s: %w", netw.Name, err)
 	}
 	return created, nil
+}
+
+// publishedPort is the small, deliberate port-publishing surface. It maps a host port to a
+// guest port while the endpoint is created; HCN accepts a port mapping added later but, on the
+// measured host, that does not establish a forwarding dataplane.
+type publishedPort struct {
+	Protocol      string `json:"protocol"`
+	HostPort      uint16 `json:"hostPort"`
+	ContainerPort uint16 `json:"containerPort"`
+}
+
+func (p publishedPort) String() string {
+	return fmt.Sprintf("%d:%d/%s", p.HostPort, p.ContainerPort, p.Protocol)
+}
+
+func (p publishedPort) protocolNumber() uint32 {
+	if p.Protocol == "udp" {
+		return 17
+	}
+	return 6
+}
+
+// parsePublishedPorts parses repeated --publish HOST_PORT:CONTAINER_PORT/PROTOCOL values.
+// Keeping it separate from endpoint creation makes every rejected value an exit-64 path before
+// the scratch, endpoint, and compute system transactions begin.
+func parsePublishedPorts(a *cli.Args) ([]publishedPort, error) {
+	vals := a.Options("--publish")
+	if len(vals) == 0 {
+		return nil, nil
+	}
+	seen := map[string]bool{}
+	out := make([]publishedPort, 0, len(vals))
+	for _, v := range vals {
+		parts := strings.Split(v, "/")
+		if len(parts) != 2 || (parts[1] != "tcp" && parts[1] != "udp") {
+			return nil, cli.Usagef("--publish wants HOST_PORT:CONTAINER_PORT/tcp|udp, got %q", v)
+		}
+		ports := strings.Split(parts[0], ":")
+		if len(ports) != 2 {
+			return nil, cli.Usagef("--publish wants HOST_PORT:CONTAINER_PORT/tcp|udp, got %q", v)
+		}
+		host, err := parsePublishedPort(ports[0])
+		if err != nil {
+			return nil, cli.Usagef("--publish host port in %q: %v", v, err)
+		}
+		guest, err := parsePublishedPort(ports[1])
+		if err != nil {
+			return nil, cli.Usagef("--publish container port in %q: %v", v, err)
+		}
+		p := publishedPort{Protocol: parts[1], HostPort: host, ContainerPort: guest}
+		key := p.Protocol + ":" + strconv.FormatUint(uint64(p.HostPort), 10)
+		if seen[key] {
+			return nil, cli.Usagef("--publish host port %d/%s is given more than once", p.HostPort, p.Protocol)
+		}
+		seen[key] = true
+		out = append(out, p)
+	}
+	return out, nil
+}
+
+func parsePublishedPort(v string) (uint16, error) {
+	if v == "" {
+		return 0, fmt.Errorf("is required")
+	}
+	n, err := strconv.ParseUint(v, 10, 16)
+	if err != nil || n == 0 {
+		return 0, fmt.Errorf("must be a decimal integer from 1 through 65535")
+	}
+	return uint16(n), nil
+}
+
+func validatePublishNetwork(published []publishedPort, netw *hcn.HostComputeNetwork) error {
+	if len(published) == 0 {
+		return nil
+	}
+	if netw == nil {
+		return cli.Usagef("--publish requires --network naming an HCN NAT network")
+	}
+	if netw.Type != hcn.NAT {
+		return cli.Usagef("--publish requires an HCN NAT network; %q is %s", netw.Name, netw.Type)
+	}
+	return nil
 }
 
 // deleteEndpoint removes an endpoint and verifies it is gone. Endpoints are host-global, so a
@@ -359,7 +458,7 @@ func parseLabels(a *cli.Args) (map[string]string, error) {
 // -- create ------------------------------------------------------------------------------
 
 var createOptions = []string{"--ref", "--id", "--store", "--cpus", "--memory-mb", "--hostname",
-	"--network", "--dns-search", "--mount", "--scratch-size", "--cmd", "--label"}
+	"--network", "--dns-search", "--publish", "--mount", "--scratch-size", "--cmd", "--label"}
 
 // buildConfig assembles the compute system document. Split out from create() because `run`
 // needs the same document and the same failure messages.
@@ -372,8 +471,11 @@ func buildConfig(a *cli.Args, e cli.Emit, st *store.Store, id, ref string) (*hcs
 	if a.Option("--dns-search") != "" && a.Option("--network") == "" {
 		return nil, s, cli.Usagef("--dns-search only means something with --network")
 	}
+	published, err := parsePublishedPorts(a)
+	if err != nil {
+		return nil, s, err
+	}
 	var cpus, memoryMB uint64
-	var err error
 	if v := a.Option("--cpus"); v != "" {
 		// ProcessorCount is a uint32 in the config document.
 		if cpus, err = cli.ParseUint(v, math.MaxUint32); err != nil {
@@ -422,6 +524,9 @@ func buildConfig(a *cli.Args, e cli.Emit, st *store.Store, id, ref string) (*hcs
 			return nil, s, err
 		}
 	}
+	if err := validatePublishNetwork(published, netw); err != nil {
+		return nil, s, err
+	}
 
 	sd := scratchDir(st, id)
 	if _, err := os.Stat(containerDir(st, id)); err == nil {
@@ -455,7 +560,7 @@ func buildConfig(a *cli.Args, e cli.Emit, st *store.Store, id, ref string) (*hcs
 	var ep *hcn.HostComputeEndpoint
 	var addrs []string
 	if netw != nil {
-		if ep, err = createEndpoint(netw, id+"-ep"); err != nil {
+		if ep, err = createEndpoint(netw, id+"-ep", published); err != nil {
 			destroyScratch(st, id)
 			return nil, s, err
 		}
@@ -495,7 +600,7 @@ func buildConfig(a *cli.Args, e cli.Emit, st *store.Store, id, ref string) (*hcs
 		cfg.DNSSearchList = a.Option("--dns-search")
 	}
 
-	s = state{ID: id, Ref: ref, Scratch: sd, UVM: uvm, Chain: chain, Labels: labels}
+	s = state{ID: id, Ref: ref, Scratch: sd, UVM: uvm, Chain: chain, Labels: labels, Published: published}
 	if ep != nil {
 		s.Endpoint = ep.Id
 		s.Addresses = addrs
@@ -557,11 +662,14 @@ func create(a *cli.Args, e cli.Emit) (int, error) {
 	e.Result(map[string]any{
 		"ok": true, "command": "container create", "id": id, "ref": ref,
 		"utilityVM": s.UVM, "scratch": s.Scratch, "chain": s.Chain,
-		"endpoint": s.Endpoint, "addresses": s.Addresses,
+		"endpoint": s.Endpoint, "addresses": s.Addresses, "published": s.Published,
 	}, func() {
 		fmt.Printf("created %s\n  id:      %s\n  scratch: %s\n", ref, id, s.Scratch)
 		if s.Endpoint != "" {
 			fmt.Printf("  address: %s\n", strings.Join(s.Addresses, ","))
+		}
+		for _, p := range s.Published {
+			fmt.Printf("  publish: %s\n", p)
 		}
 	})
 	return cli.OK, nil
@@ -1197,6 +1305,7 @@ func run(a *cli.Args, e cli.Emit) (int, error) {
 	doc["kept"] = a.Flag("--keep")
 	doc["endpoint"] = s.Endpoint
 	doc["addresses"] = s.Addresses
+	doc["published"] = s.Published
 	e.Result(doc, func() {
 		printExec(res)
 	})

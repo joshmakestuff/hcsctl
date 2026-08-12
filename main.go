@@ -180,15 +180,19 @@ usage: hcsctl <group> <verb> [options]
   container run    --ref <ref> [--cmd "<cmdline>"] [--id <id>] [--cpus N]
                    [--memory-mb N] [--hostname H] [--cwd D] [--user U]
                    [--env NAME=value]... [--network <name|id>] [--dns-search list]
+                   [--publish HOST_PORT:CONTAINER_PORT/tcp|udp]...
                    [--mount HOST:CONTAINER[:ro]]... [--scratch-size 40GB] [--keep]
                Create, boot and run one command in a Hyper-V-isolated container, then tear
                it down. --cmd defaults to "cmd /c ver". --network attaches an endpoint on
-               an existing host compute network and reports its address. --mount maps a host
+               an existing host compute network and reports its address. --publish creates a NAT
+               endpoint mapping while the endpoint is created; it exposes the requested host port.
+               --mount maps a host
                directory into the guest over VSMB -- not a bind mount, and not Docker
                semantics; both paths drive-letter absolute. ELEVATED.
 
   container create --ref <ref> [--id <id>] [--cmd "<cmdline>"] [--cpus N] [--memory-mb N]
                    [--hostname H] [--network <name|id>] [--dns-search list]
+                   [--publish HOST_PORT:CONTAINER_PORT/tcp|udp]...
                    [--mount HOST:CONTAINER[:ro]]... [--scratch-size 40GB]
                    [--label key=value]...
                --label stores opaque key=value pairs in state.json, reported by ls and
