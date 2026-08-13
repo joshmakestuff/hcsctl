@@ -248,11 +248,8 @@ func create(a *cli.Args, e cli.Emit) (int, error) {
 	if err != nil {
 		return cli.Usage, err
 	}
-	if netw == nil && len(dns) != 0 {
-		return cli.Usage, cli.Usagef("--dns only means something with --network")
-	}
-	if netw != nil && modeOf(netw) == networkStatic && len(dns) == 0 {
-		return cli.Usage, cli.Usagef("--dns is required for NAT and non-Default-Switch ICS networks")
+	if err := validateDNSForNetwork(dns, netw); err != nil {
+		return cli.Usage, err
 	}
 
 	st, err := openStore(a)

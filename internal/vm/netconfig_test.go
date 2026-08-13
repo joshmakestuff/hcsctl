@@ -70,3 +70,62 @@ func TestNewNetConfig(t *testing.T) {
 		}
 	})
 }
+
+func TestValidateDNSForNetwork(t *testing.T) {
+	tests := []struct {
+		name    string
+		netw    *hcn.HostComputeNetwork
+		dns     []string
+		wantErr string
+	}{
+		{
+			name:    "dns without a network is rejected",
+			dns:     []string{"1.1.1.1"},
+			wantErr: "only means something with --network",
+		},
+		{
+			name:    "static network requires dns",
+			netw:    natNetwork(),
+			wantErr: "--dns is required",
+		},
+		{
+			name: "static network accepts dns",
+			netw: natNetwork(),
+			dns:  []string{"1.1.1.1"},
+		},
+		{
+			name:    "DHCP network rejects dns",
+			netw:    &hcn.HostComputeNetwork{Name: "Default Switch", Type: "ICS"},
+			dns:     []string{"1.1.1.1"},
+			wantErr: "DHCP serves the guest",
+		},
+		{
+			name: "DHCP network accepts no dns",
+			netw: &hcn.HostComputeNetwork{Name: "Default Switch", Type: "ICS"},
+		},
+		{
+			name:    "private network rejects dns",
+			netw:    &hcn.HostComputeNetwork{Name: "isolated", Type: hcn.Private},
+			dns:     []string{"1.1.1.1"},
+			wantErr: "private network",
+		},
+		{
+			name: "private network accepts no dns",
+			netw: &hcn.HostComputeNetwork{Name: "isolated", Type: hcn.Private},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateDNSForNetwork(tc.dns, tc.netw)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("validateDNSForNetwork(%v, %v) = %v, want nil", tc.dns, tc.netw, err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("validateDNSForNetwork(%v, %v) = %v, want error containing %q", tc.dns, tc.netw, err, tc.wantErr)
+			}
+		})
+	}
+}

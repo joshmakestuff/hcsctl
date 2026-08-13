@@ -78,12 +78,13 @@ func guestHasAddress(addrs []guestproto.Address, expected string) bool {
 }
 
 // guestIPv4Addresses returns only guest evidence. When HCN allocated an address, it is an
-// identity to match, never an answer returned on its own.
+// identity to match, never an answer returned on its own. Link-local (APIPA) addresses are
+// excluded: they are the guest's transient state before a lease, not its address.
 func guestIPv4Addresses(addrs []guestproto.Address, expected []string) []string {
 	out := []string{}
 	for _, ad := range addrs {
 		p, err := netip.ParsePrefix(ad.Address)
-		if err != nil || !p.Addr().Is4() || p.Addr().IsLoopback() {
+		if err != nil || !p.Addr().Is4() || p.Addr().IsLoopback() || p.Addr().IsLinkLocalUnicast() {
 			continue
 		}
 		if len(expected) > 0 && !guestHasAddress([]guestproto.Address{ad}, expected[0]) {

@@ -59,6 +59,26 @@ func parseDNS(dnsCSV string) ([]string, error) {
 	return dns, nil
 }
 
+// validateDNSForNetwork enforces the --dns/--network contract. dns is parseDNS's result.
+func validateDNSForNetwork(dns []string, netw *hcn.HostComputeNetwork) error {
+	if len(dns) == 0 {
+		if netw != nil && modeOf(netw) == networkStatic {
+			return cli.Usagef("--dns is required for NAT and non-Default-Switch ICS networks")
+		}
+		return nil
+	}
+	switch {
+	case netw == nil:
+		return cli.Usagef("--dns only means something with --network")
+	case modeOf(netw) == networkStatic:
+		return nil
+	case modeOf(netw) == networkDHCP:
+		return cli.Usagef("--dns is ignored on %q: its DHCP serves the guest", netw.Name)
+	default:
+		return cli.Usagef("--dns is ignored on private network %q: no guest addressing is programmed", netw.Name)
+	}
+}
+
 // endpointFlagsEnableDhcp is 32. hcsshim's EndpointFlags enum defines only None (0) and
 // RemoteEndpoint (1), so the value is carried here rather than imported.
 //
