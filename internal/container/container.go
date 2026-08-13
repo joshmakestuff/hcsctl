@@ -42,7 +42,10 @@ import (
 	"github.com/Microsoft/hcsshim"
 	"github.com/Microsoft/hcsshim/hcn"
 	"github.com/joshmakestuff/hcsctl/internal/cli"
+	"github.com/joshmakestuff/hcsctl/internal/layer"
 	"github.com/joshmakestuff/hcsctl/internal/store"
+	"github.com/joshmakestuff/hcsctl/internal/sysinfo"
+
 	"golang.org/x/sys/windows"
 )
 
@@ -50,8 +53,9 @@ import (
 // exiting on its own so `run` does not need a timeout to make progress.
 const defaultCmd = `cmd /c ver`
 
-// startTimeout bounds the utility VM boot. A cold xenon on a slow disk is tens of seconds; well
+// startTimeout bounds the container start. A cold xenon on a slow disk is tens of seconds; well
 // past that and something is wrong rather than slow.
+
 const startTimeout = 5 * time.Minute
 
 func Dispatch(a *cli.Args, e cli.Emit) (int, error) {
@@ -97,11 +101,12 @@ func Dispatch(a *cli.Args, e cli.Emit) (int, error) {
 // itself is host-global and reopenable by id, so this holds only what HCS does not: where the
 // scratch lives and what it was built from.
 type state struct {
-	ID      string   `json:"id"`
-	Ref     string   `json:"ref"`
-	Scratch string   `json:"scratch"`
-	UVM     string   `json:"utilityVM"`
-	Chain   []string `json:"chain"`
+	ID        string   `json:"id"`
+	Ref       string   `json:"ref"`
+	Scratch   string   `json:"scratch"`
+	UVM       string   `json:"utilityVM"`
+	Isolation string   `json:"isolation,omitempty"`
+	Chain     []string `json:"chain"`
 	// Endpoint is here because endpoints are host-global and outlive the creating process:
 	// `rm` after a crash must delete an endpoint it did not create.
 	Endpoint  string   `json:"endpoint,omitempty"`
@@ -110,6 +115,9 @@ type state struct {
 	// owns their effective lifetime; this is the requested creation contract reported again by
 	// inspect after the creating invocation is gone.
 	Published []publishedPort `json:"published,omitempty"`
+	// ACLs records the create-time endpoint ACL policies supplied for this container. HCN owns
+	// their effective lifetime; this is the requested contract reported again by inspect.
+	ACLs []aclRule `json:"acls,omitempty"`
 	// Primary is the container's main workload (#33), recorded by `create --cmd` so a fresh
 	// invocation can say what a running container is running, follow its retained output,
 	// and report its exit after the starting invocation is gone.
@@ -273,7 +281,7 @@ func resolveNetwork(want string) (*hcn.HostComputeNetwork, error) {
 
 // createEndpoint puts a new endpoint on the network. The returned document carries the
 // address HNS allocated, which is the thing the caller wants reported.
-func createEndpoint(netw *hcn.HostComputeNetwork, name string, published []publishedPort) (*hcn.HostComputeEndpoint, error) {
+func createEndpoint(netw *hcn.HostComputeNetwork, name string, published []publishedPort, acls []aclRule) (*hcn.HostComputeEndpoint, error) {
 	ep := &hcn.HostComputeEndpoint{
 		Name:               name,
 		HostComputeNetwork: netw.Id,
@@ -288,9 +296,16 @@ func createEndpoint(netw *hcn.HostComputeNetwork, name string, published []publi
 		}
 		ep.Policies = append(ep.Policies, hcn.EndpointPolicy{Type: hcn.PortMapping, Settings: settings})
 	}
-	// Port mappings only reached a working NAT dataplane on the measured host when the
-	// endpoint was created through its owning network's create path. The bare endpoint Create
-	// call accepted and reported the policy but did not allocate a forwarding mapping.
+	for _, a := range acls {
+		policy, err := a.policy()
+		if err != nil {
+			return nil, fmt.Errorf("marshal ACL %s: %w", a, err)
+		}
+		ep.Policies = append(ep.Policies, policy)
+	}
+	// Port mappings take effect only when present in the endpoint's create document: HNS
+	// allocates the forwarding dataplane at create time. A policy added later with
+	// ApplyPolicy is accepted and reported but does not establish forwarding (measured).
 	created, err := netw.CreateEndpoint(ep)
 	if err != nil {
 		return nil, fmt.Errorf("endpoint Create on %s: %w", netw.Name, err)
@@ -380,6 +395,120 @@ func validatePublishNetwork(published []publishedPort, netw *hcn.HostComputeNetw
 	return nil
 }
 
+// aclRule is the deliberate, measured ACL surface: a direction, an action, and an optional
+// protocol (empty = all). It materializes as an hcn.ACL endpoint policy at create time.
+// RuleType is not user-selectable: the ACL spike measured that Host and Switch both enforce on
+// the argon + NAT topology, so the surface fixes Switch (the measured default) rather than
+// baking an unmeasured choice into the CLI. Enforcement is topology-dependent (argon + NAT and
+// xenon + L2Bridge enforce; xenon + NAT stores without dataplane effect) and create-time only:
+// runtime ApplyPolicy is inert on every measured topology.
+type aclRule struct {
+	Direction hcn.DirectionType `json:"direction"`
+	Action    hcn.ActionType    `json:"action"`
+	Protocol  string            `json:"protocol,omitempty"` // "tcp" or "udp"; empty = all
+}
+
+func (a aclRule) String() string {
+	p := a.Protocol
+	if p == "" {
+		p = "*"
+	}
+	return fmt.Sprintf("%s:%s:%s", strings.ToLower(string(a.Direction)), strings.ToLower(string(a.Action)), p)
+}
+
+func (a aclRule) protocolNumber() string {
+	switch a.Protocol {
+	case "udp":
+		return "17"
+	case "tcp":
+		return "6"
+	default:
+		return ""
+	}
+}
+
+func (a aclRule) policy() (hcn.EndpointPolicy, error) {
+	s, err := json.Marshal(hcn.AclPolicySetting{
+		Protocols: a.protocolNumber(),
+		Action:    a.Action,
+		Direction: a.Direction,
+		RuleType:  hcn.RuleTypeSwitch,
+		Priority:  200,
+	})
+	if err != nil {
+		return hcn.EndpointPolicy{}, err
+	}
+	return hcn.EndpointPolicy{Type: hcn.ACL, Settings: s}, nil
+}
+
+// parseACLs parses repeated --acl DIRECTION:ACTION[:tcp|udp] values. Like parsePublishedPorts,
+// it runs before any disk or endpoint transaction so every rejected value is exit 64.
+func parseACLs(a *cli.Args) ([]aclRule, error) {
+	vals := a.Options("--acl")
+	if len(vals) == 0 {
+		return nil, nil
+	}
+	seen := map[string]bool{}
+	out := make([]aclRule, 0, len(vals))
+	for _, v := range vals {
+		r, err := parseACL(v)
+		if err != nil {
+			return nil, err
+		}
+		if seen[r.String()] {
+			return nil, cli.Usagef("--acl %q is given more than once", r)
+		}
+		seen[r.String()] = true
+		out = append(out, r)
+	}
+	return out, nil
+}
+
+func parseACL(v string) (aclRule, error) {
+	parts := strings.Split(v, ":")
+	if len(parts) < 2 || len(parts) > 3 {
+		return aclRule{}, cli.Usagef("--acl wants DIRECTION:ACTION[:tcp|udp], got %q", v)
+	}
+	var r aclRule
+	switch strings.ToLower(parts[0]) {
+	case "in":
+		r.Direction = hcn.DirectionTypeIn
+	case "out":
+		r.Direction = hcn.DirectionTypeOut
+	default:
+		return aclRule{}, cli.Usagef("--acl direction must be in or out, got %q", parts[0])
+	}
+	switch strings.ToLower(parts[1]) {
+	case "allow":
+		r.Action = hcn.ActionTypeAllow
+	case "block":
+		r.Action = hcn.ActionTypeBlock
+	default:
+		return aclRule{}, cli.Usagef("--acl action must be allow or block, got %q", parts[1])
+	}
+	if len(parts) == 3 {
+		switch strings.ToLower(parts[2]) {
+		case "tcp":
+			r.Protocol = "tcp"
+		case "udp":
+			r.Protocol = "udp"
+		default:
+			return aclRule{}, cli.Usagef("--acl protocol must be tcp or udp, got %q", parts[2])
+		}
+	}
+	return r, nil
+}
+
+func validateACLNetwork(acls []aclRule, netw *hcn.HostComputeNetwork) error {
+	if len(acls) == 0 {
+		return nil
+	}
+	if netw == nil {
+		return cli.Usagef("--acl requires --network naming an HCN network")
+	}
+	return nil
+}
+
 // deleteEndpoint removes an endpoint and verifies it is gone. Endpoints are host-global, so a
 // silently failed delete is a leak that outlives every process -- the post-condition matters
 // more than the return value, same as destroyScratch.
@@ -455,10 +584,31 @@ func parseLabels(a *cli.Args) (map[string]string, error) {
 	return cli.ParseLabels(a, reservedLabelKeys)
 }
 
+// -- isolation ---------------------------------------------------------------------------
+
+// Isolation modes. Process (argon) stacks layers on the host and is elevated at every start;
+// hyperv (xenon) hands the layers to a utility VM. The flag defaults to hyperv, so existing
+// invocations are unchanged.
+const (
+	isolationHyperV  = "hyperv"
+	isolationProcess = "process"
+)
+
+func parseIsolation(a *cli.Args) (string, error) {
+	switch v := a.Option("--isolation"); v {
+	case "", isolationHyperV:
+		return isolationHyperV, nil
+	case isolationProcess:
+		return isolationProcess, nil
+	default:
+		return "", cli.Usagef("--isolation wants %q or %q, got %q", isolationHyperV, isolationProcess, v)
+	}
+}
+
 // -- create ------------------------------------------------------------------------------
 
-var createOptions = []string{"--ref", "--id", "--store", "--cpus", "--memory-mb", "--hostname",
-	"--network", "--dns-search", "--publish", "--mount", "--scratch-size", "--cmd", "--label"}
+var createOptions = []string{"--ref", "--id", "--store", "--cpus", "--memory-mb", "--hostname", "--isolation",
+	"--network", "--dns-search", "--publish", "--acl", "--mount", "--scratch-size", "--cmd", "--label"}
 
 // buildConfig assembles the compute system document. Split out from create() because `run`
 // needs the same document and the same failure messages.
@@ -471,7 +621,15 @@ func buildConfig(a *cli.Args, e cli.Emit, st *store.Store, id, ref string) (*hcs
 	if a.Option("--dns-search") != "" && a.Option("--network") == "" {
 		return nil, s, cli.Usagef("--dns-search only means something with --network")
 	}
+	isolation, err := parseIsolation(a)
+	if err != nil {
+		return nil, s, err
+	}
 	published, err := parsePublishedPorts(a)
+	if err != nil {
+		return nil, s, err
+	}
+	acls, err := parseACLs(a)
 	if err != nil {
 		return nil, s, err
 	}
@@ -507,13 +665,28 @@ func buildConfig(a *cli.Args, e cli.Emit, st *store.Store, id, ref string) (*hcs
 	if err != nil {
 		return nil, s, err
 	}
-	uvm, err := locateUVM(chain)
-	if err != nil {
-		return nil, s, err
-	}
 	layers, err := layersFor(chain)
 	if err != nil {
 		return nil, s, err
+	}
+
+	// Process isolation stacks layers on the host, so it has two pre-flight gates a xenon
+	// does not: the enabled BUILTIN\Administrators SID PrepareLayer needs at every start, and
+	// the host/image build compatibility window. Xenon needs a utility VM instead.
+	var uvm string
+	if isolation == isolationProcess {
+		rec, err := st.ReadRecord(ref)
+		if err != nil {
+			return nil, s, err
+		}
+		if err := sysinfo.ProcessIsolationReady(rec.OSVersion); err != nil {
+			return nil, s, err
+		}
+	} else {
+		uvm, err = locateUVM(chain)
+		if err != nil {
+			return nil, s, err
+		}
 	}
 
 	// Resolved before anything touches the disk, so a bad name is exit 64 with nothing to
@@ -527,6 +700,9 @@ func buildConfig(a *cli.Args, e cli.Emit, st *store.Store, id, ref string) (*hcs
 	if err := validatePublishNetwork(published, netw); err != nil {
 		return nil, s, err
 	}
+	if err := validateACLNetwork(acls, netw); err != nil {
+		return nil, s, err
+	}
 
 	sd := scratchDir(st, id)
 	if _, err := os.Stat(containerDir(st, id)); err == nil {
@@ -537,12 +713,12 @@ func buildConfig(a *cli.Args, e cli.Emit, st *store.Store, id, ref string) (*hcs
 	}
 
 	e.Progress("chain:     %d layer(s), topmost %s", len(chain), filepath.Base(chain[0]))
-	e.Progress("utilityVM: %s", uvm)
+	e.Progress("isolation: %s", isolation)
+	if isolation == isolationHyperV {
+		e.Progress("utilityVM: %s", uvm)
+	}
 	e.Progress("scratch:   %s", sd)
 
-	// The only host-side storage step a xenon needs. No ActivateLayer, no PrepareLayer: the
-	// utility VM does the stacking, which is also why a xenon does not hit the
-	// BUILTIN\Administrators SID check that PrepareLayer imposes on every argon start.
 	if err := hcsshim.CreateScratchLayer(hcsshim.DriverInfo{}, sd, "", chain); err != nil {
 		os.RemoveAll(containerDir(st, id))
 		return nil, s, fmt.Errorf("CreateScratchLayer (rerun elevated?): %w", err)
@@ -557,11 +733,23 @@ func buildConfig(a *cli.Args, e cli.Emit, st *store.Store, id, ref string) (*hcs
 		e.Progress("ExpandScratchSize to %d bytes ok", scratchSize)
 	}
 
+	// A xenon hands the layers to the utility VM, which stacks them in the guest; an argon
+	// stacks them here, on the host, and the resulting volume path goes into VolumePath.
+	var volumePath string
+	if isolation == isolationProcess {
+		volumePath, err = layer.Stack(sd, chain)
+		if err != nil {
+			destroyScratch(st, id)
+			return nil, s, err
+		}
+		e.Progress("stacked layers, volume %s", volumePath)
+	}
+
 	var ep *hcn.HostComputeEndpoint
 	var addrs []string
 	if netw != nil {
-		if ep, err = createEndpoint(netw, id+"-ep", published); err != nil {
-			destroyScratch(st, id)
+		if ep, err = createEndpoint(netw, id+"-ep", published, acls); err != nil {
+			destroyScratchFor(st, id, isolation)
 			return nil, s, err
 		}
 		for _, ip := range ep.IpConfigurations {
@@ -576,11 +764,15 @@ func buildConfig(a *cli.Args, e cli.Emit, st *store.Store, id, ref string) (*hcs
 		Owner:           "hcsctl",
 		LayerFolderPath: sd,
 		Layers:          layers,
-		HvPartition:     true,
-		HvRuntime:       &hcsshim.HvRuntime{ImagePath: uvm},
+		HvPartition:     isolation == isolationHyperV,
 		// Without this a terminated container can outlive the process that made it and hold
 		// the scratch open, which turns a failed run into a manual cleanup.
 		TerminateOnLastHandleClosed: false,
+	}
+	if isolation == isolationHyperV {
+		cfg.HvRuntime = &hcsshim.HvRuntime{ImagePath: uvm}
+	} else {
+		cfg.VolumePath = volumePath
 	}
 	if h := a.Option("--hostname"); h != "" {
 		cfg.HostName = h
@@ -600,7 +792,7 @@ func buildConfig(a *cli.Args, e cli.Emit, st *store.Store, id, ref string) (*hcs
 		cfg.DNSSearchList = a.Option("--dns-search")
 	}
 
-	s = state{ID: id, Ref: ref, Scratch: sd, UVM: uvm, Chain: chain, Labels: labels, Published: published}
+	s = state{ID: id, Ref: ref, Scratch: sd, UVM: uvm, Isolation: isolation, Chain: chain, Labels: labels, Published: published, ACLs: acls}
 	if ep != nil {
 		s.Endpoint = ep.Id
 		s.Addresses = addrs
@@ -661,8 +853,8 @@ func create(a *cli.Args, e cli.Emit) (int, error) {
 	c.Close()
 	e.Result(map[string]any{
 		"ok": true, "command": "container create", "id": id, "ref": ref,
-		"utilityVM": s.UVM, "scratch": s.Scratch, "chain": s.Chain,
-		"endpoint": s.Endpoint, "addresses": s.Addresses, "published": s.Published,
+		"utilityVM": s.UVM, "isolation": s.Isolation, "scratch": s.Scratch, "chain": s.Chain,
+		"endpoint": s.Endpoint, "addresses": s.Addresses, "published": s.Published, "acls": s.ACLs,
 	}, func() {
 		fmt.Printf("created %s\n  id:      %s\n  scratch: %s\n", ref, id, s.Scratch)
 		if s.Endpoint != "" {
@@ -670,6 +862,9 @@ func create(a *cli.Args, e cli.Emit) (int, error) {
 		}
 		for _, p := range s.Published {
 			fmt.Printf("  publish: %s\n", p)
+		}
+		for _, a := range s.ACLs {
+			fmt.Printf("  acl:     %s\n", a)
 		}
 	})
 	return cli.OK, nil
@@ -695,7 +890,8 @@ func start(a *cli.Args, e cli.Emit) (int, error) {
 	}
 	defer c.Close()
 
-	e.Progress("starting utility VM...")
+	e.Progress("starting container...")
+
 	if err := c.Start(); err != nil {
 		return cli.Failed, fmt.Errorf("Start: %w", err)
 	}
@@ -1273,7 +1469,8 @@ func run(a *cli.Args, e cli.Emit) (int, error) {
 		}
 	}
 
-	e.Progress("starting utility VM...")
+	e.Progress("starting container...")
+
 	started := make(chan error, 1)
 	go func() { started <- c.Start() }()
 	select {
@@ -1284,7 +1481,7 @@ func run(a *cli.Args, e cli.Emit) (int, error) {
 		}
 	case <-time.After(startTimeout):
 		cleanup()
-		return cli.Failed, fmt.Errorf("utility VM did not start within %s", startTimeout)
+		return cli.Failed, fmt.Errorf("container did not start within %s", startTimeout)
 	}
 	e.Progress("started")
 
@@ -1302,10 +1499,12 @@ func run(a *cli.Args, e cli.Emit) (int, error) {
 	doc := execDoc("container run", id, cmdline, res, out)
 	doc["ref"] = ref
 	doc["utilityVM"] = s.UVM
+	doc["isolation"] = s.Isolation
 	doc["kept"] = a.Flag("--keep")
 	doc["endpoint"] = s.Endpoint
 	doc["addresses"] = s.Addresses
 	doc["published"] = s.Published
+	doc["acls"] = s.ACLs
 	e.Result(doc, func() {
 		printExec(res)
 	})
@@ -1370,9 +1569,10 @@ func kill(a *cli.Args, e cli.Emit) (int, error) {
 
 // -- rm / ls -----------------------------------------------------------------------------
 
-// destroyScratch removes the scratch layer and the container directory. DestroyLayer rather than
-// os.RemoveAll: layer directories carry restored security descriptors that defeat ordinary file
-// deletion, which shows up as a wall of access-denied rather than a clean failure.
+// destroyScratch removes a raw scratch layer (created but not stacked) and the container
+// directory. DestroyLayer rather than os.RemoveAll: layer directories carry restored security
+// descriptors that defeat ordinary file deletion, which shows up as a wall of access-denied
+// rather than a clean failure.
 func destroyScratch(st *store.Store, id string) error {
 	sd := scratchDir(st, id)
 	if _, err := os.Stat(sd); err == nil {
@@ -1388,6 +1588,22 @@ func destroyScratch(st *store.Store, id string) error {
 	return os.RemoveAll(containerDir(st, id))
 }
 
+// destroyScratchFor removes a scratch in its final state for the recorded isolation: an argon's
+// scratch is stacked on the host, so it is unstacked before DestroyLayer; a xenon's is raw.
+func destroyScratchFor(st *store.Store, id, isolation string) error {
+	if isolation == isolationProcess {
+		if err := layer.Unstack(scratchDir(st, id)); err != nil {
+			// A half-torn-down container should lose as much as possible: DestroyLayer still
+			// runs, and the unstack error is the reported one.
+			if derr := destroyScratch(st, id); derr != nil {
+				return fmt.Errorf("Unstack: %v; %w", err, derr)
+			}
+			return err
+		}
+	}
+	return destroyScratch(st, id)
+}
+
 // destroy tears down everything a container owns outside HCS: its endpoint, then its scratch.
 // Every step is attempted regardless of earlier failures -- a half-torn-down container should
 // lose as much as possible -- and the first error is what gets reported.
@@ -1396,7 +1612,7 @@ func destroy(st *store.Store, s state) error {
 	if s.Endpoint != "" {
 		first = deleteEndpoint(s.Endpoint)
 	}
-	if err := destroyScratch(st, s.ID); err != nil && first == nil {
+	if err := destroyScratchFor(st, s.ID, s.Isolation); err != nil && first == nil {
 		first = err
 	}
 	return first

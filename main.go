@@ -181,19 +181,27 @@ usage: hcsctl <group> <verb> [options]
                    [--memory-mb N] [--hostname H] [--cwd D] [--user U]
                    [--env NAME=value]... [--network <name|id>] [--dns-search list]
                    [--publish HOST_PORT:CONTAINER_PORT/tcp|udp]...
-                   [--mount HOST:CONTAINER[:ro]]... [--scratch-size 40GB] [--keep]
-               Create, boot and run one command in a Hyper-V-isolated container, then tear
+                   [--acl DIRECTION:ACTION[:tcp|udp]]...
+                   [--mount HOST:CONTAINER[:ro]]... [--scratch-size 40GB] [--isolation hyperv|process] [--keep]
+               Create, boot and run one command in a container (hyperv by default), then tear
                it down. --cmd defaults to "cmd /c ver". --network attaches an endpoint on
                an existing host compute network and reports its address. --publish creates a NAT
                endpoint mapping while the endpoint is created; it exposes the requested host port.
                --mount maps a host
                directory into the guest over VSMB -- not a bind mount, and not Docker
                semantics; both paths drive-letter absolute. ELEVATED.
+               --isolation hyperv (default) or process. Process isolation stacks layers on the
+               host, needs elevation at every start, and requires an image build inside the
+               host's process-isolation compatibility window (see hcsctl info).
+               --acl DIRECTION:ACTION[:tcp|udp], repeatable. A create-time endpoint ACL, added
+               to the endpoint create document like --publish. Enforced on process isolation +
+               NAT (measured); stored but inert on Hyper-V + NAT. No runtime mutation.
 
   container create --ref <ref> [--id <id>] [--cmd "<cmdline>"] [--cpus N] [--memory-mb N]
                    [--hostname H] [--network <name|id>] [--dns-search list]
                    [--publish HOST_PORT:CONTAINER_PORT/tcp|udp]...
-                   [--mount HOST:CONTAINER[:ro]]... [--scratch-size 40GB]
+                   [--acl DIRECTION:ACTION[:tcp|udp]]...
+                   [--mount HOST:CONTAINER[:ro]]... [--scratch-size 40GB] [--isolation hyperv|process]
                    [--label key=value]...
                --label stores opaque key=value pairs in state.json, reported by ls and
                inspect and never interpreted -- ownership and run identity are the
@@ -202,6 +210,11 @@ usage: hcsctl <group> <verb> [options]
                default -- anything writing real data wants this. --cmd records the primary
                process; start launches it. Exec the target directly, not via cmd /c -- a
                kill terminates one process, not a tree, and a wrapper's children survive.
+               --isolation hyperv (default) or process; process needs elevation at every start
+               and a host-compatible image build. Recorded in state.json and reported by inspect.
+               --acl DIRECTION:ACTION[:tcp|udp], repeatable. Create-time endpoint ACL; enforced
+               on process isolation, inert on Hyper-V + NAT. Recorded in state.json.
+
   container start  --id <id> | --ref <ref>
                With a recorded primary process, start launches it and stays attached as its
                pump, teeing output to primary.log and recording the exit in state.json. The
@@ -282,7 +295,8 @@ usage: hcsctl <group> <verb> [options]
                hvsocket address -- guest info --vmid takes it unchanged. Unelevated;
                Hyper-V Administrators is enough. Does not start it.
                --network default picks the Hyper-V Default Switch, whose DHCP configures an
-               arbitrary guest image. NAT and non-Default-Switch ICS networks require --dns;
+               arbitrary guest image. NAT and non-Default-Switch ICS networks require --dns and
+               are the only networks that accept it;
                vm start programs their HCN allocation in the guest and succeeds only after its
                agent attests the address. The endpoint is deleted by vm rm and nothing else.
                --label stores opaque key=value pairs in state.json, reported by ls and inspect
@@ -347,6 +361,6 @@ exit codes: 0 ok, 1 ran and failed, 64 bad arguments (nothing attempted)
              a guest process's own exit code is reported as exitCode in the result, not as
              hcsctl's exit code
 
-Deferred behind issues: HCN policies, load balancers, routes, namespaces (#17), CimFS (#16),
-process-isolated containers (#8). See the roadmap issue.
+Deferred behind issues: HCN policies, load balancers, routes, namespaces (#17), CimFS (#16).
+See the roadmap issue.
 `

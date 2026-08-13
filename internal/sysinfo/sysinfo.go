@@ -176,6 +176,26 @@ func parseOSVersion(s string) (osversion.OSVersion, bool) {
 	return v, true
 }
 
+// ProcessIsolationReady reports whether this process can run a process-isolated (argon)
+// container of the given image OS version ("10.0.20348.5386"). Two independent gates:
+// PrepareLayer requires an enabled BUILTIN\Administrators SID at every container start (a group
+// check, not a privilege), and the image build must fall inside the host's process-isolation
+// compatibility window (osversion.CheckHostAndContainerCompat).
+func ProcessIsolationReady(containerOSVersion string) error {
+	if !isElevated() {
+		return fmt.Errorf("process isolation needs an enabled BUILTIN\\Administrators SID at every container start -- rerun elevated")
+	}
+	ctr, ok := parseOSVersion(containerOSVersion)
+	if !ok {
+		return fmt.Errorf("image reports unparseable OS version %q; cannot check process-isolation compatibility", containerOSVersion)
+	}
+	host := osversion.Get()
+	if !osversion.CheckHostAndContainerCompat(host, ctr) {
+		return fmt.Errorf("image OS version %s is outside this host's process-isolation compatibility window (host %d.%d.%d)", containerOSVersion, host.MajorVersion, host.MinorVersion, host.Build)
+	}
+	return nil
+}
+
 // serviceStates queries the SCM with the minimum access that works unelevated. "absent" and
 // "stopped" are different answers: absent means the role is not installed.
 func serviceStates() map[string]string {

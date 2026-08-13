@@ -54,7 +54,7 @@ type Args struct {
 // repeatable options accumulate instead of hitting the duplicate check. The duplicate
 // rejection is deliberate -- it catches typos -- so repeatability is opted into per option
 // here rather than relaxed globally.
-var repeatable = map[string]bool{"--env": true, "--mount": true, "--parent": true, "--label": true, "--publish": true}
+var repeatable = map[string]bool{"--env": true, "--mount": true, "--parent": true, "--label": true, "--publish": true, "--acl": true}
 
 // Parse splits argv. Anything starting with "--" is an option; those in boolFlags take no
 // value, the rest consume the next argument.

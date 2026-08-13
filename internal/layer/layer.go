@@ -98,6 +98,47 @@ func chainFor(st *store.Store, ref string) ([]string, error) {
 	return chain, nil
 }
 
+// Stack prepares an already-created scratch layer over chain and returns its volume path.
+// It is the process-isolated (argon) storage sequence -- ActivateLayer, PrepareLayer,
+// GetLayerMountPath -- shared with internal/container so the canonical call order lives in one
+// place. CreateScratchLayer, ExpandScratchSize and DestroyLayer stay with each caller: they are
+// shared across isolation modes there and carry each caller's own failure handling.
+//
+// On failure Stack undoes what it has done so far, leaving a scratch layer that only
+// DestroyLayer needs to remove.
+func Stack(scratch string, chain []string) (string, error) {
+	info := hcsshim.DriverInfo{}
+	if err := hcsshim.ActivateLayer(info, scratch); err != nil {
+		return "", fmt.Errorf("ActivateLayer: %w", err)
+	}
+	if err := hcsshim.PrepareLayer(info, scratch, chain); err != nil {
+		_ = hcsshim.DeactivateLayer(info, scratch)
+		return "", fmt.Errorf("PrepareLayer (needs an enabled BUILTIN\\Administrators SID): %w", err)
+	}
+	vol, err := hcsshim.GetLayerMountPath(info, scratch)
+	if err != nil {
+		_ = hcsshim.UnprepareLayer(info, scratch)
+		_ = hcsshim.DeactivateLayer(info, scratch)
+		return "", fmt.Errorf("GetLayerMountPath: %w", err)
+	}
+	return vol, nil
+}
+
+// Unstack reverses Stack: UnprepareLayer then DeactivateLayer. Every step is attempted even if
+// the first fails -- a leftover activation is worse than a noisy teardown -- and the first error
+// is returned. DestroyLayer stays with the caller.
+func Unstack(scratch string) error {
+	info := hcsshim.DriverInfo{}
+	var first error
+	if err := hcsshim.UnprepareLayer(info, scratch); err != nil {
+		first = fmt.Errorf("UnprepareLayer: %w", err)
+	}
+	if err := hcsshim.DeactivateLayer(info, scratch); err != nil && first == nil {
+		first = fmt.Errorf("DeactivateLayer: %w", err)
+	}
+	return first
+}
+
 type mountResult struct {
 	OK      bool     `json:"ok"`
 	Command string   `json:"command"`
@@ -165,26 +206,12 @@ func mount(a *cli.Args, e cli.Emit) (int, error) {
 		e.Progress("ExpandScratchSize to %d bytes ok", scratchSize)
 	}
 
-	if err := hcsshim.ActivateLayer(info, sp); err != nil {
-		_ = hcsshim.DestroyLayer(info, sp)
-		return cli.Failed, fmt.Errorf("ActivateLayer: %w", err)
-	}
-	e.Progress("ActivateLayer ok")
-
-	if err := hcsshim.PrepareLayer(info, sp, chain); err != nil {
-		_ = hcsshim.DeactivateLayer(info, sp)
-		_ = hcsshim.DestroyLayer(info, sp)
-		return cli.Failed, fmt.Errorf("PrepareLayer (needs an enabled BUILTIN\\Administrators SID): %w", err)
-	}
-	e.Progress("PrepareLayer ok")
-
-	vol, err := hcsshim.GetLayerMountPath(info, sp)
+	vol, err := Stack(sp, chain)
 	if err != nil {
-		_ = hcsshim.UnprepareLayer(info, sp)
-		_ = hcsshim.DeactivateLayer(info, sp)
 		_ = hcsshim.DestroyLayer(info, sp)
-		return cli.Failed, fmt.Errorf("GetLayerMountPath: %w", err)
+		return cli.Failed, err
 	}
+	e.Progress("stacked layers ok")
 
 	res := mountResult{
 		OK: true, Command: "layer mount", ID: id, Ref: ref,
@@ -228,8 +255,7 @@ func unmount(a *cli.Args, e cli.Emit) (int, error) {
 		}
 		e.Progress("%s ok", step)
 	}
-	record("UnprepareLayer", hcsshim.UnprepareLayer(info, sp))
-	record("DeactivateLayer", hcsshim.DeactivateLayer(info, sp))
+	record("Unstack", Unstack(sp))
 	record("DestroyLayer", hcsshim.DestroyLayer(info, sp))
 
 	// The post-condition, not the return value: DestroyLayer can report success and leave the

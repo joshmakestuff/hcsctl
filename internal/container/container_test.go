@@ -201,6 +201,72 @@ func TestValidatePublishNetwork(t *testing.T) {
 	}
 }
 
+func TestParseACL(t *testing.T) {
+	parse := func(t *testing.T, specs ...string) ([]aclRule, error) {
+		t.Helper()
+		var argv []string
+		for _, s := range specs {
+			argv = append(argv, "--acl", s)
+		}
+		a, err := cli.Parse(argv)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return parseACLs(a)
+	}
+
+	t.Run("direction action and protocol", func(t *testing.T) {
+		got, err := parse(t, "in:block:tcp", "out:allow:udp")
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := []aclRule{
+			{Direction: hcn.DirectionTypeIn, Action: hcn.ActionTypeBlock, Protocol: "tcp"},
+			{Direction: hcn.DirectionTypeOut, Action: hcn.ActionTypeAllow, Protocol: "udp"},
+		}
+		if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+			t.Fatalf("got %#v, want %#v", got, want)
+		}
+	})
+
+	t.Run("empty protocol means all", func(t *testing.T) {
+		got, err := parse(t, "in:block")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got[0].Protocol != "" {
+			t.Fatalf("protocol = %q, want empty", got[0].Protocol)
+		}
+	})
+
+	for _, spec := range []string{"in", "in:block:tcp:extra", "sideways:block:tcp", "in:deny:tcp", "in:block:sctp"} {
+		t.Run("reject "+spec, func(t *testing.T) {
+			if _, err := parse(t, spec); err == nil {
+				t.Fatalf("accepted %q", spec)
+			}
+		})
+	}
+
+	t.Run("duplicate is rejected", func(t *testing.T) {
+		if _, err := parse(t, "in:block:tcp", "in:block:tcp"); err == nil {
+			t.Fatal("duplicate ACL accepted")
+		}
+	})
+}
+
+func TestValidateACLNetwork(t *testing.T) {
+	acls := []aclRule{{Direction: hcn.DirectionTypeIn, Action: hcn.ActionTypeBlock, Protocol: "tcp"}}
+	if err := validateACLNetwork(nil, nil); err != nil {
+		t.Fatalf("no ACL: %v", err)
+	}
+	if err := validateACLNetwork(acls, nil); err == nil || !strings.Contains(err.Error(), "--network") {
+		t.Fatalf("nil network error = %v", err)
+	}
+	if err := validateACLNetwork(acls, &hcn.HostComputeNetwork{Name: "nat", Type: hcn.NAT}); err != nil {
+		t.Fatalf("NAT network: %v", err)
+	}
+}
+
 func TestParseEnvKeepsValueAfterFirstEquals(t *testing.T) {
 	a, err := cli.Parse([]string{"--env", "CONN=Server=x;Db=y"})
 	if err != nil {
