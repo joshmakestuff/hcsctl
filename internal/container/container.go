@@ -281,11 +281,16 @@ func resolveNetwork(want string) (*hcn.HostComputeNetwork, error) {
 
 // createEndpoint puts a new endpoint on the network. The returned document carries the
 // address HNS allocated, which is the thing the caller wants reported.
-func createEndpoint(netw *hcn.HostComputeNetwork, name string, published []publishedPort, acls []aclRule) (*hcn.HostComputeEndpoint, error) {
+func createEndpoint(netw *hcn.HostComputeNetwork, name, isolation string, published []publishedPort, acls []aclRule) (*hcn.HostComputeEndpoint, error) {
 	ep := &hcn.HostComputeEndpoint{
 		Name:               name,
 		HostComputeNetwork: netw.Id,
 		SchemaVersion:      hcn.V2SchemaVersion(),
+	}
+	if len(acls) > 0 {
+		if reason := aclEnforcementReason(isolation, netw); reason != "" {
+			return nil, fmt.Errorf("endpoint ACLs on %s: %s", netw.Name, reason)
+		}
 	}
 	for _, p := range published {
 		settings, err := json.Marshal(hcn.PortMappingPolicySetting{
@@ -499,12 +504,47 @@ func parseACL(v string) (aclRule, error) {
 	return r, nil
 }
 
-func validateACLNetwork(acls []aclRule, netw *hcn.HostComputeNetwork) error {
+// aclEnforcementReason reports whether ACLs on this isolation/network combination are known to
+// enforce on the dataplane. Empty means they do; any other value is why they must not be
+// applied. The measured matrix is narrow: process (argon) + NAT and hyperv (xenon) + L2Bridge
+// enforce. hyperv + NAT is a measured no-op (HNS stores the policy, the dataplane is
+// unchanged), and every other combination is unmeasured -- both fail closed.
+func aclEnforcementReason(isolation string, netw *hcn.HostComputeNetwork) string {
+	if netw == nil {
+		return "no HCN network"
+	}
+	switch isolation {
+	case isolationProcess:
+		if netw.Type == hcn.NAT {
+			return ""
+		}
+		return fmt.Sprintf("process isolation was measured only on NAT; %s is unverified", netw.Type)
+	case isolationHyperV:
+		if netw.Type == hcn.L2Bridge {
+			return ""
+		}
+		if netw.Type == hcn.NAT {
+			return "hyperv isolation + NAT stores the ACL without enforcing it (measured)"
+		}
+		return fmt.Sprintf("hyperv isolation was measured only on L2Bridge; %s is unverified", netw.Type)
+	default:
+		return fmt.Sprintf("unknown isolation %q", isolation)
+	}
+}
+
+// validateACLNetwork fails closed for ACLs on an isolation/network combination whose
+// enforcement is inert or unmeasured. It runs before any disk or endpoint transaction so a
+// refused combination is exit 64 with nothing attempted; createEndpoint guards the same matrix
+// so a future call site cannot bypass it.
+func validateACLNetwork(acls []aclRule, isolation string, netw *hcn.HostComputeNetwork) error {
 	if len(acls) == 0 {
 		return nil
 	}
 	if netw == nil {
 		return cli.Usagef("--acl requires --network naming an HCN network")
+	}
+	if reason := aclEnforcementReason(isolation, netw); reason != "" {
+		return cli.Usagef("--acl is not enforced here: %s", reason)
 	}
 	return nil
 }
@@ -700,7 +740,7 @@ func buildConfig(a *cli.Args, e cli.Emit, st *store.Store, id, ref string) (*hcs
 	if err := validatePublishNetwork(published, netw); err != nil {
 		return nil, s, err
 	}
-	if err := validateACLNetwork(acls, netw); err != nil {
+	if err := validateACLNetwork(acls, isolation, netw); err != nil {
 		return nil, s, err
 	}
 
@@ -748,7 +788,7 @@ func buildConfig(a *cli.Args, e cli.Emit, st *store.Store, id, ref string) (*hcs
 	var ep *hcn.HostComputeEndpoint
 	var addrs []string
 	if netw != nil {
-		if ep, err = createEndpoint(netw, id+"-ep", published, acls); err != nil {
+		if ep, err = createEndpoint(netw, id+"-ep", isolation, published, acls); err != nil {
 			destroyScratchFor(st, id, isolation)
 			return nil, s, err
 		}

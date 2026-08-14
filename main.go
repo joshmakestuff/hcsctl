@@ -195,7 +195,8 @@ usage: hcsctl <group> <verb> [options]
                host's process-isolation compatibility window (see hcsctl info).
                --acl DIRECTION:ACTION[:tcp|udp], repeatable. A create-time endpoint ACL, added
                to the endpoint create document like --publish. Enforced on process isolation +
-               NAT (measured); stored but inert on Hyper-V + NAT. No runtime mutation.
+               NAT and Hyper-V + L2Bridge (measured); refused on every other combination,
+               including Hyper-V + NAT where it would be stored without effect. No runtime mutation.
 
   container create --ref <ref> [--id <id>] [--cmd "<cmdline>"] [--cpus N] [--memory-mb N]
                    [--hostname H] [--network <name|id>] [--dns-search list]
@@ -213,7 +214,7 @@ usage: hcsctl <group> <verb> [options]
                --isolation hyperv (default) or process; process needs elevation at every start
                and a host-compatible image build. Recorded in state.json and reported by inspect.
                --acl DIRECTION:ACTION[:tcp|udp], repeatable. Create-time endpoint ACL; enforced
-               on process isolation, inert on Hyper-V + NAT. Recorded in state.json.
+               on process isolation + NAT and Hyper-V + L2Bridge, refused elsewhere. Recorded in state.json.
 
   container start  --id <id> | --ref <ref>
                With a recorded primary process, start launches it and stays attached as its

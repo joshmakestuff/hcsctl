@@ -256,14 +256,36 @@ func TestParseACL(t *testing.T) {
 
 func TestValidateACLNetwork(t *testing.T) {
 	acls := []aclRule{{Direction: hcn.DirectionTypeIn, Action: hcn.ActionTypeBlock, Protocol: "tcp"}}
-	if err := validateACLNetwork(nil, nil); err != nil {
-		t.Fatalf("no ACL: %v", err)
+	types := []hcn.NetworkType{hcn.NAT, hcn.Transparent, hcn.L2Bridge, hcn.L2Tunnel, hcn.ICS, hcn.Private, hcn.Overlay}
+
+	// The measured enforcement matrix: process+NAT and hyperv+L2Bridge enforce; every other
+	// combination is inert or unmeasured and must fail closed.
+	enforces := map[string]map[hcn.NetworkType]bool{
+		isolationProcess: {hcn.NAT: true},
+		isolationHyperV:  {hcn.L2Bridge: true},
 	}
-	if err := validateACLNetwork(acls, nil); err == nil || !strings.Contains(err.Error(), "--network") {
+
+	if err := validateACLNetwork(nil, isolationProcess, nil); err != nil {
+		t.Fatalf("no ACLs must be accepted: %v", err)
+	}
+	if err := validateACLNetwork(nil, isolationHyperV, &hcn.HostComputeNetwork{Name: "nat", Type: hcn.NAT}); err != nil {
+		t.Fatalf("no ACLs must be accepted: %v", err)
+	}
+	if err := validateACLNetwork(acls, isolationProcess, nil); err == nil || !strings.Contains(err.Error(), "--network") {
 		t.Fatalf("nil network error = %v", err)
 	}
-	if err := validateACLNetwork(acls, &hcn.HostComputeNetwork{Name: "nat", Type: hcn.NAT}); err != nil {
-		t.Fatalf("NAT network: %v", err)
+
+	for _, isolation := range []string{isolationProcess, isolationHyperV} {
+		for _, nt := range types {
+			netw := &hcn.HostComputeNetwork{Name: string(nt), Type: nt}
+			err := validateACLNetwork(acls, isolation, netw)
+			if enforces[isolation][nt] && err != nil {
+				t.Errorf("%s + %s should enforce, got %v", isolation, nt, err)
+			}
+			if !enforces[isolation][nt] && err == nil {
+				t.Errorf("%s + %s should fail closed, got nil", isolation, nt)
+			}
+		}
 	}
 }
 
