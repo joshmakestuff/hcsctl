@@ -7,6 +7,7 @@ package container
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -300,5 +301,31 @@ func TestParseEnvKeepsValueAfterFirstEquals(t *testing.T) {
 	}
 	if env["CONN"] != "Server=x;Db=y" {
 		t.Fatalf("value mangled: %q", env["CONN"])
+	}
+}
+
+func TestReservedLabelKeysCoverStateFields(t *testing.T) {
+	st := reflect.TypeOf(state{})
+	for i := 0; i < st.NumField(); i++ {
+		tag := st.Field(i).Tag.Get("json")
+		name, _, _ := strings.Cut(tag, ",")
+		if name == "" || name == "-" {
+			continue
+		}
+		if !reservedLabelKeys[name] {
+			t.Errorf("state field %q is not in reservedLabelKeys; a --label can shadow it", name)
+		}
+	}
+}
+
+func TestParseLabelsReservesNewStateFields(t *testing.T) {
+	for _, key := range []string{"isolation", "published", "acls"} {
+		a, err := cli.Parse([]string{"--label", key + "=x"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := parseLabels(a); err == nil {
+			t.Errorf("--label %s=... must be rejected as a state-field collision", key)
+		}
 	}
 }

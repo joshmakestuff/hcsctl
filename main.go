@@ -182,7 +182,8 @@ usage: hcsctl <group> <verb> [options]
                    [--env NAME=value]... [--network <name|id>] [--dns-search list]
                    [--publish HOST_PORT:CONTAINER_PORT/tcp|udp]...
                    [--acl DIRECTION:ACTION[:tcp|udp]]...
-                   [--mount HOST:CONTAINER[:ro]]... [--scratch-size 40GB] [--isolation hyperv|process] [--keep]
+                   [--mount HOST:CONTAINER[:ro]]... [--scratch-size 40GB] [--isolation hyperv|process]
+                   [--timeout <dur>] [--label key=value]... [--store <dir>] [--keep]
                Create, boot and run one command in a container (hyperv by default), then tear
                it down. --cmd defaults to "cmd /c ver". --network attaches an endpoint on
                an existing host compute network and reports its address. --publish creates a NAT
@@ -197,12 +198,14 @@ usage: hcsctl <group> <verb> [options]
                to the endpoint create document like --publish. Enforced on process isolation +
                NAT and Hyper-V + L2Bridge (measured); refused on every other combination,
                including Hyper-V + NAT where it would be stored without effect. No runtime mutation.
+               --timeout bounds the primary command; absent means wait forever.
 
   container create --ref <ref> [--id <id>] [--cmd "<cmdline>"] [--cpus N] [--memory-mb N]
                    [--hostname H] [--network <name|id>] [--dns-search list]
                    [--publish HOST_PORT:CONTAINER_PORT/tcp|udp]...
                    [--acl DIRECTION:ACTION[:tcp|udp]]...
                    [--mount HOST:CONTAINER[:ro]]... [--scratch-size 40GB] [--isolation hyperv|process]
+                   [--store <dir>]
                    [--label key=value]...
                --label stores opaque key=value pairs in state.json, reported by ls and
                inspect and never interpreted -- ownership and run identity are the
@@ -216,42 +219,42 @@ usage: hcsctl <group> <verb> [options]
                --acl DIRECTION:ACTION[:tcp|udp], repeatable. Create-time endpoint ACL; enforced
                on process isolation + NAT and Hyper-V + L2Bridge, refused elsewhere. Recorded in state.json.
 
-  container start  --id <id> | --ref <ref>
+  container start  --id <id> | --ref <ref> [--store <dir>]
                With a recorded primary process, start launches it and stays attached as its
                pump, teeing output to primary.log and recording the exit in state.json. The
                pump owns the pipes -- if it dies with its caller, the workload keeps running
                and logs reports the truncation honestly.
-  container logs   --id <id> [--follow]
+  container logs   --id <id> [--follow] [--ref <ref>] [--store <dir>]
                A primary process's retained output, from any invocation -- the file the pump
                wrote, plus status: running, exited (with code), or pump dead. --follow tails
                until the primary exits or the pump dies. Under --stream-json, followed lines
                are framed {"stream":"log"} (the file merges guest stdout and stderr).
   container exec   --id <id> --cmd "<cmdline>" [--cwd D] [--user U] [--env NAME=value]...
-                   [--timeout 30s] [--interactive [--tty]]
+                   [--timeout 30s] [--interactive [--tty]] [--ref <ref>] [--store <dir>]
                Default stdin closes immediately. --interactive forwards this process's stdin
                and closes the guest side on EOF; --tty adds an emulated console. Neither can
                be used with --json or --stream-json. Ctrl-C kills only the exec process.
 
-  container kill   --id <id> --pid <pid>
+  container kill   --id <id> --pid <pid> [--ref <ref>] [--store <dir>]
                Kill one guest process and confirm it is gone. PIDs come from container ps
                or the exec result. Kill (and --timeout) terminates that process only: a
                cmd /c wrapper's children survive it, so exec the target directly when a
                kill must be total.
-  container stop   --id <id> [--force]
-  container rm     --id <id> [--force]
+  container stop   --id <id> [--force] [--ref <ref>] [--store <dir>]
+  container rm     --id <id> [--force] [--ref <ref>] [--store <dir>]
   container ls     [--store <dir>]             Containers and their HCS state.
-  container stats   --id <id>                  Uptime, memory, CPU, storage and network.
-  container ps      --id <id>                  Processes running in the guest.
-  container inspect --id <id>                  What the store and HCS each know.
-  container pause   --id <id>
-  container resume  --id <id>
+  container stats   --id <id> [--ref <ref>] [--store <dir>]  Uptime, memory, CPU, storage and network.
+  container ps      --id <id> [--ref <ref>] [--store <dir>]  Processes running in the guest.
+  container inspect --id <id> [--ref <ref>] [--store <dir>]  What the store and HCS each know.
+  container pause   --id <id> [--ref <ref>] [--store <dir>]
+  container resume  --id <id> [--ref <ref>] [--store <dir>]
 
   storage setup-base --layer <dir> [--size-gb N]
                Prepare a base layer for VHD-backed (computestorage) use: blank-base.vhdx and
                blank.vhdx created inside the layer directory. MUTATES the layer -- Hives/ and
                Layout are regenerated -- so point it at a copy, not a store layer. ELEVATED.
 
-  storage mount   --base <dir> --scratch-dir <dir> [--parent <dir>]...
+  storage mount   --base <dir> --scratch-dir <dir> [--parent <dir>]... [--store <dir>]
   storage mount   --ref <ref> --scratch-dir <dir> [--store <dir>]
                Copy blank.vhdx to sandbox.vhdx (first time), attach it, initialize the
                writable layer and attach the storage filter. Prints the volume carrying the
@@ -302,19 +305,19 @@ usage: hcsctl <group> <verb> [options]
                agent attests the address. The endpoint is deleted by vm rm and nothing else.
                --label stores opaque key=value pairs in state.json, reported by ls and inspect
                and never interpreted -- record an owner pid; scavenge only on proof it is dead.
-  vm start   --id <guid>
+  vm start   --id <guid> [--store <dir>]
                On NAT and non-Default-Switch ICS networks, success means the guest agent has
                applied and attested static IPv4 networking. Other starts mean firmware running.
-  vm stop    --id <guid> [--force]
+  vm stop    --id <guid> [--force] [--store <dir>]
                Without --force, asks the guest through the shutdown integration service; a
                guest that lacks one cannot be asked. --force powers it off.
-  vm rm      --id <guid> [--force]
+  vm rm      --id <guid> [--force] [--store <dir>]
                Terminates, then removes only what this tool made. A --no-copy-on-write VM's
                base image is never removed.
-  vm ip      --id <guid> [--timeout 60s]
+  vm ip      --id <guid> [--timeout 60s] [--store <dir>]
                Wait for guest-reported IPv4 addresses and print them. Endpoint allocations are
                used only to identify the guest address, never returned without guest evidence.
-  vm netconfig --id <guid> [--dns <ip,ip>] [--interface eth0] [--timeout 45s]
+  vm netconfig --id <guid> [--dns <ip,ip>] [--interface eth0] [--timeout 45s] [--store <dir>]
                Program the guest's interface with the endpoint's HNS allocation, through the
                agent and the guest's own NetworkManager. For hcsctl-owned networks (NAT),
                which have no DHCP server -- measured, see issue #60. The result reports what
@@ -325,8 +328,8 @@ usage: hcsctl <group> <verb> [options]
                opinion about what a dead run is; it reports facts. A consumer joins three of
                them: its own --label on a vm, the vm id carried in the endpoint's name, and
                this list. See issue #44.
-  vm inspect --id <guid>                       The store's record plus the HCS properties.
-  vm console --id <guid> [--no-input] [--timeout 15s]
+  vm inspect --id <guid> [--store <dir>]      The store's record plus the HCS properties.
+  vm console --id <guid> [--no-input] [--timeout 15s] [--store <dir>]
                Attach to the VM's serial console over its COM1 named pipe. This is the
                break-glass path: no agent, no network adapter, no lease, no firewall rule --
                it works when the agent is what is broken. Input is on by default, so a Linux
@@ -341,7 +344,7 @@ usage: hcsctl <group> <verb> [options]
                                                Run a command in the guest. --timeout must be at
                                                least one second. The guest's exit code is exitCode
                                                in the document, never hcsctl's.
-  guest forward --vmid <guid> --port <n> [--listen 127.0.0.1:2222]
+  guest forward --vmid <guid> --port <n> [--listen 127.0.0.1:2222] [--timeout <dur>]
                                                Publish a guest TCP port on the host. The
                                                agent dials it on the guest's loopback, which
                                                the guest firewall does not filter.

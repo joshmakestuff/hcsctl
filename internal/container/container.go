@@ -614,8 +614,9 @@ func parseMounts(a *cli.Args) ([]hcsshim.MappedDir, error) {
 // reservedLabelKeys are what a consumer sees when it flattens state.json (or the inspect
 // document) -- a label may not shadow one. Grown alongside the state struct's json tags.
 var reservedLabelKeys = map[string]bool{
-	"id": true, "ref": true, "scratch": true, "utilityVM": true, "chain": true,
-	"endpoint": true, "addresses": true, "primary": true, "labels": true,
+	"id": true, "ref": true, "scratch": true, "utilityVM": true, "isolation": true,
+	"chain": true, "endpoint": true, "addresses": true, "published": true, "acls": true,
+	"primary": true, "labels": true,
 	"ok": true, "command": true, "state": true, "hcs": true,
 }
 

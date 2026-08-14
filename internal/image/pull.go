@@ -5,6 +5,7 @@ package image
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -95,22 +96,16 @@ func pull(a *cli.Args, e cli.Emit) (int, error) {
 			return cli.Failed, err
 		}
 
-		if fi, err := os.Stat(blob); err == nil {
-			e.Progress("  layer %d/%d %s present (%d MB)", i+1, len(layers), dig, fi.Size()/(1024*1024))
-			total += fi.Size()
-		} else {
-			rc, err := l.Compressed()
-			if err != nil {
-				return cli.Failed, fmt.Errorf("layer %d download: %w", i, err)
-			}
-			n, err := writeVerified(blob, rc, dig.Hex)
-			rc.Close()
-			if err != nil {
-				return cli.Failed, fmt.Errorf("layer %d download: %w", i, err)
-			}
-			e.Progress("  layer %d/%d %s %d MB", i+1, len(layers), dig, n/(1024*1024))
-			total += n
+		n, downloaded, err := ensureBlob(blob, dig.Hex, l.Compressed)
+		if err != nil {
+			return cli.Failed, fmt.Errorf("layer %d download: %w", i, err)
 		}
+		if downloaded {
+			e.Progress("  layer %d/%d %s %d MB", i+1, len(layers), dig, n/(1024*1024))
+		} else {
+			e.Progress("  layer %d/%d %s verified (%d MB)", i+1, len(layers), dig, n/(1024*1024))
+		}
+		total += n
 
 		rec.LayerDigests = append(rec.LayerDigests, dig.String())
 		rec.DiffIDs = append(rec.DiffIDs, diffID.String())
@@ -130,26 +125,80 @@ func pull(a *cli.Args, e cli.Emit) (int, error) {
 	return cli.OK, nil
 }
 
-// writeVerified streams to disk and refuses to keep bytes whose digest does not match, so a
-// truncated or substituted blob never lands in the store under a name that claims otherwise.
+// writeVerified streams to a unique temp file, refuses to keep bytes whose digest does not
+// match, and atomically publishes on success. The temp is unique per writer, so concurrent
+// pulls of the same digest never interleave; concurrent writers hold identical verified bytes
+// and converge on the same destination.
 func writeVerified(path string, r io.Reader, wantHex string) (int64, error) {
-	tmp := path + ".partial"
-	f, err := os.Create(tmp)
+	tmp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".partial-*")
 	if err != nil {
 		return 0, err
 	}
+	defer os.Remove(tmp.Name())
 	h := sha256.New()
-	n, err := io.Copy(io.MultiWriter(f, h), r)
-	if cerr := f.Close(); err == nil {
+	n, err := io.Copy(io.MultiWriter(tmp, h), r)
+	if cerr := tmp.Close(); err == nil {
 		err = cerr
 	}
 	if err != nil {
-		os.Remove(tmp)
 		return 0, err
 	}
 	if got := hex.EncodeToString(h.Sum(nil)); got != wantHex {
-		os.Remove(tmp)
 		return 0, fmt.Errorf("digest mismatch: got sha256:%s want sha256:%s", got, wantHex)
 	}
-	return n, os.Rename(tmp, path)
+	if err := os.Rename(tmp.Name(), path); err != nil {
+		// Concurrent writers publish identical verified bytes to the same destination, so a
+		// Windows rename collision means another writer already holds it. That writer's rename
+		// briefly locks the destination; retry the verification until it reads back clean.
+		for range 100 {
+			if m, verr := blobSizeVerified(path, wantHex); verr == nil {
+				return m, nil
+			}
+			time.Sleep(time.Millisecond)
+		}
+		return 0, err
+	}
+	return n, nil
+}
+
+var errCorruptBlob = errors.New("cached blob digest mismatch")
+
+// blobSizeVerified returns the size of path when its content hashes to wantHex. Missing files
+// wrap os.ErrNotExist; a mismatched digest wraps errCorruptBlob.
+func blobSizeVerified(path, wantHex string) (int64, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return 0, err
+	}
+	defer f.Close()
+	h := sha256.New()
+	n, err := io.Copy(h, f)
+	if err != nil {
+		return 0, err
+	}
+	if got := hex.EncodeToString(h.Sum(nil)); got != wantHex {
+		return 0, fmt.Errorf("%w: got sha256:%s want sha256:%s", errCorruptBlob, got, wantHex)
+	}
+	return n, nil
+}
+
+// ensureBlob makes path hold a verified blob for wantHex. An existing matching blob is
+// reported as present; a missing or corrupt blob is downloaded through dl and atomically
+// published. dl is called only when a download is needed and must return a fresh reader.
+func ensureBlob(path, wantHex string, dl func() (io.ReadCloser, error)) (size int64, downloaded bool, err error) {
+	if n, err := blobSizeVerified(path, wantHex); err == nil {
+		return n, false, nil
+	} else if !errors.Is(err, os.ErrNotExist) && !errors.Is(err, errCorruptBlob) {
+		return 0, false, err
+	}
+	rc, err := dl()
+	if err != nil {
+		return 0, false, err
+	}
+	defer rc.Close()
+	n, err := writeVerified(path, rc, wantHex)
+	if err != nil {
+		return 0, false, err
+	}
+	return n, true, nil
 }

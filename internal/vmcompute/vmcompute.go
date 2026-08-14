@@ -291,10 +291,12 @@ func (s *System) operation(proc *windows.LazyProc, name, options string, notific
 	var result *uint16
 	hr, _, _ := proc.Call(handle, opts, uintptr(unsafe.Pointer(&result)))
 	doc := takeString(result)
-	if !ok(hr) && !isPending(hr) {
-		return &Error{Op: name, Code: uint32(hr), Result: doc}
+	if err, wait := awaitNeeded(hr, name, doc); err != nil {
+		return err
+	} else if wait {
+		return s.wait(notification, name, timeout)
 	}
-	return s.wait(notification, name, timeout)
+	return nil
 }
 
 func (s *System) wait(notification uint32, name string, timeout time.Duration) error {
@@ -423,3 +425,15 @@ const systemNotFound = 0xC037010E // HCS_E_SYSTEM_NOT_FOUND
 
 func ok(hr uintptr) bool        { return hr == sOK || hr == sFalse }
 func isPending(hr uintptr) bool { return uint32(hr) == pending }
+
+// awaitNeeded classifies a completed HRESULT: a non-pending failure is the error to report,
+// a non-pending success needs no completion notification, and only a pending result waits.
+func awaitNeeded(hr uintptr, name, doc string) (error, bool) {
+	if !ok(hr) && !isPending(hr) {
+		return &Error{Op: name, Code: uint32(hr), Result: doc}, false
+	}
+	if isPending(hr) {
+		return nil, true
+	}
+	return nil, false
+}
