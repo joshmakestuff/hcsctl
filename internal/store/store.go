@@ -64,13 +64,6 @@ func (s *Store) RecordPath(ref string) string {
 	return filepath.Join(s.ImagesDir(), fmt.Sprintf("%s-%x.json", safe, h[:8]))
 }
 
-// legacyRecordPath is the old ambiguous key (sanitized reference only). Reads migrate a
-// legacy record forward; writes and removes cover both keys.
-func (s *Store) legacyRecordPath(ref string) string {
-	safe := strings.NewReplacer("/", "_", ":", "_", "@", "_", "\\", "_").Replace(ref)
-	return filepath.Join(s.ImagesDir(), safe+".json")
-}
-
 func (s *Store) WriteRecord(ref string, r Record) error {
 	if err := os.MkdirAll(s.ImagesDir(), 0o755); err != nil {
 		return err
@@ -79,24 +72,13 @@ func (s *Store) WriteRecord(ref string, r Record) error {
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(s.RecordPath(ref), b, 0o644); err != nil {
-		return err
-	}
-	// This write supersedes any record under the old ambiguous name; removing it keeps ls
-	// from listing the same reference twice.
-	if lp := s.legacyRecordPath(ref); lp != s.RecordPath(ref) {
-		_ = os.Remove(lp)
-	}
-	return nil
+	return os.WriteFile(s.RecordPath(ref), b, 0o644)
 }
 
-// RemoveRecord removes a reference's record under both keys. Absence is not an error -- the
-// caller decides what a missing record means.
+// RemoveRecord removes a reference's record. Absence is not an error -- the caller decides
+// what a missing record means.
 func (s *Store) RemoveRecord(ref string) error {
 	if err := os.Remove(s.RecordPath(ref)); err != nil && !os.IsNotExist(err) {
-		return err
-	}
-	if err := os.Remove(s.legacyRecordPath(ref)); err != nil && !os.IsNotExist(err) {
 		return err
 	}
 	return nil
@@ -107,28 +89,7 @@ func (s *Store) RemoveRecord(ref string) error {
 // that reads back successfully is guaranteed structurally sound. A missing record surfaces
 // as os.IsNotExist, which callers turn into "pull it first".
 func (s *Store) ReadRecord(ref string) (Record, error) {
-	r, err := s.readRecordFile(s.RecordPath(ref))
-	if err == nil || !os.IsNotExist(err) {
-		return r, err
-	}
-	notExist := err
-
-	lp := s.legacyRecordPath(ref)
-	lr, lerr := s.readRecordFile(lp)
-	if lerr != nil {
-		if os.IsNotExist(lerr) {
-			return Record{}, notExist
-		}
-		return Record{}, lerr
-	}
-	// The legacy key was ambiguous: two accepted references could sanitize to one filename.
-	// A legacy record is only trusted for the reference it says it belongs to.
-	if lr.Ref != ref {
-		return Record{}, fmt.Errorf("record %s belongs to %q, not %q (the old record key was ambiguous) -- re-pull %s", lp, lr.Ref, ref, ref)
-	}
-	// Migrate forward, best-effort: the read succeeds either way.
-	_ = os.Rename(lp, s.RecordPath(ref))
-	return lr, nil
+	return s.readRecordFile(s.RecordPath(ref))
 }
 
 func (s *Store) readRecordFile(path string) (Record, error) {
