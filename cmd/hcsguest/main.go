@@ -26,13 +26,14 @@ import (
 )
 
 // Version is the agent build. The host reports it in `guest info`, so a guest running a stale
-// agent is visible rather than mysterious.
-const Version = "0.3.0"
+// agent is visible rather than mysterious. Release builds stamp it with the tag, the way
+// cli.ToolVersion is stamped for hcsctl (#29); a dev build reports "dev" rather than a version
+// it does not have.
+var Version = "dev"
 
-// Commit is the hcsctl commit this agent was built from. Consumers pin a commit rather than a
-// release (hcsctl#35), so the commit is the agent's identity -- and stamping it here is what
-// makes that identity survive into the running guest instead of living only in whatever the
-// build recorded. Set by the linker; falls back to the VCS stamp Go embeds by default.
+// Commit is the hcsctl commit this agent was built from, and the agent's identity. Stamping it
+// here makes that identity survive into the running guest instead of living only in whatever
+// the build recorded. Set by the linker; falls back to the VCS stamp Go embeds by default.
 var Commit = ""
 
 func commit() string {

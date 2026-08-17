@@ -4,3 +4,6 @@ hcsctl.exe
 smoke/
 hcsguest.exe
 hcsguest-linux
+hcsguest-linux-amd64
+hcsctl-windows-amd64.zip
+SHA256SUMS

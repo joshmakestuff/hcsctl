@@ -41,7 +41,9 @@ jobs:
           GOARCH: amd64
         run: |
           $version = if ($env:GITHUB_REF_TYPE -eq 'tag') { $env:GITHUB_REF_NAME } else { "dev-$($env:GITHUB_SHA.Substring(0,12))" }
+          $commit = $env:GITHUB_SHA.Substring(0,12)
           "version=$version" >> $env:GITHUB_OUTPUT
+          "commit=$commit" >> $env:GITHUB_OUTPUT
           go build -ldflags "-X github.com/joshmakestuff/hcsctl/internal/cli.ToolVersion=$version" -o hcsctl.exe .
         id: build
 
@@ -56,14 +58,45 @@ jobs:
           }
           Write-Host "hcsctl reports $reported"
 
+      # The guest agent ships from the same tag as hcsctl: host and guest share
+      # internal/guestproto and a protocol mismatch is a hard failure. -trimpath and
+      # -buildvcs=false keep VCS info out of the binary; the -X stamps are the identity.
+      - name: Build hcsguest (both guest platforms)
+        env:
+          CGO_ENABLED: '0'
+        run: |
+          $version = '${{ steps.build.outputs.version }}'
+          $commit = '${{ steps.build.outputs.commit }}'
+          $env:GOOS = 'windows'; $env:GOARCH = 'amd64'
+          go build -trimpath -buildvcs=false -ldflags "-X main.Version=$version -X main.Commit=$commit" -o hcsguest-windows-amd64.exe ./cmd/hcsguest
+          $env:GOOS = 'linux'; $env:GOARCH = 'amd64'
+          go build -trimpath -buildvcs=false -ldflags "-X main.Version=$version -X main.Commit=$commit" -o hcsguest-linux-amd64 ./cmd/hcsguest
+
+      # Same assertion as hcsctl: the stamp is checked, not assumed. The Linux binary cannot run
+      # on this runner, but it is built with the identical -ldflags string, so the Windows check
+      # covers both.
+      - name: Verify the guest stamp took
+        run: |
+          $reported = (./hcsguest-windows-amd64.exe version)
+          if ($reported -notmatch [regex]::Escape('${{ steps.build.outputs.version }}')) {
+            throw "hcsguest reports '$reported' but this build is '${{ steps.build.outputs.version }}' -- the -ldflags -X path is wrong."
+          }
+          if ($reported -notmatch [regex]::Escape('${{ steps.build.outputs.commit }}')) {
+            throw "hcsguest reports '$reported' but this build is '${{ steps.build.outputs.commit }}' -- the commit stamp is wrong."
+          }
+          Write-Host $reported
+
       - name: Package
         run: |
           Compress-Archive -Path hcsctl.exe -DestinationPath hcsctl-windows-amd64.zip
-          # The hash a consumer pins. Format matches what Get-FileHash prints, because the
-          # consumer side (AspireHcs eng/Get-HcsCtl.ps1) compares against Get-FileHash output.
-          $hash = (Get-FileHash hcsctl-windows-amd64.zip -Algorithm SHA256).Hash
-          "$hash  hcsctl-windows-amd64.zip" | Out-File -FilePath SHA256SUMS -Encoding ascii
-          Write-Host "sha256 $hash"
+          # One checksum file covering every asset. The format matches what Get-FileHash prints,
+          # because Windows consumers compare against Get-FileHash output, and
+          # `sha256sum -c` accepts the same <hash><two-spaces><name> shape the Linux
+          # installer feeds it.
+          'hcsctl-windows-amd64.zip', 'hcsguest-windows-amd64.exe', 'hcsguest-linux-amd64' |
+            ForEach-Object { "$((Get-FileHash $_ -Algorithm SHA256).Hash)  $_" } |
+            Out-File -FilePath SHA256SUMS -Encoding ascii
+          Get-Content SHA256SUMS
 
       - name: Publish
         if: github.ref_type == 'tag'
@@ -71,6 +104,8 @@ jobs:
         with:
           files: |
             hcsctl-windows-amd64.zip
+            hcsguest-windows-amd64.exe
+            hcsguest-linux-amd64
             SHA256SUMS
           # Everything before 1.0 is a preview by definition; saying so in the release keeps a
           # consumer from reading a version number as a stability promise.
@@ -86,4 +121,6 @@ jobs:
           name: hcsctl-windows-amd64
           path: |
             hcsctl-windows-amd64.zip
+            hcsguest-windows-amd64.exe
+            hcsguest-linux-amd64
             SHA256SUMS
