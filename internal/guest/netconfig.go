@@ -15,8 +15,7 @@ import (
 )
 
 // ApplyNetConfig sends a netconfig request to a VM's agent and returns the guest's post-apply
-// attestation. Exported for the vm verb group: `vm netconfig` joins the store record and the
-// endpoint document, which live on that side of the package boundary.
+// attestation. Used by `vm netconfig`.
 func ApplyNetConfig(vmid guid.GUID, nc guestproto.NetConfig, timeout time.Duration) (*guestproto.NetConfigResult, error) {
 	svc, err := serviceFor(vmid, timeout)
 	if err != nil {

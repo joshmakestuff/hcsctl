@@ -11,7 +11,7 @@ import (
 )
 
 // addr builds guest evidence for one address. Family is derived from the address so the IPv6
-// rows are honest; guestIPv4Addresses parses the CIDR and never consults Family.
+// rows carry the right family; guestIPv4Addresses parses the CIDR and never consults Family.
 func addr(cidr string) guestproto.Address {
 	family := "ipv4"
 	if p, err := netip.ParsePrefix(cidr); err == nil && p.Addr().Is6() {

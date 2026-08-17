@@ -19,18 +19,17 @@ const (
 	Usage  = 64
 )
 
-// ContractVersion is the number a consumer's preflight checks (#29). Bump it when the shape
-// of a result document changes, a field's meaning changes, or an exit code's meaning changes
-// -- and ONLY then. Adding a new verb, option, or document field is not a bump: a consumer
-// reading fields it knows keeps working. If you are editing a Result document or the exit
-// codes above, you are the person this comment is for.
+// ContractVersion is the number a consumer's preflight checks. Bump it when the shape of a
+// result document changes, a field's meaning changes, or an exit code's meaning changes --
+// and ONLY then. Adding a new verb, option, or document field is not a bump: a consumer
+// reading fields it knows keeps working.
 const ContractVersion = "1"
 
 // ToolVersion identifies the build for humans in a bug report. Release builds stamp it:
 //
 //	go build -ldflags "-X github.com/joshmakestuff/hcsctl/internal/cli.ToolVersion=v0.2.0" .
 //
-// A dev build reports "dev" rather than a version it does not have.
+// A dev build reports "dev".
 var ToolVersion = "dev"
 
 // UsageError means the command line was wrong and nothing was attempted.
@@ -42,8 +41,8 @@ func Usagef(format string, a ...any) error {
 	return &UsageError{Msg: fmt.Sprintf(format, a...)}
 }
 
-// Args is a minimal flag parser. Deliberately not the flag package: verbs are nouns followed
-// by verbs followed by options, and `flag` wants options first.
+// Args is a minimal flag parser. Not the flag package: verbs are nouns followed by verbs
+// followed by options, and `flag` wants options first.
 type Args struct {
 	Words   []string // positional, e.g. ["image", "pull"]
 	options map[string]string
@@ -51,9 +50,8 @@ type Args struct {
 	flags   map[string]bool
 }
 
-// repeatable options accumulate instead of hitting the duplicate check. The duplicate
-// rejection is deliberate -- it catches typos -- so repeatability is opted into per option
-// here rather than relaxed globally.
+// repeatable options accumulate instead of hitting the duplicate check; any other option
+// given twice is a usage error.
 var repeatable = map[string]bool{"--env": true, "--mount": true, "--parent": true, "--label": true, "--publish": true, "--acl": true}
 
 // Parse splits argv. Anything starting with "--" is an option; those in boolFlags take no
@@ -177,10 +175,9 @@ func ValidateID(id string) error {
 	return nil
 }
 
-// ParseUint is the one bounded numeric parser (#21): every numeric option names the range its
-// sink actually accepts, so overflow is exit 64 instead of a silent wrap. The hand-rolled
-// parsers this replaces wrapped on uint64 overflow -- `--cpus 18446744073709551617` parsed as 1.
-// The error text is written to read after an option name: Usagef("--cpus %v", err).
+// ParseUint is the bounded numeric parser: every numeric option names the range its sink
+// accepts, so overflow is exit 64 instead of a silent wrap. The error text is written to read
+// after an option name: Usagef("--cpus %v", err).
 func ParseUint(s string, max uint64) (uint64, error) {
 	n, err := strconv.ParseUint(s, 10, 64)
 	if err != nil {
@@ -202,9 +199,7 @@ func ParseUint(s string, max uint64) (uint64, error) {
 // one way or another (scratch layers, base layers), so it is the shared operational bound.
 const maxSizeBytes = 64 << 40
 
-// ParseSize turns a human size -- "40GB", "40960MB" -- into bytes. The unit is required:
-// a bare number is ambiguous enough to be a mistake, and this is used for disk sizes where
-// the wrong guess costs tens of gigabytes.
+// ParseSize turns a human size -- "40GB", "40960MB" -- into bytes. The unit is required.
 func ParseSize(s string) (uint64, error) {
 	upper := strings.ToUpper(strings.TrimSpace(s))
 	var mult uint64
@@ -221,7 +216,7 @@ func ParseSize(s string) (uint64, error) {
 		return 0, Usagef("size %q has no number", s)
 	}
 	// The bound is in the given unit -- 64 TB expressed in GB or MB -- so a too-large size is
-	// rejected with a number the caller can act on rather than silently wrapping.
+	// rejected with a number in that unit.
 	n, err := ParseUint(digits, maxSizeBytes/mult)
 	if err != nil {
 		return 0, Usagef("size %q: %v", s, err)
@@ -232,12 +227,11 @@ func ParseSize(s string) (uint64, error) {
 // Emit is the output sink. In JSON mode stdout carries exactly one document and progress goes
 // to stderr, so a consumer never has to scrape.
 //
-// StreamJSON (#28) types the one stream that was untyped: with it, everything on stderr is
-// NDJSON -- one object per line -- so a consumer following a long-running exec can attribute
-// every line without matching on message text. {"stream":"progress","msg":...} is hcsctl's
-// own voice; guest output is framed by the container package as
+// With StreamJSON, everything on stderr is NDJSON -- one object per line -- so a consumer
+// following a long-running exec can attribute every line without matching on message text.
+// {"stream":"progress","msg":...} is hcsctl's own voice; guest output is framed as
 // {"stream":"stdout"|"stderr","data":...}. Takes effect only alongside JSON mode: without
-// --json there is no consumer, and human output stays human.
+// --json human output stays human.
 type Emit struct {
 	JSON       bool
 	StreamJSON bool
@@ -266,10 +260,9 @@ func (e Emit) streamLine(obj map[string]string) {
 	fmt.Fprintln(os.Stderr, string(b))
 }
 
-// NewStreamWriter frames one guest stream as NDJSON lines (#28). Complete lines are emitted
-// as they arrive, without their line ending; a partial line is buffered to the next write --
-// so a consumer sees whole lines and a rune split across reads cannot be mangled -- capped at
-// 64 KB so a line-less guest cannot hold output hostage. Close flushes the remainder.
+// NewStreamWriter frames one guest stream as NDJSON lines. Complete lines are emitted as
+// they arrive, without their line ending; a partial line is buffered to the next write, so a
+// rune split across reads is not mangled, capped at 64 KB. Close flushes the remainder.
 func NewStreamWriter(e Emit, stream string) *StreamWriter {
 	return &StreamWriter{e: e, stream: stream}
 }
@@ -311,9 +304,9 @@ func (w *StreamWriter) emit(line []byte) {
 	w.e.streamLine(map[string]string{"stream": w.stream, "data": strings.TrimSuffix(string(line), "\r")})
 }
 
-// StreamLogLine frames one retained-log line (#33's `container logs --follow`). The stream
-// is "log", not "stdout"/"stderr": primary.log merges the guest's two streams, so per-stream
-// attribution is gone by design once output is replayed from the file.
+// StreamLogLine frames one retained-log line (`container logs --follow`). The stream is
+// "log", not "stdout"/"stderr": primary.log merges the guest's two streams, so per-stream
+// attribution is not available once output is replayed from the file.
 func (e Emit) StreamLogLine(line string) {
 	e.streamLine(map[string]string{"stream": "log", "data": line})
 }
@@ -350,15 +343,13 @@ func (e Emit) Failure(stage string, err error) {
 var labelKeyRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
 
 // ParseLabels turns repeated --label key=value into the stored map. hcsctl assigns labels no
-// meaning: they are stored, reported, and never interpreted (#31). Ownership and run identity
-// are the consumer's policy -- record an owner pid, and scavenge only on proof it is dead.
+// meaning: they are stored, reported, and never interpreted.
 //
-// Values are stored verbatim, empty included -- unlike --env, nothing downstream deletes an
-// empty value. A repeated key is a usage error, matching --id's duplicate rule.
+// Values are stored verbatim, empty included. A repeated key is a usage error.
 //
-// reserved is the caller's own state-document field names. A label may not shadow one, because
-// a consumer that flattens the document would silently get the label instead of the field.
-// Each verb group carries its own set, since each has its own state shape.
+// reserved is the caller's own state-document field names. A label may not shadow one: a
+// consumer that flattens the document would get the label instead of the field. Each verb
+// group carries its own set.
 func ParseLabels(a *Args, reserved map[string]bool) (map[string]string, error) {
 	vals := a.Options("--label")
 	if len(vals) == 0 {

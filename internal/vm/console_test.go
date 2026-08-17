@@ -11,8 +11,7 @@ import (
 
 // The JSON contract is one parseable document on stdout, nothing else. Serial bytes are
 // arbitrary guest firmware output; if the console streams them onto stdout under --json, the
-// document that follows them is unparsable -- the regression #47. The sink per mode is the
-// contract, so it is asserted here.
+// document that follows them is unparsable. The sink per mode is the contract.
 func TestConsoleSinkKeepsStdoutForTheJSONDocument(t *testing.T) {
 	cases := []struct {
 		name string

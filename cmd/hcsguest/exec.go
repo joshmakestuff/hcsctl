@@ -15,8 +15,7 @@ import (
 
 // runExec launches a command in the guest and streams it back as frames.
 //
-// Stdout and stderr stay on separate channels the whole way, so the host can attribute them
-// individually. Merging them here would be irreversible.
+// Stdout and stderr stay on separate channels so the host can attribute them individually.
 func runExec(c net.Conn, buffered *bufio.Reader, req guestproto.Request) {
 	if req.Command == "" {
 		writeFailure(c, "exec needs a command")
@@ -24,17 +23,14 @@ func runExec(c net.Conn, buffered *bufio.Reader, req guestproto.Request) {
 	}
 
 	name, args := shellFor(req.Command)
-	// exec.Command, NOT exec.CommandContext. CommandContext kills the one process it started,
-	// which is the shell -- so `cmd /c ping ...` loses cmd.exe and leaves PING.EXE running,
-	// holding the stdout handle open. Measured: a 5 s timeout took 29.5 s to report, because
-	// the pipe did not close until the orphan finished on its own. The same trap is already
-	// recorded for the container path. Kill the tree instead; see killTree.
+	// exec.Command, not exec.CommandContext: CommandContext kills only the shell it started, and
+	// an orphaned child (`cmd /c ping ...` leaves PING.EXE) holds the stdout pipe open until it
+	// exits on its own. Timeouts kill the whole tree instead; see killTree.
 	cmd := exec.Command(name, args...)
 	setProcessGroup(cmd)
 	cmd.Dir = req.Cwd
 	if len(req.Env) > 0 {
-		// Added to the guest's environment, not replacing it. A command that lost PATH would
-		// fail for a reason nobody could guess from the host.
+		// Added to the guest's environment, not replacing it.
 		cmd.Env = append(os.Environ(), req.Env...)
 	}
 
@@ -61,8 +57,8 @@ func runExec(c net.Conn, buffered *bufio.Reader, req guestproto.Request) {
 
 	timedOut := make(chan struct{})
 	if req.TimeoutSeconds > 0 {
-		// Enforced here as well as on the host. A host that gives up would otherwise leave
-		// the command running in the guest with nothing left to stop it.
+		// Enforced here as well as on the host, so a host that gives up does not leave the
+		// command running in the guest.
 		t := time.AfterFunc(time.Duration(req.TimeoutSeconds)*time.Second, func() {
 			close(timedOut)
 			killTree(cmd)
@@ -74,8 +70,7 @@ func runExec(c net.Conn, buffered *bufio.Reader, req guestproto.Request) {
 	// otherwise be cut off mid-flight by the request deadline set on accept.
 	_ = c.SetDeadline(time.Time{})
 
-	// One writer, one mutex. Two goroutines interleaving frames on one socket would corrupt
-	// the stream, and the corruption would look like a protocol bug rather than a race.
+	// One writer, one mutex: interleaved frames from two goroutines would corrupt the stream.
 	var mu sync.Mutex
 	send := func(ch byte, p []byte) error {
 		mu.Lock()
@@ -100,8 +95,8 @@ func runExec(c net.Conn, buffered *bufio.Reader, req guestproto.Request) {
 		}
 	}
 	wg.Add(2)
-	// Drained concurrently. Reading them in sequence deadlocks as soon as the command fills
-	// the pipe this side is not reading -- the same trap the container path already carries.
+	// Drained concurrently: reading them in sequence deadlocks once the command fills the
+	// pipe this side is not reading.
 	go pump(stdout, guestproto.ChanStdout)
 	go pump(stderr, guestproto.ChanStderr)
 
@@ -135,8 +130,7 @@ func runExec(c net.Conn, buffered *bufio.Reader, req guestproto.Request) {
 	default:
 	}
 	if status.Error == "" && waitErr != nil && status.ExitCode == 0 {
-		// A wait error with a zero code is not an ordinary non-zero exit; say so rather than
-		// reporting success.
+		// A wait error with a zero exit code is not an ordinary non-zero exit; report it.
 		status.Error = waitErr.Error()
 	}
 	b, _ := json.Marshal(status)

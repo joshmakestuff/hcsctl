@@ -2,19 +2,15 @@
 
 // hcsctl is a CLI over the Windows Host Compute Service, built on Microsoft/hcsshim.
 //
-// The goal is to surface HCS -- images, layers, compute systems, networking -- as a tool you
-// can drive from a shell or an agent. Image preparation is what works today; the rest is
-// roadmap, not vapour: hcsshim already exposes the layer runtime (ActivateLayer, PrepareLayer,
-// GetLayerMountPath), compute systems (CreateContainer with HvPartition), CimFS, and 228
-// networking functions in the hcn package. Verbs get added over those.
+// It surfaces HCS -- images, layers, compute systems, networking -- as a tool you can drive
+// from a shell or an agent.
 //
 // Two rules this repo is built to:
 //
 //	Public hcsshim packages only. pkg/*, the hcsshim root package, computestorage, osversion.
-//	Needing internal/ is a signal to reconsider the design, not to fork. Where hcsshim exports
-//	no public equivalent -- today, the v2 compute-system API that `vm` needs -- bind the
-//	documented Windows entry point in vmcompute.dll directly (#34). Copying or vendoring
-//	hcsshim's internal/ source is still out.
+//	Where hcsshim exports no public equivalent -- the v2 compute-system API that `vm` needs --
+//	bind the documented Windows entry point in vmcompute.dll directly. Copying or vendoring
+//	hcsshim's internal/ source is out.
 //
 //	Every verb honours the same contract: --json puts exactly one document on stdout with
 //	progress on stderr, and exit codes mean 0 ok, 1 ran and failed, 64 bad arguments with
@@ -39,8 +35,8 @@ import (
 func main() { os.Exit(run(os.Args[1:])) }
 
 func run(argv []string) int {
-	// Read --json off argv rather than off the parse: a malformed command line must still be
-	// reported in the shape the caller asked for, and the parse is what may have failed.
+	// Read --json off argv, not off the parse: a malformed command line must still be
+	// reported in the shape the caller asked for.
 	wantJSON, wantStream := false, false
 	for _, a := range argv {
 		if a == "--json" {
@@ -53,8 +49,8 @@ func run(argv []string) int {
 	e := cli.Emit{JSON: wantJSON, StreamJSON: wantStream}
 
 	// help and version are answered before the parser runs: --help would otherwise be "an
-	// option requiring a value" and -h is not an option at all (#25). Leading position only,
-	// deliberately -- an option's *value* may legitimately be the string "--help".
+	// option requiring a value" and -h is not an option at all. Leading position only: an
+	// option's *value* may be the string "--help".
 	if len(argv) > 0 {
 		switch argv[0] {
 		case "--help", "-h", "help":
@@ -72,8 +68,7 @@ func run(argv []string) int {
 	}
 
 	if len(args.Words) == 0 {
-		// Failure before usage, so `hcsctl --json` still puts its one document on stdout --
-		// the contract holds on every path, including the empty one.
+		// Failure before usage, so `hcsctl --json` still puts its one document on stdout.
 		e.Failure("usage", cli.Usagef("a verb group is required (image, layer, container, vm, guest, network, storage, info)"))
 		usage()
 		return cli.Usage

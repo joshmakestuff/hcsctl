@@ -16,8 +16,7 @@ func TestFrameRoundTrip(t *testing.T) {
 	}{
 		{"stdout", ChanStdout, []byte("hello")},
 		{"stderr", ChanStderr, []byte("boom")},
-		// A zero-length frame is EOF on stdin, so it has to survive the round trip as a
-		// frame rather than being skipped.
+		// A zero-length frame is EOF on stdin, so it must survive the round trip as a frame.
 		{"empty stdin means eof", ChanStdin, nil},
 		{"binary", ChanStdout, []byte{0, 1, 2, 0xff, 0}},
 	}
@@ -50,8 +49,7 @@ func TestFrameCleanEOF(t *testing.T) {
 	}
 }
 
-// A truncated frame must NOT read as a clean end. Treating one as EOF is how a caller comes
-// to believe a command finished when the connection actually broke mid-stream.
+// A truncated frame must NOT read as a clean end.
 func TestFrameTruncatedIsNotEOF(t *testing.T) {
 	var buf bytes.Buffer
 	if err := WriteFrame(&buf, ChanStdout, []byte("hello")); err != nil {
@@ -71,8 +69,7 @@ func TestFrameTruncatedIsNotEOF(t *testing.T) {
 	}
 }
 
-// The length prefix is an instruction to allocate, so it needs a ceiling. Without one, a
-// corrupted header asks for gigabytes.
+// The length prefix is an instruction to allocate, so it needs a ceiling.
 func TestFrameRejectsOversizeLength(t *testing.T) {
 	hdr := []byte{ChanStdout, 0xff, 0xff, 0xff, 0xff}
 	_, _, err := ReadFrame(bytes.NewReader(hdr))

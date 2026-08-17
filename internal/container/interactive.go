@@ -69,7 +69,7 @@ func (r *ctrlCReader) Read(p []byte) (int, error) {
 }
 
 // forwardStdin owns EOF propagation: the guest sees EOF whether it came from the terminal, a
-// pipe, or Ctrl-C in raw mode. It deliberately does not wait for the source reader; a terminal
+// pipe, or Ctrl-C in raw mode. It does not wait for the source reader; a terminal
 // read can remain blocked after the guest process exits.
 func forwardStdin(source io.Reader, destination io.Writer, closeStdin func(), rawTTY bool, cancel context.CancelFunc) {
 	if rawTTY {

@@ -13,10 +13,9 @@ import (
 	"github.com/joshmakestuff/hcsctl/internal/guestproto"
 )
 
-// validateNetConfig fills defaults and rejects what the mechanism would otherwise fail on
-// with a worse message. The host validated too, but the agent is a wire endpoint and trusts
-// nothing. IPv4 only: both measured mechanisms program IPv4 (nmcli ipv4.*, netsh interface
-// ipv4), and an IPv6 config would silently measure nothing.
+// validateNetConfig fills defaults and rejects malformed input. The host validates too, but
+// the agent is a wire endpoint and trusts nothing. IPv4 only: both mechanisms program IPv4
+// (nmcli ipv4.*, netsh interface ipv4).
 func validateNetConfig(nc *guestproto.NetConfig) error {
 	if nc == nil {
 		return fmt.Errorf("netconfig needs a payload")
@@ -57,9 +56,8 @@ func validateNetConfig(nc *guestproto.NetConfig) error {
 	return nil
 }
 
-// nmcliModArgs builds `nmcli con mod ...` for a validated config. Manual method through the
-// connection profile, so NetworkManager owns the result -- see the package doc on
-// guestproto.NetConfig for why raw ip commands are not an option.
+// nmcliModArgs builds `nmcli con mod ...` for a validated config: manual method through the
+// connection profile, so NetworkManager owns the result.
 func nmcliModArgs(nc *guestproto.NetConfig) []string {
 	args := []string{"con", "mod", nc.Interface,
 		"ipv4.method", "manual",
@@ -75,10 +73,8 @@ func nmcliModArgs(nc *guestproto.NetConfig) []string {
 }
 
 // netshCmds builds the netsh invocations for a validated config on the adapter with the
-// given interface index. This exact shape is the measured Windows mechanism
-// (2026-08-11): `set address source=static` holds address and dataplane through the
-// whole observation window, and flips the interface off DHCP itself, so no service fights
-// the result. name= takes the interface index, which sidesteps localized adapter names.
+// given interface index. `set address source=static` moves the interface off DHCP itself.
+// name= takes the interface index, which sidesteps localized adapter names.
 //
 // The first address and DNS server go through `set` (replacing whatever the interface has);
 // the rest go through `add`.
@@ -111,14 +107,13 @@ func netshCmds(nc *guestproto.NetConfig, ifIndex int) [][]string {
 	return cmds
 }
 
-// maskString renders a prefix length as the dotted mask netsh takes. netsh's CIDR spelling
-// is unmeasured; the mask form is what the probe ran.
+// maskString renders a prefix length as the dotted mask netsh takes.
 func maskString(bits int) string {
 	return net.IP(net.CIDRMask(bits, 32)).String()
 }
 
-// observedAddresses is the post-apply attestation: what the interface actually holds, from
-// the same enumeration `info` uses.
+// observedAddresses reports what the interface holds after apply, from the same enumeration
+// `info` uses.
 func observedAddresses(iface string) []guestproto.Address {
 	all, err := addresses()
 	if err != nil {

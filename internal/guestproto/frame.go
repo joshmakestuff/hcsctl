@@ -8,8 +8,8 @@ import (
 )
 
 // Channels carried after an exec request. The host writes only Stdin; the guest writes only
-// the rest. Keeping stdout and stderr apart on the wire is what lets --stream-json attribute
-// them separately, the same way `container exec` already does.
+// the rest. Stdout and stderr stay apart on the wire so --stream-json can attribute them
+// separately.
 const (
 	ChanStdin  byte = 0
 	ChanStdout byte = 1
@@ -17,17 +17,15 @@ const (
 	ChanExit   byte = 3
 )
 
-// MaxFrame bounds one payload. A length prefix read from a socket is an instruction to
-// allocate, so it needs a ceiling even on a trusted link -- a corrupted or truncated frame
-// would otherwise ask for gigabytes.
+// MaxFrame bounds one payload: a length prefix read from a socket is an instruction to
+// allocate, so it needs a ceiling.
 const MaxFrame = 1 << 20
 
 // ExitStatus is the payload of the final ChanExit frame, as JSON.
 //
 // The guest process's own exit code travels here, inside the document, and never becomes
-// hcsctl's exit code. Those two things mean different things, and conflating them makes the
-// contract unusable: a caller could not tell "the command ran and returned 1" from "the tool
-// failed to run it".
+// hcsctl's exit code: "the command ran and returned 1" and "the tool failed to run it" are
+// different outcomes.
 type ExitStatus struct {
 	ExitCode int    `json:"exitCode"`
 	Error    string `json:"error,omitempty"`
@@ -52,8 +50,7 @@ func WriteFrame(w io.Writer, ch byte, payload []byte) error {
 }
 
 // ReadFrame reads one frame. It returns io.EOF only when the stream ended cleanly between
-// frames; a partial frame is an error, because silently treating a truncated stream as a
-// clean end is how a caller comes to believe a command finished when it did not.
+// frames; a partial frame is an error.
 func ReadFrame(r io.Reader) (byte, []byte, error) {
 	var hdr [5]byte
 	if _, err := io.ReadFull(r, hdr[:]); err != nil {

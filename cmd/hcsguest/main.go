@@ -1,4 +1,4 @@
-// Command hcsguest is the agent that runs inside a guest VM (#40).
+// Command hcsguest is the agent that runs inside a guest VM.
 //
 // It listens on a Hyper-V socket and answers requests from the host. It never dials out: the
 // host dials, the guest listens, and that direction doubles as the host's readiness probe.
@@ -8,7 +8,7 @@
 //	hcsguest version
 //
 // It needs no network adapter, no DHCP lease, no firewall rule and no elevation on the host
-// side. Measured in #37.
+// side.
 package main
 
 import (
@@ -25,15 +25,12 @@ import (
 	"github.com/joshmakestuff/hcsctl/internal/guestproto"
 )
 
-// Version is the agent build. The host reports it in `guest info`, so a guest running a stale
-// agent is visible rather than mysterious. Release builds stamp it with the tag, the way
-// cli.ToolVersion is stamped for hcsctl (#29); a dev build reports "dev" rather than a version
-// it does not have.
+// Version is the agent build. The host reports it in `guest info`. Release builds stamp it
+// with the tag; a dev build reports "dev".
 var Version = "dev"
 
-// Commit is the hcsctl commit this agent was built from, and the agent's identity. Stamping it
-// here makes that identity survive into the running guest instead of living only in whatever
-// the build recorded. Set by the linker; falls back to the VCS stamp Go embeds by default.
+// Commit is the hcsctl commit this agent was built from. Set by the linker; falls back to the
+// VCS stamp Go embeds by default.
 var Commit = ""
 
 func commit() string {
@@ -60,8 +57,7 @@ func commit() string {
 		rev = rev[:12]
 	}
 	if dirty {
-		// A dirty build is not the pinned commit, and saying so is the difference between
-		// "this guest runs pin X" and "this guest runs something like pin X".
+		// A dirty build is not the pinned commit.
 		return rev + "-dirty"
 	}
 	return rev
@@ -133,8 +129,7 @@ func acceptLoop(stop <-chan struct{}) error {
 				}
 			}
 			// A single failed accept must not end the agent: the host reads a refused or
-			// timed-out connection as "not ready", and an agent that exited would look
-			// identical forever.
+			// timed-out connection as "not ready".
 			fmt.Fprintf(os.Stderr, "accept: %v\n", err)
 			continue
 		}
@@ -159,7 +154,7 @@ func handle(c net.Conn) {
 		return
 	}
 	if req.Protocol != guestproto.Protocol {
-		// Refused, never negotiated. See #40.
+		// Refused, never negotiated.
 		writeFailure(c, fmt.Sprintf("protocol %d not supported; this agent speaks %d",
 			req.Protocol, guestproto.Protocol))
 		return
@@ -192,10 +187,9 @@ func handle(c net.Conn) {
 
 // forward joins the caller to a TCP port on the guest's own loopback.
 //
-// Loopback is the point. Windows does not filter loopback, so a forward reaches a service the
-// guest firewall would otherwise drop -- which is the fault that left RDP unreachable while
-// SSH worked on the same guest. It also means the guest needs no inbound rule, no NIC and no
-// DHCP lease for the host to reach a service inside it.
+// Windows does not filter loopback, so a forward reaches a service the guest firewall would
+// otherwise drop. The guest needs no inbound rule, no NIC and no DHCP lease for the host to
+// reach a service inside it.
 func forward(c net.Conn, buffered *bufio.Reader, port int) {
 	if port < 1 || port > 65535 {
 		writeFailure(c, fmt.Sprintf("port %d out of range", port))
@@ -241,8 +235,7 @@ func writeFailure(c net.Conn, msg string) {
 	writeJSON(c, guestproto.Failure{OK: false, Protocol: guestproto.Protocol, Error: msg})
 }
 
-// addresses is portable: net.Interfaces works the same on both guests, so the field that
-// removes the host's DHCP-lease poll needs no per-OS code.
+// addresses is portable: net.Interfaces works the same on both guests.
 func addresses() ([]guestproto.Address, error) {
 	ifaces, err := net.Interfaces()
 	if err != nil {

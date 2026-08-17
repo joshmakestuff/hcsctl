@@ -1,13 +1,9 @@
 # A green tick here means "builds, starts, and honours its contract" -- never "works".
-# Hosted runners have no Hyper-V and no elevation worth having, so nothing in this workflow
-# reaches HCS; pull would also cost ~114 MB of registry traffic per run. "Works" is the
-# elevated smoke transcript on a real host (issue #38), and issue #1 records
-# which verbs have actually run.
+# Hosted runners have no Hyper-V and no usable elevation, so nothing in this workflow
+# reaches HCS. "Works" is the elevated smoke transcript on a real host.
 name: contract
-# PRs only, by decision 2026-08-06: direct pushes to main are gated by running the suite
-# locally before pushing; the machine gate earns its keep where a change is up for review.
-# workflow_dispatch is the manual fallback -- also useful because GitHub can drop an event
-# (de92f97 was pushed with this workflow active and no run was created).
+# PRs only: direct pushes to main are gated by running the suite locally before pushing.
+# workflow_dispatch is the manual fallback.
 on:
   pull_request:
   workflow_dispatch:

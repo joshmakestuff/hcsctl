@@ -6,17 +6,16 @@ package vm
 // so nothing is renamed by a policy. Reference: the schema reference on Microsoft Learn, plus
 // hcsshim's internal/hcs/schema2, which is not importable.
 //
-// Schema version 2.5 is deliberate, not "the newest number". Services is NewInVersion 2.5, and
-// below that HCS *silently ignores* the section -- the document is accepted and a later
-// shutdown then fails ERROR_NOT_SUPPORTED (0x80070032), blaming the shutdown.
+// Schema version 2.5 is required. Services is NewInVersion 2.5, and below that HCS silently
+// ignores the section -- the document is accepted and a later shutdown fails
+// ERROR_NOT_SUPPORTED (0x80070032).
 
 type document struct {
 	SchemaVersion schemaVersion `json:"SchemaVersion"`
 	Owner         string        `json:"Owner,omitempty"`
 
-	// Left false on purpose, unlike a container. hcsctl is a CLI: the process that created the
-	// VM exits immediately, and with this true the VM would die with it. A VM outliving the
-	// invocation that made it is the whole point of `vm create` being separate from `vm start`.
+	// False, unlike a container. hcsctl is a CLI: the process that created the VM exits
+	// immediately, and with this true the VM would die with it.
 	ShouldTerminateOnLastHandleClosed bool `json:"ShouldTerminateOnLastHandleClosed"`
 
 	VirtualMachine virtualMachine `json:"VirtualMachine"`
@@ -76,8 +75,7 @@ type networkAdapter struct {
 	MacAddress string `json:"MacAddress"`
 }
 
-// networkAdapter0 is the key of the one adapter. Unlike the SCSI controller's key it is not
-// referenced from anywhere else in the document, so it is a label and nothing more.
+// networkAdapter0 is the key of the one adapter. Nothing else in the document references it.
 const networkAdapter0 = "ext"
 
 type hvSocket struct {
@@ -88,23 +86,19 @@ type hvSocketSystemConfig struct {
 	DefaultBindSecurityDescriptor    string `json:"DefaultBindSecurityDescriptor,omitempty"`
 	DefaultConnectSecurityDescriptor string `json:"DefaultConnectSecurityDescriptor,omitempty"`
 	// Empty: no per-service entry, so every service falls back to the two defaults above.
-	// A service table would be the place to restrict individual service GUIDs, and nothing
-	// here wants that yet.
 	ServiceTable map[string]struct{} `json:"ServiceTable"`
 }
 
 // hvSocketSDDL grants full access to SYSTEM, BUILTIN\Administrators and Hyper-V Administrators
 // (S-1-5-32-578).
 //
-// The Hyper-V Administrators entry is the load-bearing one. hcsctl's whole posture is that an
-// unelevated member of that group can drive HCS, and in a filtered token the Administrators
-// SID is present but not enabled -- so an SDDL naming only SY and BA locks out exactly the
-// caller this tool is built for.
+// The Hyper-V Administrators entry is required. hcsctl runs unelevated as a member of that
+// group, and in a filtered token the Administrators SID is present but not enabled, so an SDDL
+// naming only SY and BA locks out the caller.
 const hvSocketSDDL = "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;S-1-5-32-578)"
 
-// scsiController0 is the key of the one SCSI controller, and the same string has to appear as
-// the UEFI boot entry's DevicePath. It reads like a label because it is one; the key is
-// arbitrary, and only the agreement between the two places matters.
+// scsiController0 is the key of the one SCSI controller. The same string must appear as the
+// UEFI boot entry's DevicePath; the key is arbitrary, only the agreement matters.
 const scsiController0 = "Primary disk"
 
 type scsiController struct {
@@ -125,8 +119,7 @@ type services struct {
 	Shutdown *struct{} `json:"Shutdown"`
 }
 
-// buildDocument assembles the boot document. Every field it sets is one this tool can
-// actually drive; nothing is set speculatively.
+// buildDocument assembles the boot document.
 func buildDocument(spec spec) document {
 	d := document{
 		SchemaVersion: schemaVersion{Major: 2, Minor: 5},
@@ -136,10 +129,9 @@ func buildDocument(spec spec) document {
 				// DevicePath is NOT a file path. It is the key of the SCSI controller in
 				// Devices.Scsi below, and DiskNumber is the attachment LUN on it. The two
 				// must agree, and nothing checks that they do: a document naming a
-				// controller that does not exist -- or an EFI file path, which is the
-				// tempting mistake -- is accepted, the VM starts, HCS reports Running, and
-				// the firmware boots nothing. No disk writes, no console output, no error
-				// anywhere. Measured on both images, #34.
+				// controller that does not exist -- or an EFI file path -- is accepted, the
+				// VM starts, HCS reports Running, and the firmware boots nothing. No disk
+				// writes, no console output, no error anywhere.
 				DevicePath: scsiController0,
 				DiskNumber: 0,
 				DeviceType: "ScsiDrive",
@@ -156,7 +148,7 @@ func buildDocument(spec spec) document {
 				},
 				// Without this section the VM has no Hyper-V socket surface at all, and a
 				// host-side dial fails WSAEADDRNOTAVAIL (10049) -- the same errno a VM that
-				// does not exist produces. Measured, #34 and #37.
+				// does not exist produces.
 				HvSocket: &hvSocket{HvSocketConfig: hvSocketSystemConfig{
 					DefaultBindSecurityDescriptor:    hvSocketSDDL,
 					DefaultConnectSecurityDescriptor: hvSocketSDDL,

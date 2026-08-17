@@ -1,4 +1,4 @@
-# Exercises the paths deliberately outside static netconfig. Swap only -VHDX to test Linux or Windows.
+# Exercises the paths outside static netconfig. Swap only -VHDX to test Linux or Windows.
 param(
     [Parameter(Mandatory)] [string]$VHDX,
     [string]$Store = (Join-Path $env:LOCALAPPDATA 'hcsctl-smoke')

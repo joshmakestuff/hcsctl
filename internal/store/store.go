@@ -4,8 +4,7 @@
 //	<root>/images/<ref>.json      one record per pulled reference
 //	<root>/layers/<diffID hex>/   materialized layers, named by diffID
 //
-// Per-user by default, not %ProgramData%: a machine-wide store would make every pull a shared
-// side effect and invite ACL problems on the unelevated path.
+// Per-user by default.
 package store
 
 import (
@@ -57,17 +56,16 @@ func (s *Store) LayerPath(diffID string) string {
 func (s *Store) ImagesDir() string { return filepath.Join(s.Root, "images") }
 
 // RecordPath keys a record by the sanitized reference plus a short hash of the raw one, so
-// distinct references cannot share a file -- "a/b" and "a_b" sanitized identically before
-// #22. The sanitized half keeps the directory greppable; the hash half makes the key
-// unambiguous.
+// distinct references cannot share a file ("a/b" and "a_b" sanitize identically). The
+// sanitized half keeps the directory greppable; the hash half makes the key unambiguous.
 func (s *Store) RecordPath(ref string) string {
 	safe := strings.NewReplacer("/", "_", ":", "_", "@", "_", "\\", "_").Replace(ref)
 	h := sha256.Sum256([]byte(ref))
 	return filepath.Join(s.ImagesDir(), fmt.Sprintf("%s-%x.json", safe, h[:8]))
 }
 
-// legacyRecordPath is the pre-#22 ambiguous key. Stores written before the change stay
-// readable through it: reads migrate a legacy record forward, writes and removes cover both.
+// legacyRecordPath is the old ambiguous key (sanitized reference only). Reads migrate a
+// legacy record forward; writes and removes cover both keys.
 func (s *Store) legacyRecordPath(ref string) string {
 	safe := strings.NewReplacer("/", "_", ":", "_", "@", "_", "\\", "_").Replace(ref)
 	return filepath.Join(s.ImagesDir(), safe+".json")
@@ -104,7 +102,7 @@ func (s *Store) RemoveRecord(ref string) error {
 	return nil
 }
 
-// ReadRecord is the validation boundary for persisted image metadata (#22): every consumer
+// ReadRecord is the validation boundary for persisted image metadata: every consumer
 // indexes LayerDigests alongside DiffIDs and joins digests into store paths, so a record
 // that reads back successfully is guaranteed structurally sound. A missing record surfaces
 // as os.IsNotExist, which callers turn into "pull it first".
@@ -175,7 +173,7 @@ func (r Record) validate() error {
 	return nil
 }
 
-// Records lists every record in the store, newest first is not attempted -- callers sort.
+// Records lists every record in the store, unsorted; callers sort.
 func (s *Store) Records() ([]Record, error) {
 	entries, err := os.ReadDir(s.ImagesDir())
 	if err != nil {
@@ -191,8 +189,7 @@ func (s *Store) Records() ([]Record, error) {
 		}
 		b, err := os.ReadFile(filepath.Join(s.ImagesDir(), e.Name()))
 		if err != nil {
-			// An unreadable record is reported by the caller, never silently skipped into
-			// a blank row.
+			// An unreadable record is reported by the caller, never silently skipped.
 			out = append(out, Record{Ref: e.Name() + " (unreadable)"})
 			continue
 		}

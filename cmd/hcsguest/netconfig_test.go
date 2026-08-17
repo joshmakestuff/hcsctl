@@ -20,7 +20,7 @@ func TestValidateNetConfig(t *testing.T) {
 			t.Fatal(err)
 		}
 		// eth0 on Linux; empty on Windows, where applyNetConfig selects the single
-		// connected adapter instead of trusting a name.
+		// connected adapter.
 		want := map[string]string{"linux": "eth0", "windows": ""}[runtime.GOOS]
 		if nc.Interface != want {
 			t.Fatalf("interface = %q, want %q on %s", nc.Interface, want, runtime.GOOS)
@@ -79,8 +79,7 @@ func TestNmcliModArgs(t *testing.T) {
 }
 
 func TestNetshCmds(t *testing.T) {
-	// The single-address, gateway-and-dns shape is the measured netsh sequence verbatim; extra
-	// addresses and dns servers ride the corresponding `add` verbs.
+	// The first address and DNS server go through `set`; extra ones go through `add`.
 	nc := &guestproto.NetConfig{
 		Addresses: []string{"172.29.172.38/24", "172.29.172.39/24"},
 		Gateway:   "172.29.172.1",

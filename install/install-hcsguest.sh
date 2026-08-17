@@ -106,8 +106,8 @@ else
     fi
 
     # Verify the SHA-256 for this asset against the release's SHA256SUMS. sha256sum -c compares
-    # case-insensitively, so the uppercase hashes Windows generated check cleanly. CR is
-    # stripped in case the file was written with CRLF.
+    # case-insensitively, so uppercase hashes check cleanly. CR is stripped in case the file
+    # has CRLF line endings.
     expected=$(awk -v a="$ASSET" '{ sub(/\r$/, "") } $2 == a { print $1 }' "$sums")
     if [ -z "$expected" ]; then
         echo "error: SHA256SUMS does not list $ASSET" >&2
@@ -217,7 +217,6 @@ if [ "$state" != "active" ]; then
 fi
 
 # Local check only: proves the binary runs and reads this guest's state. It does NOT prove the
-# host can reach it -- that is a host-side check, for the same reason a listener inside a guest
-# is not reachability.
+# host can reach it; that is a host-side check.
 "$BIN" info >/dev/null
 echo "hcsguest info: ok"

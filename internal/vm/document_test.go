@@ -15,8 +15,8 @@ func testSpec() spec {
 
 // The boot entry points at a SCSI controller by key, not at a file. Nothing validates the
 // agreement -- a document naming a controller that does not exist is accepted, the VM starts,
-// HCS reports Running, and the firmware boots nothing at all. That failure cost an afternoon
-// and is invisible in every observable except an idle disk, so it is asserted here.
+// HCS reports Running, and the firmware boots nothing at all. The failure is invisible in
+// every observable except an idle disk.
 func TestBootEntryNamesAnAttachedDisk(t *testing.T) {
 	d := buildDocument(testSpec())
 
@@ -93,9 +93,8 @@ func keys(m map[string]scsiController) []string {
 
 func contains(haystack, needle string) bool { return strings.Contains(haystack, needle) }
 
-// A VM with no --network has no NetworkAdapters key at all. An empty map would be a different
-// document: the section is omitempty precisely so a VM without networking is byte-identical to
-// what booted before #43.
+// A VM with no --network has no NetworkAdapters key at all; the section is omitempty. An empty
+// map would be a different document.
 func TestNoNetworkAdapterWithoutAnEndpoint(t *testing.T) {
 	d := buildDocument(testSpec())
 	if d.VirtualMachine.Devices.NetworkAdapters != nil {

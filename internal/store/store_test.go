@@ -21,7 +21,7 @@ func validRecord(ref string) Record {
 	return Record{Ref: ref, OSVersion: "10.0.20348.5386", LayerDigests: []string{d}, DiffIDs: []string{d}}
 }
 
-// The defect: "a/b:c" and "a_b:c" sanitized to the same filename and overwrote each other.
+// "a/b:c" and "a_b:c" sanitize to the same filename; their records must not collide.
 func TestRecordKeysCannotCollide(t *testing.T) {
 	s := testStore(t)
 	ref1, ref2 := "a/b:c", "a_b:c"
@@ -51,7 +51,7 @@ func TestLegacyRecordReadsAndMigrates(t *testing.T) {
 	if err := s.WriteRecord(ref, validRecord(ref)); err != nil {
 		t.Fatal(err)
 	}
-	// Demote it to the legacy key, as a pre-#22 store would have it.
+	// Demote it to the legacy key.
 	if err := os.Rename(s.RecordPath(ref), s.legacyRecordPath(ref)); err != nil {
 		t.Fatal(err)
 	}

@@ -1,16 +1,15 @@
-# Builds the artifact a consumer acquires. Tag-driven: pushing v* is the whole release
-# ceremony, and nothing else publishes.
+# Builds the artifact a consumer acquires. Tag-driven: pushing v* publishes, and nothing else
+# does.
 #
-# This does NOT prove the release works. Hosted runners have no Hyper-V, so the same caveat as
-# contract.yml applies -- a green tick here means "built, stamped and published". What "works"
-# means is the elevated smoke transcript on a real host (#38).
+# This does not prove the release works. Hosted runners have no Hyper-V, so the same caveat as
+# contract.yml applies -- a green tick here means "built, stamped and published". "Works" is
+# the elevated smoke transcript on a real host.
 name: release
 
 on:
   push:
     tags: ['v*']
-  # Manual runs build and check the artifact without publishing, which is how to test a change
-  # to this file without burning a version number.
+  # Manual runs build and check the artifact without publishing.
   workflow_dispatch:
 
 permissions:
@@ -26,14 +25,12 @@ jobs:
         with:
           go-version-file: go.mod
 
-      # The same gates contract.yml applies. A tag that cannot pass them should not become a
-      # release: the artifact is what a consumer pins, and an unpinnable-because-broken version
-      # is worse than a missing one.
+      # The same gates contract.yml applies. A tag that cannot pass them does not become a
+      # release.
       - run: go vet ./...
       - run: go test ./...
 
-      # CGO_ENABLED=0 keeps it a single file with no runtime dependency, which is the whole
-      # premise of "a consumer drops one exe somewhere and runs it".
+      # CGO_ENABLED=0 keeps it a single file with no runtime dependency.
       - name: Build
         env:
           CGO_ENABLED: '0'
@@ -47,9 +44,8 @@ jobs:
           go build -ldflags "-X github.com/joshmakestuff/hcsctl/internal/cli.ToolVersion=$version" -o hcsctl.exe .
         id: build
 
-      # The stamp is checked, not assumed. A wrong -X path is silently ignored by the Go linker:
-      # the build succeeds, the binary reports "dev", and the release looks fine until someone
-      # tries to identify which build they have -- which is the one thing #29 exists for.
+      # The stamp is checked. A wrong -X path is silently ignored by the Go linker: the build
+      # succeeds and the binary reports "dev".
       - name: Verify the version stamp took
         run: |
           $reported = (./hcsctl.exe version --json | ConvertFrom-Json).toolVersion
@@ -72,9 +68,8 @@ jobs:
           $env:GOOS = 'linux'; $env:GOARCH = 'amd64'
           go build -trimpath -buildvcs=false -ldflags "-X main.Version=$version -X main.Commit=$commit" -o hcsguest-linux-amd64 ./cmd/hcsguest
 
-      # Same assertion as hcsctl: the stamp is checked, not assumed. The Linux binary cannot run
-      # on this runner, but it is built with the identical -ldflags string, so the Windows check
-      # covers both.
+      # Same check as hcsctl. The Linux binary cannot run on this runner, but it is built with
+      # the identical -ldflags string, so the Windows check covers both.
       - name: Verify the guest stamp took
         run: |
           $reported = (./hcsguest-windows-amd64.exe version)
@@ -106,13 +101,11 @@ jobs:
             hcsguest-windows-amd64.exe
             hcsguest-linux-amd64
             SHA256SUMS
-          # Everything before 1.0 is a preview by definition; saying so in the release keeps a
-          # consumer from reading a version number as a stability promise.
+          # Everything before 1.0 is a preview.
           prerelease: ${{ startsWith(github.ref_name, 'v0.') }}
           generate_release_notes: true
 
-      # A dispatch run produces no release, so the artifact is attached to the run instead --
-      # otherwise there is no way to check a change to this file without tagging.
+      # A dispatch run produces no release, so the artifact is attached to the run instead.
       - name: Attach the artifact to the run instead
         if: github.ref_type != 'tag'
         uses: actions/upload-artifact@v4

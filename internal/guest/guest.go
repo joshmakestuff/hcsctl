@@ -1,11 +1,11 @@
 //go:build windows
 
-// Package guest is the host half of the hcsguest protocol (#40): it dials a guest VM's agent
-// over a Hyper-V socket and reports what the guest says about itself.
+// Package guest is the host half of the hcsguest protocol: it dials a guest VM's agent over
+// a Hyper-V socket and reports what the guest says about itself.
 //
 // It needs no network adapter on the guest, no DHCP lease, no firewall rule and no elevation
-// on the host. Measured in #37: an unelevated member of Hyper-V Administrators reached a
-// guest listener in 2 ms with a service GUID registered nowhere.
+// on the host: an unelevated member of Hyper-V Administrators reaches a guest listener with
+// a service GUID registered nowhere.
 package guest
 
 import (
@@ -43,10 +43,9 @@ type infoResult struct {
 	Command string `json:"command"`
 	VMID    string `json:"vmId"`
 	// Reachable separates "the guest answered" from "the guest is running": a stopped VM and
-	// a booting one fail differently, and both are useful answers rather than errors.
+	// a booting one fail differently.
 	Reachable bool `json:"reachable"`
-	// State is the reading of that failure: absent, unreachable, or ready. See #37 -- the
-	// errnos discriminate, so this is measured rather than guessed.
+	// State is the reading of that failure: absent, unreachable, or ready.
 	State     string           `json:"state"`
 	Detail    string           `json:"detail,omitempty"`
 	ElapsedMS int64            `json:"elapsedMs"`
@@ -90,9 +89,8 @@ func info(a *cli.Args, e cli.Emit) (int, error) {
 		Guest:     doc,
 	}
 	if derr != nil {
-		// Not reachable is a result, not a crash: a caller polling for readiness wants the
-		// document either way. The exit code still says the command did not achieve its
-		// purpose.
+		// Not reachable is a result, not a crash: a caller polling for readiness gets the
+		// document either way. The exit code still reports failure.
 		e.Result(res, func() {
 			fmt.Printf("guest %s: %s\n", vmid, state)
 			if detail != "" {
@@ -125,12 +123,10 @@ func ReadInfo(vmid guid.GUID, timeout time.Duration) (*guestproto.Info, error) {
 
 // dialAny reaches the agent without being told which OS the guest runs. A Windows guest
 // binds a service GUID; a Linux guest binds an AF_VSOCK port, which the host addresses
-// through the VSOCK template GUID. They are two spellings of one rendezvous and the caller
-// should not have to know which.
+// through the VSOCK template GUID. They are two spellings of one rendezvous.
 //
-// Concurrently, not in sequence. A dial that fails because the guest is up and the agent is
-// not takes 30 s (#37), so trying one after the other would cost a minute to learn nothing.
-// A success takes about 3 ms, so racing them is free.
+// Concurrently: a dial against a guest that is up without an agent takes 30 s, so dialling
+// in sequence would cost a minute.
 func dialAny(vmid guid.GUID, timeout time.Duration) (*guestproto.Info, string, string, error) {
 	svc, err := guid.FromString(guestproto.ServiceID)
 	if err != nil {
@@ -152,8 +148,8 @@ func dialAny(vmid guid.GUID, timeout time.Duration) (*guestproto.Info, string, s
 		}(c)
 	}
 
-	// First success wins. If none succeeds, report the last failure -- they are the same
-	// errno in every case that matters, because both dials meet the same guest.
+	// First success wins. If none succeeds, report the last failure; both dials meet the
+	// same guest and fail with the same errno.
 	var last attempt
 	for range candidates {
 		a := <-results
@@ -165,9 +161,8 @@ func dialAny(vmid guid.GUID, timeout time.Duration) (*guestproto.Info, string, s
 	return nil, last.state, last.detail, last.err
 }
 
-// dial returns the guest document, or a state naming why not. The three states come from the
-// errnos measured in #37: the failure mode of a Hyper-V socket connect is informative, which
-// is what makes this usable as a readiness probe.
+// dial returns the guest document, or a state naming why not. The connect errno of a Hyper-V
+// socket discriminates the failure modes; see classify.
 func dial(vmid, svc guid.GUID, timeout time.Duration) (*guestproto.Info, string, string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
@@ -207,7 +202,7 @@ func dial(vmid, svc guid.GUID, timeout time.Duration) (*guestproto.Info, string,
 }
 
 // classify turns the connect errno into the distinction that matters to a caller waiting for
-// a guest. Measured 2026-08-08, host to guest:
+// a guest. Measured, host to guest:
 //
 //	10049 WSAEADDRNOTAVAIL  no such VM, or the VM is not running   (~1 ms)
 //	10060 WSAETIMEDOUT      the guest is up, the agent is not      (~30 s)

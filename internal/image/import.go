@@ -84,9 +84,8 @@ func importImage(a *cli.Args, e cli.Emit) (int, error) {
 
 		// Extract + ProcessBaseLayer + ProcessUtilityVMImage, in one call. parents are the
 		// already-materialized layers below this one, TOPMOST FIRST -- hcsshim's doc says
-		// "lowest to highest" but its own callers pass topmost-first, and the six-layer
-		// dotnet/runtime import and mount in issue #2 settled it: topmost-first materializes
-		// and mounts correctly.
+		// "lowest to highest" but its own callers pass topmost-first, and topmost-first
+		// materializes and mounts correctly (measured on a six-layer chain).
 		n, err := ociwclayer.ImportLayerFromTar(ctx, gz, entry, chain)
 		gz.Close()
 		f.Close()

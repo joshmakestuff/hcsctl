@@ -1,7 +1,7 @@
-# Elevated real-host proof for create-time HCN NAT port publishing (#64). The mapping is put in
-# the endpoint's original create document, then a long-running guest HTTP listener proves that
-# host loopback reaches the container. This is deliberately separate from Run-Smoke.ps1: it is
-# a focused lifecycle gate and can be rerun with any compatible Windows container image.
+# Elevated real-host proof for create-time HCN NAT port publishing. The mapping is put in the
+# endpoint's original create document, then a long-running guest HTTP listener proves that
+# host loopback reaches the container. It is a focused lifecycle gate, separate from
+# Run-Smoke.ps1, and can be rerun with any compatible Windows container image.
 #
 #   tools\Run-ContainerPortPublishSmoke.ps1 -Store <existing-store> -SkipAcquire
 #   tools\Run-ContainerPortPublishSmoke.ps1 -Ref mcr.microsoft.com/windows/servercore:ltsc2025
@@ -80,7 +80,7 @@ try {
         Assert 'image import exits 0' ($LASTEXITCODE -eq 0)
     }
 
-    # This listener deliberately binds 0.0.0.0 and responds with a distinctive body. The
+    # This listener binds 0.0.0.0 and responds with a distinctive body. The
     # primary stays alive until cleanup so a successful host request is real dataplane evidence.
     $listenerScript = @'
 $l = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Any, 8082)

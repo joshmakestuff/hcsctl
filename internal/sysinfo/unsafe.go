@@ -4,6 +4,5 @@ package sysinfo
 
 import "unsafe"
 
-// unsafePointer keeps the one unsafe conversion this package needs in a file of its own, so
-// the rest reads as ordinary Go.
+// unsafePointer is the one unsafe conversion this package needs.
 func unsafePointer(b *byte) unsafe.Pointer { return unsafe.Pointer(b) }

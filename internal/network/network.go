@@ -3,15 +3,13 @@
 // Package network is the `hcsctl network` verb group over the Host Compute Network (HCN)
 // object surface: ls, endpoints, inspect, create, rm.
 //
-// Reads are unelevated. Measured 2026-08-05 against HNS schema 16.0: listing networks,
-// endpoints and namespaces all work from a filtered token. `hcn.GetGlobals` is the one call
-// that needs elevation, which is why it is reported as optional detail rather than as the
-// header it looks like it should be.
+// Reads are unelevated. Measured against HNS schema 16.0: listing networks, endpoints and
+// namespaces all work from a filtered token. `hcn.GetGlobals` is the one call that needs
+// elevation, so it is reported as optional detail.
 //
 // Writes are explicit commands, never side effects. Windows permits one NAT network per host;
-// hosts that run Docker already have it, and a second one plausibly breaks Docker and WSL.
-// The NAT create/attach lifecycle is measured on a disposable host under issue #15 — do not
-// exercise `create --type nat` on a development host that runs Docker or WSL.
+// hosts that run Docker already have it, and a second one can break Docker and WSL. Do not
+// run `create --type nat` on a development host that runs Docker or WSL.
 package network
 
 import (
@@ -49,8 +47,7 @@ type networkRow struct {
 	Name    string   `json:"name"`
 	Type    string   `json:"type"`
 	Subnets []string `json:"subnets"`
-	// Endpoints is a count rather than a list: `network ls` is the overview, and `network
-	// endpoints` is where you go when the count is surprising.
+	// Endpoints is a count; `network endpoints` lists them.
 	Endpoints int `json:"endpoints"`
 }
 
@@ -63,8 +60,7 @@ func list(a *cli.Args, e cli.Emit) (int, error) {
 		return cli.Failed, fmt.Errorf("ListNetworks: %w", err)
 	}
 
-	// One enumeration of every endpoint, bucketed by network, rather than a per-network query.
-	// ListEndpointsOfNetwork would be N round trips to say the same thing.
+	// One enumeration of every endpoint, bucketed by network.
 	perNetwork := map[string]int{}
 	eps, epErr := hcn.ListEndpoints()
 	if epErr != nil {

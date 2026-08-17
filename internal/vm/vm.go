@@ -1,15 +1,14 @@
 //go:build windows
 
 // Package vm creates and drives full Hyper-V virtual machines -- not utility VMs hosting a
-// container, but a VM booting a VHDX of its own (#34).
+// container, but a VM booting a VHDX of its own.
 //
-// Unelevated. Membership of Hyper-V Administrators is sufficient, which is the same posture
-// the container path and the guest agent already have.
+// Unelevated. Membership of Hyper-V Administrators is sufficient, the same posture as the
+// container path and the guest agent.
 //
 // A VM's id is a GUID because the id is also its hvsocket address: `vm create` prints an id
-// that `guest info --vmid` takes unchanged. That is the loop this package closes -- hc-images
-// builds a VHDX with the agent in it, this boots it, and the guest answers over a Hyper-V
-// socket with no network adapter attached at all.
+// that `guest info --vmid` takes unchanged. A VHDX with the agent installed boots here, and the
+// guest answers over a Hyper-V socket with no network adapter attached.
 package vm
 
 import (
@@ -88,11 +87,11 @@ type state struct {
 	MacAddress  string   `json:"macAddress,omitempty"`
 	DNS         []string `json:"dns,omitempty"`
 
-	// Labels are stored and reported, never interpreted (#31, #44). Ownership and run identity
-	// are the consumer's policy: hcsctl has no scavenger and no opinion about what "dead"
-	// means, because it is a CLI that exits -- a stopped VM has no owning process to check.
-	// What it provides instead are the facts a consumer joins: a label here, the vm id in the
-	// endpoint's name, and `vm ls --all` for what HCS says is running.
+	// Labels are stored and reported, never interpreted. Ownership and run identity are the
+	// consumer's policy: hcsctl has no scavenger and no opinion about what "dead" means -- a
+	// stopped VM has no owning process to check. It provides the facts a consumer joins: a
+	// label here, the vm id in the endpoint's name, and `vm ls --all` for what HCS says is
+	// running.
 	Labels map[string]string `json:"labels,omitempty"`
 }
 
@@ -135,9 +134,9 @@ func readState(s *store.Store, id string) (state, error) {
 }
 
 func writeState(s *store.Store, st state) error {
-	// Failpoint (#48): a state-write failure happens only after vm create has acquired a
-	// differencing disk, VHDX grants, and a compute system. This makes that rollback
-	// observable in the local smoke test without manufacturing an HCS failure.
+	// Failpoint: a state-write failure happens only after vm create has acquired a
+	// differencing disk, VHDX grants, and a compute system. This env var makes that rollback
+	// observable in the local smoke test without an HCS failure.
 	if os.Getenv("HCSCTL_TEST_FAIL_WRITESTATE") != "" {
 		return fmt.Errorf("injected failure: HCSCTL_TEST_FAIL_WRITESTATE is set")
 	}
@@ -183,8 +182,8 @@ type createResult struct {
 	EndpointID string   `json:"endpointId,omitempty"`
 	MacAddress string   `json:"macAddress,omitempty"`
 	DNS        []string `json:"dns,omitempty"`
-	// Addresses is empty until the endpoint has one, and that is a real answer rather than a
-	// missing one -- a caller polls `vm inspect` for it. See addressesOf and #43.
+	// Addresses is empty until the endpoint has one; a caller polls `vm inspect` for it. See
+	// addressesOf.
 	Addresses []string `json:"addresses"`
 }
 
@@ -298,9 +297,9 @@ func create(a *cli.Args, e cli.Emit) (int, error) {
 		return cli.Failed, err
 	}
 
-	// Every VM gets a COM port. It costs nothing to boot -- measured: a guest whose pipe
-	// nobody reads boots in the same time as one with no COM port at all -- and it is the
-	// only way into a guest whose agent is the broken thing.
+	// Every VM gets a COM port. It costs nothing to boot: a guest whose pipe nobody reads
+	// boots in the same time as one with no COM port at all. It is the only way into a guest
+	// whose agent is broken.
 	pipe := a.Option("--serial-pipe")
 	if pipe == "" {
 		pipe = consolePipe(id)
@@ -366,14 +365,13 @@ func create(a *cli.Args, e cli.Emit) (int, error) {
 		return cli.Failed, err
 	}
 	// Closing the handle does not stop the VM: the document sets
-	// ShouldTerminateOnLastHandleClosed false precisely so it survives this process exiting.
+	// ShouldTerminateOnLastHandleClosed false so it survives this process exiting.
 	sys.Close()
 	sys = nil
 
-	// Read the endpoint now that it is attached to a NIC but before anything has started. This
-	// is the measurement #43 is waiting on: an address here means HNS fills one in at attach
-	// time and no wait verb is needed; nothing here means it comes from the guest's own DHCP
-	// client and a caller has to wait for it.
+	// Read the endpoint now that it is attached to a NIC but before anything has started. HNS
+	// fills in no address at attach time; the address comes from the guest's own DHCP client
+	// and a caller has to wait for it (see ip).
 	var addrs []string
 	if record.EndpointID != "" {
 		var aerr error
@@ -433,9 +431,7 @@ func childrenOf(s *store.Store, base, exceptID string) ([]string, error) {
 		}
 		record, rerr := readState(s, entry.Name())
 		if rerr != nil {
-			// An unreadable record cannot be shown to be safe, so it counts as a child. The
-			// alternative is skipping it, which turns a corrupt file into permission to
-			// destroy a disk.
+			// An unreadable record cannot be shown to be safe, so it counts as a child.
 			out = append(out, entry.Name()+" (unreadable record)")
 			continue
 		}
@@ -618,8 +614,8 @@ func stop(a *cli.Args, e cli.Emit) (int, error) {
 
 	sys, err := vmcompute.Open(id)
 	if vmcompute.IsNotFound(err) {
-		// Already stopped. Reporting success is right: stop asks for a state, and the VM is
-		// in it. An error here would make a teardown script fail on its second run.
+		// Already stopped: stop asks for a state, and the VM is in it. Success, so a teardown
+		// script can run twice.
 		e.Result(stopResult{OK: true, Command: "vm stop", ID: id, Method: "already stopped"}, func() {
 			fmt.Printf("%s is already stopped\n", id)
 		})
@@ -703,11 +699,10 @@ func remove(a *cli.Args, e cli.Emit) (int, error) {
 
 	// Every grant create made comes back off. An ACE naming a VM that no longer exists is not
 	// a security problem, but nothing else ever removes one, so a base image that has backed a
-	// hundred VMs would carry a hundred dead "NT VIRTUAL MACHINE\<guid>" entries. Measured that
-	// way before this existed.
+	// hundred VMs would carry a hundred dead "NT VIRTUAL MACHINE\<guid>" entries.
 	//
 	// Failures are warnings, not errors: the ACE is inert, and refusing to remove the VM over one
-	// would leave a compute system behind to fix a cosmetic problem.
+	// would leave a compute system behind.
 	if staterr == nil {
 		for _, p := range grantPaths(record.DiskPath, record.BaseVHDX, record.CopyOnWrite) {
 			if rerr := vmcompute.RevokeVmAccess(id, p); rerr != nil {
@@ -779,15 +774,12 @@ const ipPollInterval = 2 * time.Second
 
 // ip waits for the address the guest leases.
 //
-// This verb exists because of a measurement, not a guess: an endpoint carries no address when it
-// is created, none when it is attached to a NIC, and none while the compute system runs without
-// a guest OS in it (#43, 2026-08-09). The address can only come from the guest's own DHCP
-// client, so a consumer that wants one has to wait, and doing that by polling `vm inspect` in a
-// shell loop is worse than doing it here.
+// An endpoint carries no address when it is created, none when it is attached to a NIC, and
+// none while the compute system runs without a guest OS in it. The address can only come from
+// the guest's own DHCP client, so a consumer that wants one has to wait.
 //
-// It waits, deliberately, rather than answering once. `vm start` returning means the firmware is
-// running -- the guest has not booted, let alone leased -- so a single-shot read would answer
-// "none" for every caller who did the obvious thing.
+// It waits rather than answering once. `vm start` returning means the firmware is running --
+// the guest has not booted, let alone leased -- so a single-shot read would answer "none".
 func ip(a *cli.Args, e cli.Emit) (int, error) {
 	if err := a.RejectUnknown("--id", "--timeout", "--store"); err != nil {
 		return cli.Usage, err
@@ -842,8 +834,8 @@ func ip(a *cli.Args, e cli.Emit) (int, error) {
 			}
 		}
 		if time.Now().After(deadline) {
-			// Named as the guest's failure, because that is what it is: the endpoint is fine
-			// and HNS is fine, and nothing on the host can produce an address on its own.
+			// Named as the guest's failure: the endpoint and HNS are fine, and nothing on the
+			// host can produce an address on its own.
 			return cli.Failed, fmt.Errorf(
 				"vm %s has no address after %s -- the guest has not taken a DHCP lease. Check that "+
 					"it booted (hcsctl vm console --id %s) and that its NIC is configured for DHCP",
@@ -869,9 +861,8 @@ type listEntry struct {
 // systemEntry is a compute system on the host, whether or not this store made it. Passed
 // through from HcsEnumerateComputeSystems rather than reshaped.
 //
-// This is half of what a consumer needs to judge a leftover (#44): an endpoint whose name
-// carries a vm id, and no running system with that id, is a candidate. hcsctl deliberately does
-// not draw the conclusion -- see the note on state.Labels.
+// An endpoint whose name carries a vm id, and no running system with that id, is a leftover
+// candidate. hcsctl does not draw the conclusion -- see the note on state.Labels.
 type systemEntry struct {
 	ID         string `json:"id"`
 	SystemType string `json:"systemType,omitempty"`
@@ -950,16 +941,12 @@ func list(a *cli.Args, e cli.Emit) (int, error) {
 	return cli.OK, nil
 }
 
-// hcsState asks HCS what it thinks, so ls reports the live state rather than what this tool
-// last wrote. "stopped" is a store-side reading, not an HCS one: HCS has no stopped state,
-// it destroys the compute system when it exits, so what is measured is its absence.
 // hostSystems asks HCS what compute systems exist, host-wide. The Owner is whatever each
 // system's own document set -- hcsctl's VMs say "hcsctl", WSL's say "WSL" -- so this is also how
 // a consumer tells its own leftovers from another tool's.
 //
 // A system that has exited is simply absent: HCS destroys it rather than keeping a stopped
-// state. Absence is therefore the signal, and it is why this cannot be read as "everything that
-// was ever created".
+// state, so this cannot be read as "everything that was ever created".
 func hostSystems() ([]systemEntry, error) {
 	doc, err := vmcompute.Enumerate("")
 	if err != nil {
@@ -980,6 +967,9 @@ func orDash(s string) string {
 	return s
 }
 
+// hcsState asks HCS for the live state, so ls reports that rather than what this tool last
+// wrote. "stopped" is a store-side reading, not an HCS one: HCS has no stopped state, it
+// destroys the compute system when it exits, so what is measured is its absence.
 func hcsState(id string) string {
 	sys, err := vmcompute.Open(id)
 	if vmcompute.IsNotFound(err) {
@@ -1001,8 +991,8 @@ func hcsState(id string) string {
 	}
 	if p.State == "" {
 		// HCS omits State entirely for a compute system that exists but has never been started.
-		// Reporting "unknown" there is wrong: the system is right in front of us, and a consumer
-		// deciding whether a VM is abandoned needs "created" and "cannot tell" kept apart.
+		// A consumer deciding whether a VM is abandoned needs "created" and "cannot tell" kept
+		// apart.
 		return "created"
 	}
 	return strings.ToLower(p.State)

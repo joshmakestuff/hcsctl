@@ -7,8 +7,8 @@ import (
 	"testing"
 )
 
-// acceptedOptions is the recorded inventory of every verb's accepted options (issue #70),
-// mirroring each package's RejectUnknown arguments and the container createOptions slice. A
+// acceptedOptions is the recorded inventory of every verb's accepted options, mirroring
+// each package's RejectUnknown arguments and the container createOptions slice. A
 // verb's help synopsis must name every one of its options; this test fails when executable
 // help drifts from the parser.
 var acceptedOptions = map[string][]string{

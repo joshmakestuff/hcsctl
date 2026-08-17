@@ -20,9 +20,8 @@ import (
 	"golang.org/x/sys/windows/svc"
 )
 
-// listen binds the agent's service on the wildcard VM ID. Wildcard rather than parent so the
-// same binary works if the agent is ever reached from somewhere other than the immediate
-// parent partition; the host arrives as HV_GUID_PARENT either way (#37).
+// listen binds the agent's service on the wildcard VM ID, so any partition can reach it. The
+// host arrives as HV_GUID_PARENT.
 func listen() (net.Listener, error) {
 	svc, err := guid.FromString(guestproto.ServiceID)
 	if err != nil {
@@ -34,21 +33,17 @@ func listen() (net.Listener, error) {
 	})
 }
 
-// defaultInterface is what an empty NetConfig.Interface means on Windows: nothing named --
+// defaultInterface is what an empty NetConfig.Interface means on Windows: nothing named;
 // applyNetConfig selects the single connected adapter instead. Windows has no stable eth0
-// analogue; the synthetic NIC's name ("Ethernet 2" on the current image) is an enumeration
-// accident, not a contract.
+// analogue.
 func defaultInterface() string { return "" }
 
-// applyNetConfig programs the adapter through netsh, the measured Windows mechanism
-// (2026-08-11): a static address set this way holds address and dataplane
-// through the whole observation window, because manual assignment itself moves the interface
-// off DHCP -- there is no NetworkManager-analogue teardown to defend against.
+// applyNetConfig programs the adapter through netsh. Manual assignment moves the interface
+// off DHCP, so the static address holds.
 //
-// The same measurement caught the dataplane failing right after apply and recovering within
-// the next minute: the address exists but is still in duplicate address detection. So this
-// waits for the applied addresses to reach Preferred before attesting -- the host must never
-// be handed an allocation the guest cannot yet use.
+// Right after apply the address exists but is still in duplicate address detection and the
+// dataplane does not work yet. This waits for the applied addresses to reach Preferred
+// before it reports success.
 func applyNetConfig(nc *guestproto.NetConfig) (guestproto.NetConfigResult, error) {
 	if err := validateNetConfig(nc); err != nil {
 		return guestproto.NetConfigResult{}, err
@@ -75,8 +70,7 @@ func applyNetConfig(nc *guestproto.NetConfig) (guestproto.NetConfigResult, error
 }
 
 // resolveAdapter picks the adapter to program. A name selects it directly. An empty name
-// selects the single up, non-loopback adapter; a guest with several is refused rather than
-// guessed at.
+// selects the single up, non-loopback adapter; a guest with several is refused.
 func resolveAdapter(name string) (net.Interface, error) {
 	if name != "" {
 		i, err := net.InterfaceByName(name)
@@ -109,7 +103,7 @@ func resolveAdapter(name string) (net.Interface, error) {
 
 // waitPreferred blocks until every applied address passes duplicate address detection, polls
 // every 500ms until the timeout. A Duplicate verdict fails immediately: another host holds
-// the address, and reporting success would attest a dataplane that cannot work.
+// the address.
 func waitPreferred(ifIndex uint32, cidrs []string, timeout time.Duration) error {
 	want := []netip.Addr{}
 	for _, c := range cidrs {
@@ -185,9 +179,9 @@ func gatherInfo() (guestproto.Info, error) {
 	}
 
 	v := windows.RtlGetVersion()
-	// GetTickCount64 is milliseconds since boot. It is the cheapest source that does not
-	// depend on the guest's clock being correct, which matters because a freshly booted
-	// guest may not have synchronised time yet. x/sys/windows does not wrap it.
+	// GetTickCount64 is milliseconds since boot and does not depend on the guest's clock,
+	// which a freshly booted guest may not have synchronised yet. x/sys/windows does not
+	// wrap it.
 	uptime := time.Duration(tickCount64()) * time.Millisecond
 
 	return guestproto.Info{
@@ -208,7 +202,6 @@ func gatherInfo() (guestproto.Info, error) {
 const ServiceName = "hcsguest"
 
 // shellFor runs an exec command line through cmd.exe, matching `hcsctl container exec --cmd`.
-// A caller who needs an exact argv would need a different request shape; nothing does yet.
 func shellFor(command string) (string, []string) {
 	return "cmd.exe", []string{"/c", command}
 }
@@ -219,29 +212,25 @@ func setProcessGroup(*exec.Cmd) {}
 
 // killTree ends the command AND its children.
 //
-// Killing only the process kills the shell and orphans what it started. Measured: a 5 s
-// timeout on `cmd /c ping -n 30 127.0.0.1` took 29.5 s to report, because the orphaned
-// PING.EXE inherited the stdout handle and the pipe did not close until it finished on its
-// own. The same behaviour is already recorded for the container path.
+// Killing only the process kills the shell and orphans what it started; an orphaned child
+// (`cmd /c ping ...` leaves PING.EXE) holds the stdout pipe open until it exits on its own.
 //
-// taskkill /T rather than a job object: assigning a job after Start races the shell spawning
-// its child, and os/exec gives no hook between create and resume to close that race.
+// taskkill /T, not a job object: os/exec gives no hook between process create and resume, so
+// a job assigned after Start races the shell spawning its child.
 func killTree(cmd *exec.Cmd) {
 	if cmd.Process == nil {
 		return
 	}
 	_ = exec.Command("taskkill.exe", "/T", "/F", "/PID", strconv.Itoa(cmd.Process.Pid)).Run()
-	// Also kill the process directly. If taskkill is absent, the command still stops, and a
-	// partly killed tree is better than a command that never returns.
+	// Also kill the process directly, in case taskkill is absent.
 	_ = cmd.Process.Kill()
 }
 
 // runUnderServiceManager runs the accept loop as a Windows service when Windows started us as
 // one, and reports handled=false when it did not, so the same binary still runs in a console.
 //
-// This is not optional plumbing. A plain executable registered with sc.exe never answers the
-// service control manager and fails to start with error 1053, "did not respond to the start
-// request in a timely fashion".
+// A plain executable registered with sc.exe never answers the service control manager and
+// fails to start with error 1053, "did not respond to the start request in a timely fashion".
 func runUnderServiceManager(loop func(stop <-chan struct{}) error) (bool, error) {
 	isService, err := svc.IsWindowsService()
 	if err != nil || !isService {
@@ -268,7 +257,7 @@ func (h *handler) Execute(_ []string, r <-chan svc.ChangeRequest, s chan<- svc.S
 		select {
 		case err := <-done:
 			// The loop only returns on a listen failure. Exiting non-zero lets the service
-			// recovery actions restart us, which is what keeps a guest reachable.
+			// recovery actions restart the agent.
 			s <- svc.Status{State: svc.StopPending}
 			if err != nil {
 				return false, 1

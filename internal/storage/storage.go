@@ -3,19 +3,17 @@
 // Package storage is the `hcsctl storage` verb group: the computestorage layer surface --
 // VHD-backed writable layers presented through the container storage filter (wcifs).
 //
-// This is a different layer *format* from the wclayer directory layers the other verb groups
-// use, not a second route to the same place -- see issue #12 for the decision and #18 for the
-// surface. The verbs mirror the measured computestorage sequence:
+// This is a different layer format from the wclayer directory layers the other verb groups
+// use. The verbs mirror the computestorage sequence:
 //
 //	setup-base  create + format blank-base.vhdx -> SetupBaseOSLayer -> diff blank.vhdx
 //	mount       copy blank.vhdx -> sandbox.vhdx, attach, InitializeWritableLayer,
 //	            AttachLayerStorageFilter -> volume path with the merged view
 //	unmount     DetachLayerStorageFilter, detach the VHD
 //
-// Verbs take explicit directory paths rather than store refs: SetupBaseOSLayer regenerates
-// Hives/ and Layout inside the layer directory it is given, and whether the regenerated
-// hives are equivalent to what wclayer import produced is not yet measured -- so these verbs
-// do not touch store layers until that is established.
+// Only mount accepts a store ref. SetupBaseOSLayer regenerates Hives/ and Layout inside the
+// layer directory it is given, and whether the regenerated hives are equivalent to what
+// wclayer import produced is not measured, so setup-base must not run on a store layer.
 //
 // ELEVATED: FormatWritableLayerVhd is denied from a filtered token even holding
 // SeManageVolumePrivilege (measured).
@@ -61,7 +59,7 @@ func Dispatch(a *cli.Args, e cli.Emit) (int, error) {
 }
 
 // layerDataFor builds the LayerData every computestorage call wants: parents topmost first,
-// absolute paths, schema 2.1. An empty parent list is a base layer and is fine.
+// absolute paths, schema 2.1. An empty parent list is a base layer.
 func layerDataFor(parents []string) (computestorage.LayerData, error) {
 	data := computestorage.LayerData{SchemaVersion: computestorage.Version{Major: 2, Minor: 1}}
 	for _, p := range parents {
@@ -84,8 +82,7 @@ func checkParents(a *cli.Args) ([]string, error) {
 	return parents, nil
 }
 
-// importLayer wraps HcsImportLayer: folder to folder, not a tar -- the tar half of the
-// round-trip question lives with image export (#13).
+// importLayer wraps HcsImportLayer: folder to folder, not a tar.
 func importLayer(a *cli.Args, e cli.Emit) (int, error) {
 	if err := a.RejectUnknown("--source", "--layer", "--parent"); err != nil {
 		return cli.Usage, err
@@ -107,9 +104,8 @@ func importLayer(a *cli.Args, e cli.Emit) (int, error) {
 		return cli.Failed, err
 	}
 
-	// Backup/restore semantics are the caller's job here: unlike ociwclayer, the raw
-	// computestorage syscalls do not enable privileges, and an elevated token holds
-	// SeBackup/SeRestore disabled.
+	// Unlike ociwclayer, the raw computestorage syscalls do not enable privileges, and an
+	// elevated token holds SeBackup/SeRestore disabled.
 	err = winio.RunWithPrivileges([]string{winio.SeBackupPrivilege, winio.SeRestorePrivilege}, func() error {
 		return computestorage.ImportLayer(context.Background(), dest, src, data)
 	})
@@ -132,8 +128,8 @@ func exportLayer(a *cli.Args, e cli.Emit) (int, error) {
 	if err != nil {
 		return cli.Usage, err
 	}
-	// Pre-existing by API contract, and worth enforcing before the call: HcsExportLayer's
-	// own error for a missing destination does not name the path.
+	// The destination must exist (API contract). HcsExportLayer's own error for a missing
+	// destination does not name the path.
 	dest, err := requireDir(a, "--dest")
 	if err != nil {
 		return cli.Usage, err
@@ -231,9 +227,8 @@ func setupBase(a *cli.Args, e cli.Emit) (int, error) {
 			return cli.Usage, cli.Usagef("--size-gb %v", err)
 		}
 	}
-	// The layer must look like a layer before SetupBaseOSLayer deletes anything from it: the
-	// verb mutates its input (regenerates Hives/ and Layout), and pointing it at an arbitrary
-	// directory should fail before the mutation, not after.
+	// SetupBaseOSLayer mutates its input (regenerates Hives/ and Layout); the layer check runs
+	// before the mutation.
 	if _, err := os.Stat(filepath.Join(layer, "Files")); err != nil {
 		return cli.Usage, cli.Usagef("--layer %s has no Files directory -- not a materialized layer", layer)
 	}
@@ -254,8 +249,8 @@ func setupBase(a *cli.Args, e cli.Emit) (int, error) {
 	return cli.OK, nil
 }
 
-// openScratch opens sandbox.vhdx in dir. Access/flags per the probe: AccessNone + no flags is
-// what both attach and mount-path retrieval want on V2 VHDX.
+// openScratch opens sandbox.vhdx in dir. AccessNone + no flags is what both attach and
+// mount-path retrieval want on V2 VHDX.
 func openScratch(dir string) (syscall.Handle, string, error) {
 	p := filepath.Join(dir, sandboxName)
 	if _, err := os.Stat(p); err != nil {
@@ -268,10 +263,8 @@ func openScratch(dir string) (syscall.Handle, string, error) {
 	return h, p, nil
 }
 
-// chainFor resolves a store reference to its materialized layer directories, topmost first --
-// the order LayerData wants. Same shape as the layer group's chainFor; duplicated because the
-// two groups check different things (this one wants blank.vhdx in the base, checked at the
-// call site, not Files/ everywhere).
+// chainFor resolves a store reference to its materialized layer directories, topmost first,
+// the order LayerData wants. The call site checks blank.vhdx in the base.
 func chainFor(st *store.Store, ref string) ([]string, error) {
 	rec, err := st.ReadRecord(ref)
 	if err != nil {
@@ -280,8 +273,7 @@ func chainFor(st *store.Store, ref string) ([]string, error) {
 		}
 		return nil, err
 	}
-	// Structural soundness (non-empty, matched arrays, digest syntax) is ReadRecord's
-	// guarantee -- one boundary, not a twin check here (#22).
+	// ReadRecord guarantees structural soundness (non-empty, matched arrays, digest syntax).
 	var chain []string // topmost first
 	for _, d := range rec.DiffIDs {
 		p := st.LayerPath(d)
@@ -304,8 +296,8 @@ func mount(a *cli.Args, e cli.Emit) (int, error) {
 	case ref != "" && a.Option("--base") != "":
 		return cli.Usage, cli.Usagef("--ref and --base are exclusive: a ref resolves the whole chain")
 	case ref != "":
-		// The finding that makes this safe: wclayer import already creates blank.vhdx in
-		// base layers, so a store layer mounts as-is -- nothing here mutates the store.
+		// wclayer import creates blank.vhdx in base layers, so a store layer mounts as-is;
+		// nothing here mutates the store.
 		st, err := store.New(a.Option("--store"))
 		if err != nil {
 			return cli.Failed, err
@@ -364,8 +356,8 @@ func mount(a *cli.Args, e cli.Emit) (int, error) {
 	}
 	defer syscall.CloseHandle(h)
 
-	// PermanentLifetime: the mount must outlive this process, same as layer mount's
-	// ActivateLayer does. Without it the volume vanishes when the handle closes.
+	// PermanentLifetime: the mount must outlive this process. Without it the volume vanishes
+	// when the handle closes.
 	ctx := context.Background()
 	if err := vhd.AttachVirtualDisk(h, vhd.AttachVirtualDiskFlagPermanentLifetime,
 		&vhd.AttachVirtualDiskParameters{Version: 2}); err != nil {
@@ -421,8 +413,8 @@ func unmount(a *cli.Args, e cli.Emit) (int, error) {
 	defer syscall.CloseHandle(h)
 	ctx := context.Background()
 
-	// Both steps are attempted regardless of earlier failures, same shape as container
-	// teardown: a half-unmounted scratch should lose as much as possible.
+	// Both steps are attempted regardless of earlier failures: a half-unmounted scratch
+	// should lose as much as possible.
 	var first error
 	if vol, err := computestorage.GetLayerVhdMountPath(ctx, windows.Handle(h)); err == nil {
 		if err := computestorage.DetachLayerStorageFilter(ctx, vol); err != nil {
@@ -466,7 +458,6 @@ func copyFile(src, dst string) error {
 	}
 	return d.Sync()
 }
-
 
 func exitFor(err error) int {
 	if _, ok := err.(*cli.UsageError); ok {

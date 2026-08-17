@@ -30,7 +30,7 @@ func TestMain(m *testing.M) {
 	}
 	bin = filepath.Join(dir, "hcsctl.exe")
 
-	// GOROOT rather than PATH: on the dev host Go is installed but not always on PATH.
+	// GOROOT, not PATH: Go may not be on PATH.
 	goBin := filepath.Join(runtime.GOROOT(), "bin", "go.exe")
 	if _, err := os.Stat(goBin); err != nil {
 		goBin = "go"
@@ -254,7 +254,7 @@ func TestUsageErrorAttemptsNothing(t *testing.T) {
 	}
 }
 
-// TestStreamJSONTypesStderr (#28): under --json --stream-json every non-empty stderr line is
+// TestStreamJSONTypesStderr: under --json --stream-json every non-empty stderr line is
 // an NDJSON object with a "stream" field; without the flag the same run writes bare text.
 // The fixture is a fake materialized store -- valid record, layer dirs with Files and a
 // UtilityVM -- so `container run` gets far enough to emit real progress before failing at
@@ -298,7 +298,7 @@ func TestStreamJSONTypesStderr(t *testing.T) {
 	}
 }
 
-// TestContainerLogs (#33) exercises every logs path that needs no HCS: the file and the
+// TestContainerLogs exercises every logs path that needs no HCS: the file and the
 // state are the whole interface, so a planted container directory covers them.
 func TestContainerLogs(t *testing.T) {
 	plant := func(t *testing.T, primary string) string {
@@ -373,7 +373,7 @@ func TestContainerLogs(t *testing.T) {
 }
 
 // Requested help and version are exit 0 with output on stdout -- unlike the usage text that
-// accompanies an error, which stays on stderr (#25).
+// accompanies an error, which stays on stderr.
 func TestHelpAndVersion(t *testing.T) {
 	for _, args := range [][]string{{"--help"}, {"-h"}, {"help"}} {
 		t.Run(strings.Join(args, ""), func(t *testing.T) {
@@ -419,9 +419,7 @@ func TestHelpAndVersion(t *testing.T) {
 // TestIDValidationIsWired plants a real target at the traversal destination and asserts the
 // command exits 64 with the target untouched. This discriminates wiring from mere existence of
 // the validator: the plain usageCases for bad ids would pass even without validation (they fall
-// into "no container named" / "no mount named", also 64). Before the fix, these two commands
-// found their traversal target -- the planted state parsed, the scratch stat succeeded -- and
-// proceeded toward destruction: container rm's os.RemoveAll would have deleted the store root.
+// into "no container named" / "no mount named", also 64).
 func TestIDValidationIsWired(t *testing.T) {
 	t.Run("container rm --id .. cannot reach planted state", func(t *testing.T) {
 		store := filepath.Join(t.TempDir(), "store")
@@ -460,8 +458,7 @@ func TestIDValidationIsWired(t *testing.T) {
 
 // TestNumericBoundsAreWired discriminates the bound from the fallthrough: each command would
 // exit 64 either way (the ref/container does not exist), so the assertion is on the error
-// text -- post-#21 it names the rejected option; pre-#21 it named the missing record, which
-// means the oversized value had parsed and execution had moved on.
+// text: it must name the rejected option, not the missing record.
 func TestNumericBoundsAreWired(t *testing.T) {
 	errorOf := func(t *testing.T, args ...string) string {
 		t.Helper()
@@ -574,8 +571,7 @@ func TestFailurePath(t *testing.T) {
 		oneDoc(t, r.stdout, false)
 	})
 	t.Run("semantically invalid record cannot panic (#22)", func(t *testing.T) {
-		// Valid JSON, mismatched arrays: pre-#22 import indexed LayerDigests[i] over DiffIDs
-		// and a record like this panicked instead of erroring.
+		// Valid JSON, mismatched arrays: import must error, not panic, on a record like this.
 		store := filepath.Join(t.TempDir(), "store")
 		images := filepath.Join(store, "images")
 		if err := os.MkdirAll(images, 0o755); err != nil {

@@ -1,6 +1,6 @@
 //go:build windows
 
-// Failure paths that isolate without HCS (#24). Everything here is filesystem and parsing;
+// Failure paths that isolate without HCS. Everything here is filesystem and parsing;
 // nothing opens a compute system. The smoke harness (tools/Run-Smoke.ps1) owns the rest.
 package container
 

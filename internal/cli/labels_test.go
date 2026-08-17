@@ -11,8 +11,7 @@ func parse(t *testing.T, argv ...string) *Args {
 	return a
 }
 
-// Labels are opaque. hcsctl stores what it is given, including an empty value, because a
-// consumer's ownership scheme is not this tool's business (#31, #44).
+// Labels are opaque. hcsctl stores what it is given, including an empty value.
 func TestLabelsAreStoredVerbatim(t *testing.T) {
 	a := parse(t, "--label", "owner-pid=8123", "--label", "empty=", "--label", "url=a=b=c")
 	got, err := ParseLabels(a, nil)
@@ -41,8 +40,8 @@ func TestNoLabelsIsNil(t *testing.T) {
 	}
 }
 
-// A label that shadows a state-document field would silently win when a consumer flattens the
-// document, so it is refused rather than accepted and hidden.
+// A label that shadows a state-document field would win when a consumer flattens the
+// document, so it is refused.
 func TestReservedKeyIsRefused(t *testing.T) {
 	_, err := ParseLabels(parse(t, "--label", "id=nope"), map[string]bool{"id": true})
 	if err == nil {

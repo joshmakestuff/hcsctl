@@ -10,10 +10,6 @@ import (
 )
 
 // createDifferencing makes a copy-on-write VHDX child of base at path. Unelevated.
-//
-// This is in step 1 rather than deferred, because without it `vm create --vhdx <image>` boots
-// and *mutates* the image the build produced. A golden image that one boot silently rewrites
-// is a worse default than a slightly larger step.
 func createDifferencing(base, path string) error {
 	// VIRTUAL_STORAGE_TYPE { DeviceId, VendorId GUID }
 	var storageType struct {

@@ -1,7 +1,7 @@
 //go:build windows
 
-// Package sysinfo answers "why did that fail" without a support round-trip: what build this
-// is, what the token actually holds, and which HCS features the host reports.
+// Package sysinfo reports the hcsctl build, what the process token holds, and which HCS
+// features the host reports.
 package sysinfo
 
 import (
@@ -34,9 +34,8 @@ type storeInfo struct {
 type info struct {
 	OK      bool   `json:"ok"`
 	Command string `json:"command"`
-	// ToolVersion and ContractVersion are hcsctl's own (#29); Version below is the host OS.
-	// The contract version is what a consumer's preflight checks; the tool version is for
-	// humans in a bug report.
+	// ToolVersion and ContractVersion are hcsctl's own; Version below is the host OS. A
+	// consumer's preflight checks the contract version; the tool version is for bug reports.
 	ToolVersion     string   `json:"toolVersion"`
 	ContractVersion string   `json:"contractVersion"`
 	Build           uint16   `json:"build"`
@@ -47,8 +46,8 @@ type info struct {
 	Privileges      []string `json:"privilegesHeld"`
 	CimFSSupported  bool     `json:"cimfsSupported"`
 	BlockCimSupport bool     `json:"blockCimSupported"`
-	// Services are reported as states, not distilled into a verdict: which one is absent or
-	// stopped is the answer to "why did that fail", and a boolean would hide it.
+	// Services are reported as individual states, so a consumer can see which one is absent
+	// or stopped.
 	Services map[string]string `json:"services"`
 	Store    storeInfo         `json:"store"`
 	Images   []imageCompat     `json:"images"`
@@ -60,8 +59,7 @@ type info struct {
 var servicesOfInterest = []string{"vmcompute", "vmms", "hvhost"}
 
 // privilegesOfInterest are the ones that decide whether a verb can work at all. Reported as
-// held or not; enabled-vs-disabled does not matter, because a held privilege can be enabled
-// and an absent one cannot.
+// held or not: a held privilege can be enabled, an absent one cannot.
 var privilegesOfInterest = []string{
 	"SeBackupPrivilege",
 	"SeRestorePrivilege",
@@ -138,8 +136,7 @@ func storeState(st *store.Store) storeInfo {
 }
 
 // imageCompats runs the process-isolation compatibility check for every record in the store.
-// An unparseable record version is reported as incompatible rather than skipped -- a blank
-// row would look like an empty store.
+// An unparseable record version is reported as incompatible, not skipped.
 func imageCompats(st *store.Store, host osversion.OSVersion) []imageCompat {
 	recs, err := st.Records()
 	if err != nil {
@@ -239,8 +236,7 @@ func isElevated() bool {
 }
 
 // inHyperVAdministrators answers for this process's token. Like Administrators, the group is
-// UAC-filtered, so unelevated membership can read false for a user who is in the group --
-// which is the truthful answer about what this process can do.
+// UAC-filtered, so an unelevated process reads false for a user who is in the group.
 func inHyperVAdministrators() bool {
 	// DOMAIN_ALIAS_RID_HYPER_V_ADMINS, 0x242 -- not defined in x/sys/windows.
 	return inBuiltinGroup(0x242)
@@ -278,8 +274,8 @@ func heldPrivileges() []string {
 		if err := windows.LookupPrivilegeValue(nil, n, &luid); err != nil {
 			continue
 		}
-		// PrivilegeCheck answers "does this token have it", which is what matters; the
-		// enabled/disabled state is adjustable and therefore not interesting here.
+		// PrivilegeCheck answers whether the token holds the privilege; the enabled/disabled
+		// state is adjustable and is not reported.
 		if hasPrivilege(token, luid) {
 			held = append(held, name)
 		}

@@ -18,9 +18,8 @@
 // HvRuntime.ImagePath = the UtilityVM directory of the uppermost layer that has one -- which for
 // a normal Windows image is the base layer.
 //
-// hcsshim's v1 CreateContainer is the route. internal/uvm is not importable, and the v2 path
-// (uvm.CreateWCOW then hcsoci.CreateContainer) lives entirely behind internal/, so v1 is not a
-// fallback here, it is the only public door.
+// hcsshim's v1 CreateContainer is the route: internal/uvm is not importable, and the v2 path
+// (uvm.CreateWCOW then hcsoci.CreateContainer) lives entirely behind internal/.
 //
 // ELEVATED.
 package container
@@ -49,8 +48,8 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// defaultCmd is chosen to prove the guest actually booted and is the OS we think it is, while
-// exiting on its own so `run` does not need a timeout to make progress.
+// defaultCmd proves the guest booted and is the expected OS, and exits on its own so `run`
+// needs no timeout to make progress.
 const defaultCmd = `cmd /c ver`
 
 // startTimeout bounds the container start. A cold xenon on a slow disk is tens of seconds; well
@@ -118,11 +117,11 @@ type state struct {
 	// ACLs records the create-time endpoint ACL policies supplied for this container. HCN owns
 	// their effective lifetime; this is the requested contract reported again by inspect.
 	ACLs []aclRule `json:"acls,omitempty"`
-	// Primary is the container's main workload (#33), recorded by `create --cmd` so a fresh
+	// Primary is the container's main workload, recorded by `create --cmd` so a fresh
 	// invocation can say what a running container is running, follow its retained output,
 	// and report its exit after the starting invocation is gone.
 	Primary *primaryState `json:"primary,omitempty"`
-	// Labels are stored and reported, never interpreted (#31): ownership and run identity
+	// Labels are stored and reported, never interpreted: ownership and run identity
 	// are the consumer's policy, and the consumer is the only place that knows whether a
 	// pid is alive. Scavenging by proof needs an owner recorded; this is where it lives.
 	Labels map[string]string `json:"labels,omitempty"`
@@ -160,10 +159,9 @@ func statePath(st *store.Store, id string) string {
 }
 
 func writeState(st *store.Store, s state) error {
-	// Failpoint (#19): the only way to reach a real state-write failure is after a real
-	// acquisition -- scratch, endpoint, compute system -- which no hosted runner can do. The
-	// env var makes the branch reachable from the elevated smoke path, so the cleanup below
-	// it is proven by a run rather than trusted on inspection.
+	// Failpoint: a real state-write failure is reachable only after a real acquisition --
+	// scratch, endpoint, compute system -- which no hosted runner can do. The env var makes
+	// the branch reachable from the elevated smoke path.
 	if os.Getenv("HCSCTL_TEST_FAIL_WRITESTATE") != "" {
 		return fmt.Errorf("injected failure: HCSCTL_TEST_FAIL_WRITESTATE is set")
 	}
@@ -220,7 +218,7 @@ func chainFor(st *store.Store, ref string) ([]string, error) {
 		return nil, err
 	}
 	// Structural soundness (non-empty, matched arrays, digest syntax) is ReadRecord's
-	// guarantee -- one boundary, not a twin check here (#22).
+	// guarantee; it is not checked again here.
 	var chain []string
 	for _, d := range rec.DiffIDs {
 		p := st.LayerPath(d)
@@ -232,9 +230,8 @@ func chainFor(st *store.Store, ref string) ([]string, error) {
 	return chain, nil
 }
 
-// locateUVM finds the uppermost layer carrying a UtilityVM directory. This mirrors what
-// hcsshim's internal uvmfolder.LocateUVMFolder does; it is six lines, and reimplementing it is
-// cheaper than needing internal/.
+// locateUVM finds the uppermost layer carrying a UtilityVM directory, as hcsshim's internal
+// uvmfolder.LocateUVMFolder does.
 func locateUVM(chain []string) (string, error) {
 	for _, l := range chain {
 		p := filepath.Join(l, "UtilityVM")
@@ -263,9 +260,8 @@ func layersFor(chain []string) ([]hcsshim.Layer, error) {
 
 // -- network endpoint --------------------------------------------------------------------
 
-// resolveNetwork accepts a name or an id, matching `network endpoints --network`. Reuse of an
-// existing network is the whole posture: creating one is risky (one NAT network per host, and
-// Docker usually owns it) and deliberately lives elsewhere -- see issue #15.
+// resolveNetwork accepts a name or an id, matching `network endpoints --network`. It reuses an
+// existing network; nothing here creates one.
 func resolveNetwork(want string) (*hcn.HostComputeNetwork, error) {
 	nets, err := hcn.ListNetworks()
 	if err != nil {
@@ -310,7 +306,7 @@ func createEndpoint(netw *hcn.HostComputeNetwork, name, isolation string, publis
 	}
 	// Port mappings take effect only when present in the endpoint's create document: HNS
 	// allocates the forwarding dataplane at create time. A policy added later with
-	// ApplyPolicy is accepted and reported but does not establish forwarding (measured).
+	// ApplyPolicy is accepted and reported but does not establish forwarding.
 	created, err := netw.CreateEndpoint(ep)
 	if err != nil {
 		return nil, fmt.Errorf("endpoint Create on %s: %w", netw.Name, err)
@@ -318,9 +314,8 @@ func createEndpoint(netw *hcn.HostComputeNetwork, name, isolation string, publis
 	return created, nil
 }
 
-// publishedPort is the small, deliberate port-publishing surface. It maps a host port to a
-// guest port while the endpoint is created; HCN accepts a port mapping added later but, on the
-// measured host, that does not establish a forwarding dataplane.
+// publishedPort maps a host port to a guest port while the endpoint is created. HCN accepts a
+// port mapping added later, but that does not establish a forwarding dataplane.
 type publishedPort struct {
 	Protocol      string `json:"protocol"`
 	HostPort      uint16 `json:"hostPort"`
@@ -400,13 +395,12 @@ func validatePublishNetwork(published []publishedPort, netw *hcn.HostComputeNetw
 	return nil
 }
 
-// aclRule is the deliberate, measured ACL surface: a direction, an action, and an optional
-// protocol (empty = all). It materializes as an hcn.ACL endpoint policy at create time.
-// RuleType is not user-selectable: the ACL spike measured that Host and Switch both enforce on
-// the argon + NAT topology, so the surface fixes Switch (the measured default) rather than
-// baking an unmeasured choice into the CLI. Enforcement is topology-dependent (argon + NAT and
-// xenon + L2Bridge enforce; xenon + NAT stores without dataplane effect) and create-time only:
-// runtime ApplyPolicy is inert on every measured topology.
+// aclRule is the ACL surface: a direction, an action, and an optional protocol (empty = all).
+// It materializes as an hcn.ACL endpoint policy at create time. RuleType is not
+// user-selectable: Host and Switch both enforce on the argon + NAT topology, and the surface
+// fixes Switch. Enforcement is topology-dependent (argon + NAT and xenon + L2Bridge enforce;
+// xenon + NAT stores without dataplane effect) and create-time only: runtime ApplyPolicy is
+// inert on every measured topology.
 type aclRule struct {
 	Direction hcn.DirectionType `json:"direction"`
 	Action    hcn.ActionType    `json:"action"`
@@ -506,9 +500,9 @@ func parseACL(v string) (aclRule, error) {
 
 // aclEnforcementReason reports whether ACLs on this isolation/network combination are known to
 // enforce on the dataplane. Empty means they do; any other value is why they must not be
-// applied. The measured matrix is narrow: process (argon) + NAT and hyperv (xenon) + L2Bridge
-// enforce. hyperv + NAT is a measured no-op (HNS stores the policy, the dataplane is
-// unchanged), and every other combination is unmeasured -- both fail closed.
+// applied. The measured matrix: process (argon) + NAT and hyperv (xenon) + L2Bridge enforce.
+// hyperv + NAT is a no-op (HNS stores the policy, the dataplane is unchanged), and every other
+// combination is unmeasured -- both fail closed.
 func aclEnforcementReason(isolation string, netw *hcn.HostComputeNetwork) string {
 	if netw == nil {
 		return "no HCN network"
@@ -579,8 +573,7 @@ func deleteEndpoint(id string) error {
 var mountRe = regexp.MustCompile(`^([A-Za-z]:\\[^:]*):([A-Za-z]:\\[^:]*?)(:ro)?$`)
 
 // parseMounts turns repeated --mount HOST:CONTAINER[:ro] into MappedDirectories. For a xenon
-// these go over VSMB, not a bind mount -- different performance, different semantics, and the
-// help text describes what it does rather than promising Docker parity.
+// these go over VSMB, not a bind mount -- different performance, different semantics.
 func parseMounts(a *cli.Args) ([]hcsshim.MappedDir, error) {
 	vals := a.Options("--mount")
 	if len(vals) == 0 {
@@ -628,8 +621,7 @@ func parseLabels(a *cli.Args) (map[string]string, error) {
 // -- isolation ---------------------------------------------------------------------------
 
 // Isolation modes. Process (argon) stacks layers on the host and is elevated at every start;
-// hyperv (xenon) hands the layers to a utility VM. The flag defaults to hyperv, so existing
-// invocations are unchanged.
+// hyperv (xenon) hands the layers to a utility VM. The flag defaults to hyperv.
 const (
 	isolationHyperV  = "hyperv"
 	isolationProcess = "process"
@@ -862,7 +854,7 @@ func create(a *cli.Args, e cli.Emit) (int, error) {
 	if err != nil {
 		return exitFor(err), err
 	}
-	// The primary process (#33) is recorded, not started: `start` launches it. The cmd
+	// The primary process is recorded, not started: `start` launches it. The cmd
 	// should be the target directly, not a `cmd /c` wrapper -- Kill terminates one process,
 	// not a tree, and a wrapper's children would survive a later kill.
 	if cmd := a.Option("--cmd"); cmd != "" {
@@ -875,7 +867,7 @@ func create(a *cli.Args, e cli.Emit) (int, error) {
 		return cli.Failed, fmt.Errorf("CreateContainer: %w", err)
 	}
 
-	// State is part of the creation transaction (#19): without state.json, `rm` can never
+	// State is part of the creation transaction: without state.json, `rm` can never
 	// find any of this again, so a failed write tears down the compute system -- while the
 	// handle is still open -- then the endpoint and scratch. The write error stays the
 	// reported one; cleanup failures are progress, not the verdict.
@@ -889,8 +881,8 @@ func create(a *cli.Args, e cli.Emit) (int, error) {
 		}
 		return cli.Failed, fmt.Errorf("writing state: %w", err)
 	}
-	// The handle is dropped here on purpose: the compute system outlives this process and is
-	// reopened by id. state.json records what HCS does not.
+	// The handle is dropped here: the compute system outlives this process and is reopened by
+	// id. state.json records what HCS does not.
 	c.Close()
 	e.Result(map[string]any{
 		"ok": true, "command": "container create", "id": id, "ref": ref,
@@ -944,7 +936,7 @@ func start(a *cli.Args, e cli.Emit) (int, error) {
 		return cli.OK, nil
 	}
 
-	// A primary process is recorded (#33): launch it and stay attached as its pump. This
+	// A primary process is recorded: launch it and stay attached as its pump. This
 	// invocation owns the pipes -- HCS gives them out once, to the creator, unrecoverably --
 	// so it tees everything to primary.log, where `container logs` can follow from any fresh
 	// invocation, and records the exit in state.json when the process ends. If this pump
@@ -967,7 +959,7 @@ func start(a *cli.Args, e cli.Emit) (int, error) {
 		s.Primary.PumpPid = os.Getpid()
 		s.Primary.StartedUTC = time.Now().UTC().Format(time.RFC3339)
 		if werr := writeState(st, s); werr != nil {
-			// Bookkeeping must not kill a started workload; `logs` degrades honestly.
+			// Bookkeeping must not kill a started workload; `logs` reports the gap.
 			e.Progress("recording primary pid: %v", werr)
 		}
 	}
@@ -1065,11 +1057,10 @@ func shutdown(c hcsshim.Container, e cli.Emit, force bool) error {
 // -- exec --------------------------------------------------------------------------------
 
 // parseEnv turns repeated --env NAME=value into ProcessConfig.Environment. The value keeps
-// everything after the first '='. An empty value is an error rather than a pass-through:
-// hcsshim sends {"NAME":""} over the wire intact, but the variable never appears in the guest
-// (measured against servercore:ltsc2022 -- Win32 treats empty as deleted), and a silent drop
-// is worse than a loud one. There is no inherited environment here, so "unset" is expressed
-// by omitting the variable.
+// everything after the first '='. An empty value is an error: hcsshim sends {"NAME":""} over
+// the wire intact, but the variable never appears in the guest (Win32 treats empty as
+// deleted). There is no inherited environment here, so "unset" is expressed by omitting the
+// variable.
 func parseEnv(a *cli.Args) (map[string]string, error) {
 	vals := a.Options("--env")
 	if len(vals) == 0 {
@@ -1364,11 +1355,10 @@ func exec(a *cli.Args, e cli.Emit) (int, error) {
 	return cli.OK, nil
 }
 
-// guestSinks wires guest output for one exec (#28). Default: both guest streams merge into
-// the captured buffer, which tees live -- exactly the pre-#28 behaviour. Under --stream-json
-// (with --json), each stream additionally flows through its own NDJSON line framer, the tee
-// goes quiet (the framers own stderr now), and the buffer keeps serving the final document's
-// merged output field unchanged.
+// guestSinks wires guest output for one exec. Default: both guest streams merge into the
+// captured buffer, which tees live. Under --stream-json (with --json), each stream additionally
+// flows through its own NDJSON line framer, the tee goes quiet (the framers own stderr), and
+// the buffer keeps serving the final document's merged output field.
 func guestSinks(e cli.Emit, out *captured) (outSink, errSink io.Writer, closeFraming func()) {
 	if !e.JSON || !e.StreamJSON {
 		return out, out, func() {}
@@ -1415,7 +1405,7 @@ func printExec(res execResult) {
 type captured struct {
 	json bool
 	// quiet suppresses the live tee: under --stream-json the framing writers own stderr,
-	// and this buffer serves only the final document's output field (#28).
+	// and this buffer serves only the final document's output field.
 	quiet bool
 	mu    sync.Mutex
 	buf   strings.Builder
@@ -1478,7 +1468,7 @@ func run(a *cli.Args, e cli.Emit) (int, error) {
 	if err != nil {
 		return exitFor(err), err
 	}
-	// Same transaction rule as create (#19): buildConfig has acquired the scratch and any
+	// Same transaction rule as create: buildConfig has acquired the scratch and any
 	// endpoint by now, and without state.json nothing can ever find them to clean them up.
 	if err := writeState(st, s); err != nil {
 		if derr := destroy(st, s); derr != nil {
@@ -1585,7 +1575,7 @@ func kill(a *cli.Args, e cli.Emit) (int, error) {
 	defer c.Close()
 
 	// A pid that is not there is a runtime fact, not a bad command line: the process may have
-	// exited a moment ago, and exit 1 with the message is the honest report.
+	// exited a moment ago, so it is exit 1 with the message.
 	p, err := c.OpenProcess(int(pid))
 	if err != nil {
 		return cli.Failed, fmt.Errorf("OpenProcess(%d): %w", pid, err)
@@ -1611,9 +1601,8 @@ func kill(a *cli.Args, e cli.Emit) (int, error) {
 // -- rm / ls -----------------------------------------------------------------------------
 
 // destroyScratch removes a raw scratch layer (created but not stacked) and the container
-// directory. DestroyLayer rather than os.RemoveAll: layer directories carry restored security
-// descriptors that defeat ordinary file deletion, which shows up as a wall of access-denied
-// rather than a clean failure.
+// directory. Layer directories carry restored security descriptors that defeat os.RemoveAll
+// (a wall of access-denied), so DestroyLayer does the removal.
 func destroyScratch(st *store.Store, id string) error {
 	sd := scratchDir(st, id)
 	if _, err := os.Stat(sd); err == nil {
@@ -1856,8 +1845,8 @@ func inspect(a *cli.Args, e cli.Emit) (int, error) {
 		return exitFor(err), err
 	}
 
-	// GetContainers rather than OpenContainer().Properties(): it answers for a container that
-	// exists but was never started, where an open handle tells you very little.
+	// GetContainers answers for a container that exists but was never started, where
+	// OpenContainer().Properties() tells very little.
 	props, err := hcsshim.GetContainers(hcsshim.ComputeSystemQuery{IDs: []string{id}})
 	if err != nil {
 		return cli.Failed, fmt.Errorf("GetContainers: %w", err)
@@ -1894,8 +1883,7 @@ func inspect(a *cli.Args, e cli.Emit) (int, error) {
 	return cli.OK, nil
 }
 
-// pauseResume covers both because they are the same verb with a different call and a different
-// past participle, and splitting them duplicates the whole preamble.
+// pauseResume covers both: the same verb with a different call and a different past participle.
 func pauseResume(a *cli.Args, e cli.Emit, verb string) (int, error) {
 	c, id, err := open(a)
 	if err != nil {
@@ -1945,10 +1933,10 @@ func trunc(s string, n int) string {
 
 // -- logs --------------------------------------------------------------------------------
 
-// logsCmd reads a primary process's retained output from a fresh invocation (#33). It reads
-// the file the pump wrote, never the pipes -- those died with their creator. Status comes
-// from state.json and is reported honestly: running (pump alive), exited (code recorded), or
-// pump dead (the log may be truncated and the exit unrecorded).
+// logsCmd reads a primary process's retained output from a fresh invocation. It reads the
+// file the pump wrote, never the pipes -- those died with their creator. Status comes from
+// state.json: running (pump alive), exited (code recorded), or pump dead (the log may be
+// truncated and the exit unrecorded).
 func logsCmd(a *cli.Args, e cli.Emit) (int, error) {
 	if err := a.RejectUnknown("--id", "--ref", "--store", "--follow"); err != nil {
 		return cli.Usage, err
@@ -1996,7 +1984,7 @@ func logsCmd(a *cli.Args, e cli.Emit) (int, error) {
 	// Follow: emit the file as it grows, re-reading state each pass to notice the exit (or
 	// the pump's death). Lines go to stderr in JSON mode -- stdout still carries exactly one
 	// document, at the end -- and are framed under --stream-json as {"stream":"log"}: the
-	// file merges guest stdout and stderr, so per-stream attribution is gone by design here.
+	// file merges guest stdout and stderr, so there is no per-stream attribution.
 	f, err := os.Open(lp)
 	if err != nil && !os.IsNotExist(err) {
 		return cli.Failed, err

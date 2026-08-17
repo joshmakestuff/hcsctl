@@ -13,12 +13,11 @@ import (
 	"github.com/joshmakestuff/hcsctl/internal/cli"
 )
 
-// The serial console is the break-glass path. It needs no agent, no network adapter, no lease
-// and no firewall rule -- it is a COM port on a named pipe, and the guest writes to it from
-// the firmware onwards. When the agent is what is broken, this is what is left.
+// The serial console needs no agent, no network adapter, no lease and no firewall rule: it is
+// a COM port on a named pipe, and the guest writes to it from the firmware onwards.
 //
 // It shows only what the guest writes while something is attached. HCS does not buffer, so a
-// console attached after boot has missed the boot; that is the transport, not a bug here.
+// console attached after boot has missed the boot.
 
 // consolePipe is the pipe a VM gets when the caller names none. One per VM, keyed by the id,
 // which is already a GUID.
@@ -77,13 +76,12 @@ func console(a *cli.Args, e cli.Emit) (int, error) {
 	e.Progress("connected; the guest writes here from the firmware onwards, and nothing that " +
 		"was written before now was kept. Ctrl-C to detach.")
 
-	// stdin -> guest, unless the caller only wants to watch. A console with no input cannot
-	// log in, which is most of the point, so input is the default.
+	// stdin -> guest unless the caller only wants to watch. Input is the default.
 	if !a.Flag("--no-input") {
 		go func() { _, _ = io.Copy(conn, os.Stdin) }()
 	}
 
-	// The serial stream needs a home that does not corrupt the output mode it runs under.
+	// The sink depends on the output mode; see consoleSink.
 	sink, closeSink := consoleSink(e)
 	defer closeSink()
 	n, copyErr := io.Copy(sink, conn)
@@ -99,13 +97,11 @@ func console(a *cli.Args, e cli.Emit) (int, error) {
 	return cli.OK, nil
 }
 
-// consoleSink picks where the guest's serial bytes go, per output mode. By default it is
-// stdout, untouched, control characters and all, because that is what a console is. Under
-// --json alone, stdout is reserved for the single final result document, so the bytes move
-// to stderr where progress already lives -- the same rule guest exec applies to guest
-// output. Under --json --stream-json they are framed per line as {"stream":"console"} so a
-// consumer can tell them from hcsctl's own voice. The closer flushes the stream writer,
-// if there is one.
+// consoleSink picks where the guest's serial bytes go, per output mode. Default: stdout,
+// untouched, control characters and all. Under --json alone, stdout carries only the single
+// final result document, so the bytes go to stderr -- the same rule guest exec applies to
+// guest output. Under --json --stream-json they are framed per line as {"stream":"console"}.
+// The closer flushes the stream writer, if there is one.
 func consoleSink(e cli.Emit) (io.Writer, func()) {
 	switch {
 	case e.JSON && e.StreamJSON:

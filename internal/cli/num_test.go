@@ -33,7 +33,7 @@ func TestParseUint(t *testing.T) {
 		max  uint64
 	}{
 		{"uint64 overflow", "18446744073709551616", math.MaxUint64},
-		{"uint64 overflow plus one", "18446744073709551617", math.MaxUint64}, // wrapped to 1 before #21
+		{"uint64 overflow plus one", "18446744073709551617", math.MaxUint64},
 		{"above uint32", "4294967296", math.MaxUint32},
 		{"above int64", "9223372036854775808", math.MaxInt64},
 		{"above int32", "2147483648", math.MaxInt32},
@@ -72,10 +72,10 @@ func TestParseSizeBounds(t *testing.T) {
 	}
 
 	bad := []string{
-		"65537GB",               // one above the ceiling in GB
-		"67108865MB",            // one above the ceiling in MB
+		"65537GB",    // one above the ceiling in GB
+		"67108865MB", // one above the ceiling in MB
 		"18446744073709551616GB",
-		"99999999999999999999GB", // wrapped through the old digit loop
+		"99999999999999999999GB",
 	}
 	for _, s := range bad {
 		if n, err := ParseSize(s); err == nil {

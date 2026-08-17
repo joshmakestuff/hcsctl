@@ -2,27 +2,18 @@
 
 // Package vmcompute is a narrow binding to the v2 compute-system API in vmcompute.dll.
 //
-// # Why this package exists
-//
-// The repo rule is public hcsshim packages only. hcsshim exports exactly one compute-system
-// constructor, `hcsshim.CreateContainer`, and it takes a schema 1 `ContainerConfig`. Schema 1
-// cannot express a `VirtualMachine` document, so it cannot express a VHDX boot, a UEFI firmware
-// section, a COM port or an HvSocket service table. Everything that can is in hcsshim's
-// internal/hcs and internal/uvm, which are not importable.
-//
-// So this is not a case of leaning on somebody's private helper when a public one exists.
-// hcsshim never exported the v2 API to any consumer. The amended rule (issue #34):
-//
-//	Public hcsshim packages only. Where hcsshim exports no public equivalent -- today, the v2
-//	compute-system API -- bind the documented Windows entry point in vmcompute.dll directly.
-//	Copying or vendoring hcsshim's internal/ source is still out.
+// hcsshim exports no public v2 compute-system API. Its only public constructor,
+// hcsshim.CreateContainer, takes a schema 1 ContainerConfig, which cannot express a
+// VirtualMachine document (VHDX boot, UEFI firmware, COM ports, HvSocket service table).
+// This package binds the documented vmcompute.dll entry points directly and does not copy
+// hcsshim internal/ source.
 //
 // # Shape
 //
 // Every call is asynchronous. It returns either a terminal HRESULT or ERROR_VMCOMPUTE_OPERATION_PENDING,
-// and completion arrives on a registered callback. So a System registers its callback at open
+// and completion arrives on a registered callback. A System registers its callback at open
 // time and each operation waits on the notification that names it. S_FALSE (1) is a success
-// HRESULT, which is why success is a range and not a value.
+// HRESULT, so success is a range and not a value.
 package vmcompute
 
 import (
@@ -73,8 +64,8 @@ const (
 	notifyServiceDisconnect = 0x01000000
 )
 
-// Error carries the HRESULT and, when HCS supplied one, the result document. The document is
-// where HCS says which part of the configuration it disliked, so it is not discarded.
+// Error carries the HRESULT and, when HCS supplied one, the result document. The document
+// names the part of the configuration HCS rejected.
 type Error struct {
 	Op     string
 	Code   uint32
@@ -123,8 +114,8 @@ func watcher(notification uint32, number uintptr, status uintptr, _ *uint16) uin
 	channels := callbackMap[number]
 	callbackMu.RUnlock()
 	if ch, ok := channels[notification]; ok {
-		// Buffered, depth 1. A second notification of the same type is dropped rather than
-		// blocking a native callback thread inside the VM worker process.
+		// Buffered, depth 1. A second notification of the same type is dropped; the native
+		// callback thread must not block.
 		select {
 		case ch <- err:
 		default:
@@ -165,8 +156,8 @@ func dropChannels(number uintptr) {
 
 // -- string plumbing ---------------------------------------------------------------------
 
-// takeString consumes an out-parameter string HCS allocated with CoTaskMemAlloc. Not freeing
-// it leaks once per call, so every path that can produce one goes through here.
+// takeString consumes and frees an out-parameter string HCS allocated with CoTaskMemAlloc.
+// Every out-parameter string must go through here.
 func takeString(p *uint16) string {
 	if p == nil {
 		return ""
@@ -257,9 +248,8 @@ func (s *System) registerCallback() error {
 	return nil
 }
 
-// Start boots the system and waits for the start to complete. Note what this does NOT mean:
-// for a VM, start completing is the firmware running, not the guest being up. Guest readiness
-// is a separate probe.
+// Start boots the system and waits for the start to complete. For a VM, start completing
+// means the firmware runs, not that the guest is up. Guest readiness is a separate probe.
 func (s *System) Start(timeout time.Duration) error {
 	return s.operation(procStart, "HcsStartComputeSystem", "", notifyStartCompleted, timeout)
 }
@@ -271,7 +261,7 @@ func (s *System) Shutdown(timeout time.Duration) error {
 	return s.operation(procShutdown, "HcsShutdownComputeSystem", options, notifyExited, timeout)
 }
 
-// Terminate powers the system off. It is the unconditional one: no guest cooperation.
+// Terminate powers the system off. It needs no guest cooperation.
 func (s *System) Terminate(timeout time.Duration) error {
 	return s.operation(procTerminate, "HcsTerminateComputeSystem", "", notifyExited, timeout)
 }
@@ -384,9 +374,8 @@ func Enumerate(query string) (string, error) {
 }
 
 // GrantVmAccess adds an ACE for a VM's own SID to a file, so the VM worker process can open
-// it. A VHDX that has never been granted opens as access-denied at start time, and the error
-// names the disk rather than the missing ACE -- which is why this is called on every attached
-// path rather than only on a newly created one.
+// it. A VHDX without the grant fails at start time with access-denied; the error names the
+// disk, not the missing ACE. Callers grant every attached path, not only newly created ones.
 //
 // It is exported from vmcompute.dll under this bare name, not an Hcs-prefixed one.
 func GrantVmAccess(vmID, path string) error {
@@ -399,10 +388,8 @@ func GrantVmAccess(vmID, path string) error {
 
 // RevokeVmAccess removes the ACE GrantVmAccess added.
 //
-// Without it every create leaves a permanent "NT VIRTUAL MACHINE\<guid>" entry on the base
-// image, one per VM, and nothing ever removes them -- a base image that has backed a hundred
-// VMs carries a hundred dead grants. Measured: three named grants survived three create/rm
-// cycles against one image.
+// The ACE persists after the VM is removed (measured: grants survive create/rm cycles).
+// Without revoke, a base image accumulates one dead "NT VIRTUAL MACHINE\<guid>" entry per VM.
 //
 // Exported from vmcompute.dll under the bare name, like GrantVmAccess.
 func RevokeVmAccess(vmID, path string) error {

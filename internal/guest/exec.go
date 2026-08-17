@@ -24,9 +24,8 @@ type execResult struct {
 	Command string `json:"command"`
 	VMID    string `json:"vmId"`
 	Ran     string `json:"ran"`
-	// ExitCode is the GUEST process's exit code. It is reported here and never as hcsctl's
-	// own exit code: "the command ran and returned 1" and "the tool could not run it" are
-	// different outcomes and a caller has to be able to tell them apart.
+	// ExitCode is the GUEST process's exit code. It is never hcsctl's own exit code: "the
+	// command ran and returned 1" and "the tool could not run it" are different outcomes.
 	ExitCode  int    `json:"exitCode"`
 	TimedOut  bool   `json:"timedOut"`
 	Detail    string `json:"detail,omitempty"`
@@ -68,9 +67,8 @@ func execVerb(a *cli.Args, e cli.Emit) (int, error) {
 		TimeoutSeconds: int(timeout.Seconds()),
 	}
 
-	// The dial has its own budget. Reaching the guest and running a command are separate
-	// waits, and a --timeout of 5s must not mean "give up dialling after 5s" when a dial
-	// against a guest whose agent is absent takes 30s regardless (#37).
+	// The dial has its own budget: a dial against a guest whose agent is absent takes 30s
+	// regardless of --timeout.
 	svc, err := serviceFor(vmid, 35*time.Second)
 	if err != nil {
 		return cli.Failed, err
@@ -121,17 +119,14 @@ func runRemote(vmid, svc guid.GUID, req guestproto.Request, e cli.Emit) (execRes
 		return res, err
 	}
 
-	// No deadline once the command is running: a long one would otherwise be cut off, and a
-	// cut-off stream is indistinguishable from a command that finished.
+	// No deadline once the command is running: a long one would otherwise be cut off.
 	_ = conn.SetDeadline(time.Time{})
 
 	br := bufio.NewReader(conn)
 
-	// The agent answers a verb it cannot serve with a JSON failure document, not with frames
-	// -- an older agent that has never heard of exec is the ordinary case. A frame header
-	// begins with a channel byte of 0 to 3, so a leading '{' can only be a document, and
-	// discriminating on it here turns "protocol desync, frame claims 577727266 bytes" into
-	// the refusal the agent actually sent.
+	// The agent answers a verb it cannot serve with a JSON failure document, not with frames.
+	// A frame header begins with a channel byte of 0 to 3, so a leading '{' can only be a
+	// document.
 	if first, perr := br.Peek(1); perr == nil && first[0] == '{' {
 		line, _ := br.ReadBytes('\n')
 		var f guestproto.Failure
@@ -148,8 +143,7 @@ func runRemote(vmid, svc guid.GUID, req guestproto.Request, e cli.Emit) (execRes
 		ch, payload, ferr := guestproto.ReadFrame(br)
 		if ferr != nil {
 			if errors.Is(ferr, io.EOF) {
-				// The agent closed without an exit frame. That is not a clean end: report it
-				// rather than letting exitCode -1 pass for a result.
+				// The agent closed without an exit frame; report it.
 				return res, fmt.Errorf("agent closed before reporting an exit status")
 			}
 			// A failure document may arrive instead of frames, if the verb was refused.

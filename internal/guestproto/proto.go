@@ -1,16 +1,14 @@
 // Package guestproto is the wire contract between hcsctl on the host and hcsguest inside a
-// guest VM. Both halves import it, so the contract cannot drift between them -- that is the
-// whole reason the agent lives in this repo rather than beside the image templates (#40).
+// guest VM. Both halves import it, so the contract cannot drift between them.
 //
-// It is deliberately free of build tags and of any Windows or Linux import, so the same
-// definitions compile into a Linux guest binary.
+// It has no build tags and no Windows or Linux import, so the same definitions compile into
+// a Linux guest binary.
 package guestproto
 
 import "time"
 
-// ServiceID is the Hyper-V socket service the agent binds and the host dials. Measured in
-// #37: a service GUID needs no registration under GuestCommunicationServices for a host to
-// reach it, so this value is ours to choose and nothing else has to know it.
+// ServiceID is the Hyper-V socket service the agent binds and the host dials. A service GUID
+// needs no registration under GuestCommunicationServices for a host to reach it.
 const ServiceID = "b7a4e3c6-8f21-4d5e-9c30-2a6f1b8d4e57"
 
 // VsockPort is the Linux equivalent. A Linux guest listens on AF_VSOCK and the host maps the
@@ -18,32 +16,28 @@ const ServiceID = "b7a4e3c6-8f21-4d5e-9c30-2a6f1b8d4e57"
 // caller's point of view but do not share an address.
 const VsockPort = 5731
 
-// Protocol is the wire version. A mismatch is a hard failure and is never negotiated: nothing
-// in this workspace has users, so an old agent is a bug to fix rather than a case to support.
+// Protocol is the wire version. A mismatch is a hard failure and is never negotiated.
 //
-// Adding a verb is NOT a bump -- the same rule as cli.ContractVersion. An old agent answers an
-// unknown verb with a Failure document naming it, which is already the right error. The number
-// moves only when an existing verb's wire shape or meaning changes.
+// Adding a verb is not a bump: an old agent answers an unknown verb with a Failure document
+// naming it. The number moves only when an existing verb's wire shape or meaning changes.
 const Protocol = 1
 
 // Request is one JSON object, newline-terminated, sent as the first thing on a connection.
-// One request per connection, no multiplexing -- hvsocket connections are cheap and a
-// multiplexer is where the defects would live.
+// One request per connection, no multiplexing.
 type Request struct {
 	Protocol int    `json:"protocol"`
 	Verb     string `json:"verb"`
 
 	// Port is the guest-side TCP port for the forward verb. The agent dials it on loopback
-	// inside the guest, which is why a forward is not subject to the guest firewall.
+	// inside the guest, so a forward is not subject to the guest firewall.
 	Port int `json:"port,omitempty"`
 
 	// Command is the exec verb's command line, run by the guest's own shell: cmd.exe /c on
-	// Windows, /bin/sh -c on Linux. A single line rather than an argv, to match
+	// Windows, /bin/sh -c on Linux. A single line, not an argv, matching
 	// `hcsctl container exec --cmd`.
 	Command string `json:"command,omitempty"`
 	Cwd     string `json:"cwd,omitempty"`
-	// Env entries are NAME=value, added to the guest's own environment rather than replacing
-	// it: a command that lost PATH would fail for a reason nobody would guess from here.
+	// Env entries are NAME=value, added to the guest's own environment, not replacing it.
 	Env []string `json:"env,omitempty"`
 	// TimeoutSeconds kills the process in the guest on expiry. Enforced guest-side as well as
 	// host-side, so a host that gives up does not leave the process running forever.
@@ -53,41 +47,36 @@ type Request struct {
 	NetConfig *NetConfig `json:"netConfig,omitempty"`
 }
 
-// NetConfig asks the agent to program an interface with the addressing the host already knows
-// (#60): on an hcsctl-owned network, HNS allocates the endpoint's address at create and no
-// DHCP server exists to deliver it, so the host sends it through this verb instead.
+// NetConfig asks the agent to program an interface with the addressing the host already
+// knows: on an hcsctl-owned network, HNS allocates the endpoint's address at create and no
+// DHCP server exists to deliver it, so the host sends it through this verb.
 //
-// The agent applies it through the guest's own network mechanism, never around it. Measured
-// 2026-08-11: an address added with raw `ip addr add` is torn down when NetworkManager's
-// DHCP transaction fails 45 s later; a connection-profile change holds. Measured
-// 2026-08-11: on Windows, netsh static config holds indefinitely,
-// because manual assignment itself moves the interface off DHCP.
+// The agent applies it through the guest's own network mechanism, never around it. An
+// address added with raw `ip addr add` is torn down when NetworkManager's DHCP transaction
+// fails 45 s later; a connection-profile change holds. On Windows, netsh static config
+// holds, because manual assignment itself moves the interface off DHCP.
 type NetConfig struct {
 	// Interface is the connection to modify. Empty means the guest's default: eth0 on Linux
 	// (a single-NIC guest without predictable interface names), the single connected adapter
-	// on Windows (whose name is an enumeration accident).
+	// on Windows.
 	Interface string `json:"interface,omitempty"`
-	// Addresses in CIDR form. At least one is required -- an empty netconfig has no meaning.
+	// Addresses in CIDR form. At least one is required.
 	Addresses []string `json:"addresses"`
 	Gateway   string   `json:"gateway,omitempty"`
 	DNS       []string `json:"dns,omitempty"`
 }
 
 // NetConfigResult reports what the guest observes AFTER applying, not what was requested.
-// This is the attestation that lets `vm ip` say what the guest has rather than what HNS
-// allocated (#59).
 type NetConfigResult struct {
-	OK       bool   `json:"ok"`
-	Protocol int    `json:"protocol"`
-	// Applied names the mechanism, e.g. "nmcli". A reader of a transcript should not have to
-	// guess how the guest was configured.
+	OK       bool `json:"ok"`
+	Protocol int  `json:"protocol"`
+	// Applied names the mechanism, e.g. "nmcli".
 	Applied   string    `json:"applied"`
 	Addresses []Address `json:"addresses"`
 }
 
-// ForwardOK is the agent's reply to a forward request, sent before any payload. The caller
-// needs to know the guest side connected before it starts copying, so a failed connect
-// surfaces as an error rather than as a connection that accepts bytes and drops them.
+// ForwardOK is the agent's reply to a forward request, sent before any payload, so the caller
+// knows the guest side connected before it starts copying.
 type ForwardOK struct {
 	OK       bool   `json:"ok"`
 	Protocol int    `json:"protocol"`
@@ -95,24 +84,21 @@ type ForwardOK struct {
 	Target   string `json:"target"`
 }
 
-// Address is what the guest believes about its own addressing. This is the field that
-// removes the ~14 s DHCP-lease poll on the host: the guest already knows.
+// Address is what the guest believes about its own addressing.
 type Address struct {
 	Interface string `json:"interface"`
 	Address   string `json:"address"` // CIDR
 	Family    string `json:"family"`  // ipv4 or ipv6
 }
 
-// Info answers readiness and addressing together, which is why it is the first verb. A
-// successful read of this document means the guest booted, the transport is up, and the
-// agent is serving -- three things the host otherwise infers separately and slowly.
+// Info answers readiness and addressing together. A successful read of this document means
+// the guest booted, the transport is up, and the agent is serving.
 type Info struct {
 	OK           bool   `json:"ok"`
 	Protocol     int    `json:"protocol"`
 	AgentVersion string `json:"agentVersion"`
-	// AgentCommit is the hcsctl commit the agent was built from. Consumers pin a commit
-	// (hcsctl#35), so this is what says which agent a guest is actually running -- rather
-	// than what a build record claims it installed.
+	// AgentCommit is the hcsctl commit the agent was built from: which agent a guest is
+	// actually running.
 	AgentCommit   string    `json:"agentCommit"`
 	OS            string    `json:"os"`
 	OSVersion     string    `json:"osVersion"`

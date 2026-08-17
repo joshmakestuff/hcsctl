@@ -22,11 +22,11 @@ import (
 )
 
 type forwardResult struct {
-	OK       bool   `json:"ok"`
-	Command  string `json:"command"`
-	VMID     string `json:"vmId"`
-	Listen   string `json:"listen"`
-	GuestPort int   `json:"guestPort"`
+	OK        bool   `json:"ok"`
+	Command   string `json:"command"`
+	VMID      string `json:"vmId"`
+	Listen    string `json:"listen"`
+	GuestPort int    `json:"guestPort"`
 }
 
 func forward(a *cli.Args, e cli.Emit) (int, error) {
@@ -50,10 +50,9 @@ func forward(a *cli.Args, e cli.Emit) (int, error) {
 		return cli.Usage, cli.Usagef("--port must be a TCP port between 1 and 65535")
 	}
 
-	// Loopback by default, and deliberately. A forward gives whoever reaches it the guest's
-	// service with no credential of its own, so binding it to every interface would publish
-	// the guest to the network -- the opposite of what an hvsocket path is for. A caller who
-	// wants that has to write the address out in full.
+	// Loopback by default. A forward gives whoever reaches it the guest's service with no
+	// credential of its own; a caller who wants another interface must write the address
+	// out in full.
 	listenAddr := a.Option("--listen")
 	if listenAddr == "" {
 		listenAddr = "127.0.0.1:0"
@@ -89,9 +88,9 @@ func forward(a *cli.Args, e cli.Emit) (int, error) {
 		Listen:    l.Addr().String(),
 		GuestPort: port,
 	}
-	// The document is emitted as soon as the listener exists, not when the forward ends: a
-	// caller has to learn the chosen address before it can connect, and with `--listen 0` it
-	// cannot know the port any other way.
+	// The document is emitted as soon as the listener exists: a caller has to learn the
+	// chosen address before it can connect, and with `--listen 0` it cannot know the port
+	// any other way.
 	e.Result(res, func() {
 		fmt.Printf("forwarding %s -> guest 127.0.0.1:%d\n", l.Addr(), port)
 		fmt.Printf("press Ctrl-C to stop\n")
@@ -122,7 +121,7 @@ func forward(a *cli.Args, e cli.Emit) (int, error) {
 }
 
 // pipe joins one accepted TCP connection to a fresh hvsocket connection. One connection per
-// session, which is why the protocol needs no multiplexing.
+// session; the protocol has no multiplexing.
 func pipe(local net.Conn, vmid, svc guid.GUID, port int, timeout time.Duration) error {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()

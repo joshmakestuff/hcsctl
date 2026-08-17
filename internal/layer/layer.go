@@ -1,23 +1,22 @@
 //go:build windows
 
-// Package layer is the `hcsctl layer` verb group: turning a materialized image chain into a
-// mounted volume you can actually look at.
+// Package layer is the `hcsctl layer` verb group: it turns a materialized image chain into a
+// mounted volume.
 //
-// An imported image is read-only layer directories and nothing more. To see the merged
-// filesystem, the chain needs a writable scratch layer on top, and that scratch has to be
-// activated and prepared before Windows will hand back a volume path. That is four calls in
-// hcsshim's root package:
+// An imported image is read-only layer directories. To see the merged filesystem, the chain
+// needs a writable scratch layer on top, activated and prepared, before Windows returns a
+// volume path. That is four calls in hcsshim's root package:
 //
 //	CreateScratchLayer(info, scratchPath, "", parents)  -- writable layer over the chain
 //	ActivateLayer(info, scratchPath)                    -- attach it to the layer driver
 //	PrepareLayer(info, scratchPath, parents)            -- stack the read-only layers under it
 //	GetLayerMountPath(info, scratchPath)                -- the \\?\Volume{...} path
 //
-// DriverInfo is left zero deliberately: layerPath() is filepath.Join(HomeDir, id), so an empty
-// HomeDir means the id IS the full path, which is how this store addresses layers.
+// DriverInfo is zero: layerPath() is filepath.Join(HomeDir, id), so an empty HomeDir means
+// the id is the full path, which is how this store addresses layers.
 //
-// ELEVATED. PrepareLayer needs an enabled BUILTIN\Administrators SID -- measured 2026-08-05,
-// and it is a group check, not a privilege, so no user-rights grant substitutes.
+// ELEVATED. PrepareLayer needs an enabled BUILTIN\Administrators SID (measured). It is a group
+// check, not a privilege, so no user-rights grant substitutes.
 package layer
 
 import (
@@ -57,9 +56,8 @@ func idFor(ref string) string {
 	return strings.NewReplacer("/", "_", ":", "_", "@", "_", "\\", "_").Replace(ref)
 }
 
-// resolveID is the only way mount and unmount obtain an id; validation lives here rather than
-// at call sites, so a future verb cannot forget it -- an unvalidated id reaches DestroyLayer
-// on the elevated path (`--id ..` would name the store root).
+// resolveID is the only way mount and unmount obtain an id, and it validates the id. An
+// unvalidated id reaches DestroyLayer on the elevated path (`--id ..` would name the store root).
 func resolveID(a *cli.Args) (string, error) {
 	id := a.Option("--id")
 	if id == "" {
@@ -85,8 +83,7 @@ func chainFor(st *store.Store, ref string) ([]string, error) {
 		}
 		return nil, err
 	}
-	// Structural soundness (non-empty, matched arrays, digest syntax) is ReadRecord's
-	// guarantee -- one boundary, not a twin check here (#22).
+	// ReadRecord guarantees structural soundness (non-empty, matched arrays, digest syntax).
 	var chain []string // topmost first
 	for _, d := range rec.DiffIDs {
 		p := st.LayerPath(d)
@@ -100,9 +97,8 @@ func chainFor(st *store.Store, ref string) ([]string, error) {
 
 // Stack prepares an already-created scratch layer over chain and returns its volume path.
 // It is the process-isolated (argon) storage sequence -- ActivateLayer, PrepareLayer,
-// GetLayerMountPath -- shared with internal/container so the canonical call order lives in one
-// place. CreateScratchLayer, ExpandScratchSize and DestroyLayer stay with each caller: they are
-// shared across isolation modes there and carry each caller's own failure handling.
+// GetLayerMountPath -- shared with internal/container. CreateScratchLayer, ExpandScratchSize
+// and DestroyLayer stay with each caller.
 //
 // On failure Stack undoes what it has done so far, leaving a scratch layer that only
 // DestroyLayer needs to remove.
@@ -125,8 +121,7 @@ func Stack(scratch string, chain []string) (string, error) {
 }
 
 // Unstack reverses Stack: UnprepareLayer then DeactivateLayer. Every step is attempted even if
-// the first fails -- a leftover activation is worse than a noisy teardown -- and the first error
-// is returned. DestroyLayer stays with the caller.
+// the first fails, and the first error is returned. DestroyLayer stays with the caller.
 func Unstack(scratch string) error {
 	info := hcsshim.DriverInfo{}
 	var first error
@@ -189,15 +184,13 @@ func mount(a *cli.Args, e cli.Emit) (int, error) {
 
 	info := hcsshim.DriverInfo{}
 
-	// Each step is undone in reverse on failure, so a half-built mount does not survive to
-	// confuse the next attempt.
+	// Each step is undone in reverse on failure, so a half-built mount does not survive.
 	if err := hcsshim.CreateScratchLayer(info, sp, "", chain); err != nil {
 		return cli.Failed, fmt.Errorf("CreateScratchLayer (rerun elevated?): %w", err)
 	}
 	e.Progress("CreateScratchLayer ok")
 
-	// Expand before Activate/Prepare, while nothing holds the vhd -- the same point in the
-	// sequence Docker's windowsfilter driver does it.
+	// Expand before Activate/Prepare, while nothing holds the vhd.
 	if scratchSize != 0 {
 		if err := hcsshim.ExpandScratchSize(info, sp, scratchSize); err != nil {
 			_ = hcsshim.DestroyLayer(info, sp)
@@ -242,8 +235,7 @@ func unmount(a *cli.Args, e cli.Emit) (int, error) {
 
 	info := hcsshim.DriverInfo{}
 
-	// Every step is attempted even if an earlier one fails: a leftover activation is worse
-	// than a noisy teardown, and the first error is what gets reported.
+	// Every step is attempted even if an earlier one fails; the first error is reported.
 	var firstErr error
 	record := func(step string, err error) {
 		if err != nil {

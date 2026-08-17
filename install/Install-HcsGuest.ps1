@@ -151,19 +151,18 @@ try {
     Move-Item -LiteralPath $candidate.FullName -Destination $Exe -Force
 
     if (-not $service) {
-        # New-Service, NOT sc.exe create. Measured 2026-08-08: `sc.exe create` with a path that
-        # has spaces and embedded quotes fails 1639 ERROR_INVALID_COMMAND_LINE, because
-        # PowerShell's native argument passing rewrites it. New-Service hands the string straight
-        # to the service control manager, with no command line in between.
+        # New-Service, not sc.exe create: from PowerShell, `sc.exe create` with a path that has
+        # spaces and embedded quotes fails 1639 ERROR_INVALID_COMMAND_LINE, because native
+        # argument passing rewrites it. New-Service hands the string straight to the service
+        # control manager.
         New-Service -Name $ServiceName `
             -BinaryPathName "`"$Exe`" serve" `
             -DisplayName 'HCS guest agent' `
             -Description 'Answers hcsctl over a Hyper-V socket. Needs no network.' `
             -StartupType Automatic | Out-Null
 
-        # Restart on failure, forever. The host reads an unreachable agent as "guest not ready",
-        # so an agent that gave up would leave a guest that looks permanently unready. reset= 0
-        # stops the failure count ever resetting to "healthy".
+        # Restart on failure, forever: the host reads an unreachable agent as "guest not ready".
+        # reset= 0 stops the failure count ever resetting to "healthy".
         & sc.exe failure $ServiceName 'reset=' '0' 'actions=' 'restart/2000/restart/2000/restart/2000' | Out-Null
         if ($LASTEXITCODE -ne 0) { throw "sc.exe failure failed ($LASTEXITCODE)." }
     }
@@ -185,7 +184,7 @@ try {
     }
 
     # Local check only: proves the binary runs and reads this guest's state. Host reachability is
-    # a host-side check -- a listener probe inside the guest can never catch a dropped packet.
+    # a host-side check.
     & $Exe info | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'hcsguest info failed in the guest.' }
     Write-Host 'hcsguest info: ok'
@@ -196,7 +195,7 @@ catch {
 }
 finally {
     Remove-Item -LiteralPath $staging -Recurse -Force -ErrorAction SilentlyContinue
-    # On success the backup of the previous binary is no longer needed (rollback already restored
-    # it on the failure path, so it no longer exists here when that happened).
+    # On success the backup of the previous binary is not needed; on failure Invoke-Rollback
+    # has already moved it back.
     if (Test-Path -LiteralPath $Backup) { Remove-Item -LiteralPath $Backup -Force -ErrorAction SilentlyContinue }
 }

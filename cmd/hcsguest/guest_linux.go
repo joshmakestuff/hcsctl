@@ -21,10 +21,8 @@ import (
 // a service ID through the template GUID, so the port here and the ServiceID on Windows are
 // two spellings of the same rendezvous.
 //
-// mdlayher/vsock rather than a raw unix.Socket wrapped by net.FileListener. Measured
-// 2026-08-08: the raw socket, bind and listen all succeed, and then net.FileListener fails
-// with "getsockname: address family not supported by protocol". Go's net package only knows
-// the address families it implements, and AF_VSOCK is not one of them.
+// mdlayher/vsock, because Go's net package does not know AF_VSOCK: net.FileListener on a raw
+// AF_VSOCK socket fails with "getsockname: address family not supported by protocol".
 func listen() (net.Listener, error) {
 	l, err := vsock.Listen(guestproto.VsockPort, nil)
 	if err != nil {
@@ -64,10 +62,8 @@ func killTree(cmd *exec.Cmd) {
 // synthetic NIC gets on a guest with one adapter and no predictable-name policy.
 func defaultInterface() string { return "eth0" }
 
-// applyNetConfig programs the interface through NetworkManager. nmcli only, no raw-ip
-// fallback: raw addresses are torn down when NM's DHCP transaction fails (measured
-// 2026-08-11), and a guest without NM is unmeasured -- it gets an explicit error rather
-// than a silently different mechanism.
+// applyNetConfig programs the interface through NetworkManager only: NetworkManager tears
+// down raw ip addresses when its DHCP transaction fails. A guest without nmcli gets an error.
 func applyNetConfig(nc *guestproto.NetConfig) (guestproto.NetConfigResult, error) {
 	if err := validateNetConfig(nc); err != nil {
 		return guestproto.NetConfigResult{}, err
@@ -119,8 +115,8 @@ func gatherInfo() (guestproto.Info, error) {
 	}, nil
 }
 
-// readUptime uses /proc/uptime rather than the wall clock, for the same reason Windows uses
-// GetTickCount64: a freshly booted guest may not have synchronised its clock yet.
+// readUptime reads /proc/uptime, which does not depend on the guest's clock; a freshly booted
+// guest may not have synchronised its clock yet.
 func readUptime() (time.Duration, error) {
 	b, err := os.ReadFile("/proc/uptime")
 	if err != nil {
@@ -137,8 +133,7 @@ func readUptime() (time.Duration, error) {
 	return time.Duration(secs * float64(time.Second)), nil
 }
 
-// readOSVersion prefers PRETTY_NAME, which is the one field every distribution sets and the
-// one a human reading a dashboard wants. A guest with no /etc/os-release still answers.
+// readOSVersion returns PRETTY_NAME from /etc/os-release, or "linux" when the file is absent.
 func readOSVersion() string {
 	f, err := os.Open("/etc/os-release")
 	if err != nil {

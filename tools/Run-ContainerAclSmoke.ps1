@@ -1,16 +1,16 @@
-# Elevated real-host proof that a create-time ACL actually blocks a reachable process+NAT
-# endpoint (#68). This is the enforcement regression: a positive control proves the published
-# port is reachable without an ACL, then the same topology with `--acl in:block:tcp` proves the
-# host can no longer reach it. Process isolation is required because Hyper-V + NAT stores ACLs
-# without dataplane effect, and the code now refuses that combination rather than report it.
+# Elevated real-host proof that a create-time ACL blocks a reachable process+NAT endpoint. A
+# positive control proves the published port is reachable without an ACL, then the same
+# topology with `--acl in:block:tcp` proves the host can no longer reach it. Process isolation
+# is required because Hyper-V + NAT stores ACLs without dataplane effect, and hcsctl refuses
+# that combination.
 #
 #   tools\Run-ContainerAclSmoke.ps1 -Store <existing-store> -SkipAcquire
 #   tools\Run-ContainerAclSmoke.ps1 -Ref mcr.microsoft.com/windows/nanoserver:ltsc2025
 param(
     [string]$Store = (Join-Path $env:LOCALAPPDATA "hcsctl-smoke\hcsctl-acl-smoke-$(Get-Date -Format 'yyyyMMdd-HHmmss')"),
     # Process isolation needs an image built inside the host's compatibility window.
-    # servercore ltsc2025 is used, not nanoserver, because it ships the full
-    # PowerShell the guest listener needs. Override for another host build.
+    # servercore ltsc2025 ships the full PowerShell the guest listener needs; nanoserver
+    # does not. Override for another host build.
     [string]$Ref = 'mcr.microsoft.com/windows/servercore:ltsc2025',
     # Empty creates a disposable NAT. Supplying a name uses that caller-owned NAT and leaves it.
     [string]$Network = '',
@@ -104,9 +104,8 @@ while ($true) {
     $listenerCheck = 'if (-not (Get-NetTCPConnection -LocalPort 8082 -State Listen -ErrorAction SilentlyContinue)) { exit 1 }'
     $listenerCheckCommand = 'powershell -NoProfile -EncodedCommand ' + [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($listenerCheck))
 
-    # Phase 1 -- positive control: process+NAT with no ACL is reachable. If this fails, the
-    # block assertion in phase 2 would be meaningless, so it is the control that makes the
-    # regression trustworthy.
+    # Phase 1 -- positive control: process+NAT with no ACL is reachable. Without it, the block
+    # assertion in phase 2 would be meaningless.
     $controlJson = (& $bin container create --ref $Ref --id $controlID --store $Store --isolation process --network $networkName --publish "$HostPort`:8082/tcp" --cmd $listener --json) | Out-String
     Assert 'control container create exits 0' ($LASTEXITCODE -eq 0)
     $control = $controlJson | ConvertFrom-Json
