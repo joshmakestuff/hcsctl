@@ -58,14 +58,14 @@ type Request struct {
 // DHCP server exists to deliver it, so the host sends it through this verb instead.
 //
 // The agent applies it through the guest's own network mechanism, never around it. Measured
-// 2026-08-11 (natlab nmprobe): an address added with raw `ip addr add` is torn down when
-// NetworkManager's DHCP transaction fails 45 s later; a connection-profile change holds.
-// Measured 2026-08-11 (winnetprobe): on Windows, netsh static config holds indefinitely,
+// 2026-08-11: an address added with raw `ip addr add` is torn down when NetworkManager's
+// DHCP transaction fails 45 s later; a connection-profile change holds. Measured
+// 2026-08-11: on Windows, netsh static config holds indefinitely,
 // because manual assignment itself moves the interface off DHCP.
 type NetConfig struct {
 	// Interface is the connection to modify. Empty means the guest's default: eth0 on Linux
-	// (what the hcs-images guests have), the single connected adapter on Windows (whose name
-	// is an enumeration accident and not worth wiring into a contract).
+	// (a single-NIC guest without predictable interface names), the single connected adapter
+	// on Windows (whose name is an enumeration accident).
 	Interface string `json:"interface,omitempty"`
 	// Addresses in CIDR form. At least one is required -- an empty netconfig has no meaning.
 	Addresses []string `json:"addresses"`

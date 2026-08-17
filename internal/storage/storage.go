@@ -5,7 +5,7 @@
 //
 // This is a different layer *format* from the wclayer directory layers the other verb groups
 // use, not a second route to the same place -- see issue #12 for the decision and #18 for the
-// surface. The verbs mirror the sequence measured in hcsspike/probes/computestorage:
+// surface. The verbs mirror the measured computestorage sequence:
 //
 //	setup-base  create + format blank-base.vhdx -> SetupBaseOSLayer -> diff blank.vhdx
 //	mount       copy blank.vhdx -> sandbox.vhdx, attach, InitializeWritableLayer,
@@ -18,7 +18,7 @@
 // do not touch store layers until that is established.
 //
 // ELEVATED: FormatWritableLayerVhd is denied from a filtered token even holding
-// SeManageVolumePrivilege (measured, findings.md).
+// SeManageVolumePrivilege (measured).
 package storage
 
 import (
@@ -163,7 +163,7 @@ func exportLayer(a *cli.Args, e cli.Emit) (int, error) {
 	return cli.OK, nil
 }
 
-// destroy wraps HcsDestroyLayer. Same caveat as wclayer's DestroyLayer (findings.md): it can
+// destroy wraps HcsDestroyLayer. Same caveat as wclayer's DestroyLayer: it can
 // return success and leave the tree, so absence is verified rather than assumed.
 func destroy(a *cli.Args, e cli.Emit) (int, error) {
 	if err := a.RejectUnknown("--layer"); err != nil {

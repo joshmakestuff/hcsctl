@@ -250,7 +250,7 @@ type inspectDns struct {
 }
 
 // flagNames decodes the HCN network flag bits that have measured meanings. 32 (EnableDhcp) is
-// returned by HNS but absent from hcn's constants -- see docs/findings.md. Bits with no name
+// returned by HNS on ICS networks but absent from hcn's constants. Bits with no name
 // stay visible through the numeric Flags field.
 func flagNames(flags uint32) []string {
 	names := []string{}

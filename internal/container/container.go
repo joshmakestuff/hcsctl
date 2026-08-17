@@ -864,7 +864,7 @@ func create(a *cli.Args, e cli.Emit) (int, error) {
 	}
 	// The primary process (#33) is recorded, not started: `start` launches it. The cmd
 	// should be the target directly, not a `cmd /c` wrapper -- Kill terminates one process,
-	// not a tree (findings.md), and a wrapper's children would survive a later kill.
+	// not a tree, and a wrapper's children would survive a later kill.
 	if cmd := a.Option("--cmd"); cmd != "" {
 		s.Primary = &primaryState{Cmd: cmd}
 	}

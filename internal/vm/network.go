@@ -82,7 +82,7 @@ func validateDNSForNetwork(dns []string, netw *hcn.HostComputeNetwork) error {
 // endpointFlagsEnableDhcp is 32. hcsshim's EndpointFlags enum defines only None (0) and
 // RemoteEndpoint (1), so the value is carried here rather than imported.
 //
-// Measured (hcsspike/probes/hcn/vmlease.go, 2026-08-09): on an ICS network HNS returns Flags 32
+// Measured 2026-08-09: on an ICS network HNS returns Flags 32
 // whether or not the request asks for it, so this is documentation of intent rather than the
 // thing that makes DHCP work. It is set anyway, because a future non-ICS network would need it
 // and a silently-defaulted flag is a bad thing to depend on.
@@ -117,7 +117,7 @@ func resolveVMNetwork(want string) (*hcn.HostComputeNetwork, error) {
 
 	// Selection by name, not just by type. This host has two ICS networks -- the Default Switch
 	// and WSL's firewalled one -- and picking the wrong one produces a VM that boots, leases an
-	// address, and is unreachable. Measured here and in AspireHcs#4.
+	// address, and is unreachable. Measured.
 	var ics []hcn.HostComputeNetwork
 	for i := range nets {
 		if strings.EqualFold(string(nets[i].Type), "ICS") {
@@ -235,8 +235,8 @@ func remakeVMEndpoint(networkID, endpointID, name, mac string) error {
 
 // addressesOf reports what the endpoint holds, as "ip/prefix" strings.
 //
-// An endpoint with no address is the ordinary case, not a failure: measured 2026-08-09
-// (hcsspike/probes/hcn/vmlease.go), a freshly created endpoint with nothing attached to it has no
+// An endpoint with no address is the ordinary case, not a failure: measured 2026-08-09,
+// a freshly created endpoint with nothing attached to it has no
 // IpConfigurations at all. Whether HNS fills them in when the endpoint is attached to a NIC, or
 // only once the guest's DHCP client has leased one, is the open question in #43 -- so this
 // returns whatever is there, and every caller reports an empty result honestly rather than

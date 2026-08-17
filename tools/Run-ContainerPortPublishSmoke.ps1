@@ -3,10 +3,10 @@
 # host loopback reaches the container. This is deliberately separate from Run-Smoke.ps1: it is
 # a focused lifecycle gate and can be rerun with any compatible Windows container image.
 #
-#   tools\Run-ContainerPortPublishSmoke.ps1 -Store E:\hcsctl-store -SkipAcquire
+#   tools\Run-ContainerPortPublishSmoke.ps1 -Store <existing-store> -SkipAcquire
 #   tools\Run-ContainerPortPublishSmoke.ps1 -Ref mcr.microsoft.com/windows/servercore:ltsc2025
 param(
-    [string]$Store = (Join-Path '<tmp>' "hcsctl-publish-smoke-$(Get-Date -Format 'yyyyMMdd-HHmmss')"),
+    [string]$Store = (Join-Path $env:LOCALAPPDATA "hcsctl-smoke\hcsctl-publish-smoke-$(Get-Date -Format 'yyyyMMdd-HHmmss')"),
     [string]$Ref = 'mcr.microsoft.com/windows/servercore:ltsc2022',
     # Empty creates a disposable NAT. Supplying a name uses that caller-owned NAT and leaves it.
     [string]$Network = '',

@@ -79,7 +79,7 @@ func TestNmcliModArgs(t *testing.T) {
 }
 
 func TestNetshCmds(t *testing.T) {
-	// The single-address, gateway-and-dns shape is winnetprobe arm b verbatim; extra
+	// The single-address, gateway-and-dns shape is the measured netsh sequence verbatim; extra
 	// addresses and dns servers ride the corresponding `add` verbs.
 	nc := &guestproto.NetConfig{
 		Addresses: []string{"172.29.172.38/24", "172.29.172.39/24"},

@@ -5,8 +5,8 @@ package vm
 // vm netconfig (#60): program a guest's interface with the addressing the host already knows.
 //
 // On an hcsctl-owned network there is no DHCP server -- HNS allocates the endpoint's address
-// at create and nothing delivers it to the guest (measured, docs/findings.md "The NAT
-// lifecycle, measured"). This verb reads that allocation from the endpoint document, derives
+// at create and nothing delivers it to the guest (measured). This verb reads that
+// allocation from the endpoint document, derives
 // the gateway from the network's route, and hands both to the agent over hvsocket. The agent
 // applies them through the guest's own mechanism -- NetworkManager on Linux, netsh on
 // Windows, both measured -- and answers with what the interface actually holds, so the

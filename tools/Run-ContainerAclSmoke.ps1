@@ -4,12 +4,12 @@
 # host can no longer reach it. Process isolation is required because Hyper-V + NAT stores ACLs
 # without dataplane effect, and the code now refuses that combination rather than report it.
 #
-#   tools\Run-ContainerAclSmoke.ps1 -Store E:\hcsctl-store -SkipAcquire
+#   tools\Run-ContainerAclSmoke.ps1 -Store <existing-store> -SkipAcquire
 #   tools\Run-ContainerAclSmoke.ps1 -Ref mcr.microsoft.com/windows/nanoserver:ltsc2025
 param(
-    [string]$Store = (Join-Path '<tmp>' "hcsctl-acl-smoke-$(Get-Date -Format 'yyyyMMdd-HHmmss')"),
-    # Process isolation needs an image built inside the host's compatibility window (see
-    # docs/findings.md). servercore ltsc2025 is used, not nanoserver, because it ships the full
+    [string]$Store = (Join-Path $env:LOCALAPPDATA "hcsctl-smoke\hcsctl-acl-smoke-$(Get-Date -Format 'yyyyMMdd-HHmmss')"),
+    # Process isolation needs an image built inside the host's compatibility window.
+    # servercore ltsc2025 is used, not nanoserver, because it ships the full
     # PowerShell the guest listener needs. Override for another host build.
     [string]$Ref = 'mcr.microsoft.com/windows/servercore:ltsc2025',
     # Empty creates a disposable NAT. Supplying a name uses that caller-owned NAT and leaves it.

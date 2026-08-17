@@ -10,11 +10,12 @@
 #   Start-Process pwsh -Verb RunAs -Wait -ArgumentList '-NoProfile','-File','tools\Run-Smoke.ps1'
 #   # or, with Windows sudo enabled:  sudo pwsh -NoProfile -File tools\Run-Smoke.ps1
 #
-# Default: a fresh, timestamped store under <tmp>, full pull+import (the real gate, ~250 MB network).
-# Quick mode against the working store, skipping pull/import and the final image rm:
-#   tools\Run-Smoke.ps1 -Store E:\hcsctl-store -SkipAcquire
+# Default: a fresh, timestamped store under $env:LOCALAPPDATA\hcsctl-smoke, full pull+import (the
+# real gate, ~250 MB network).
+# Quick mode against an existing store, skipping pull/import and the final image rm:
+#   tools\Run-Smoke.ps1 -Store <existing-store> -SkipAcquire
 param(
-    [string]$Store = (Join-Path '<tmp>' "hcsctl-smoke-$(Get-Date -Format 'yyyyMMdd-HHmmss')"),
+    [string]$Store = (Join-Path $env:LOCALAPPDATA "hcsctl-smoke\hcsctl-smoke-$(Get-Date -Format 'yyyyMMdd-HHmmss')"),
     [string]$Ref = 'mcr.microsoft.com/windows/servercore:ltsc2022',  # multi-layer, carries a UtilityVM
     [string]$Network = 'nat',
     [switch]$SkipAcquire

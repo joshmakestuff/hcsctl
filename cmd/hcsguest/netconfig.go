@@ -75,8 +75,8 @@ func nmcliModArgs(nc *guestproto.NetConfig) []string {
 }
 
 // netshCmds builds the netsh invocations for a validated config on the adapter with the
-// given interface index. This exact shape is the measured Windows mechanism (winnetprobe
-// arm b, 2026-08-11): `set address source=static` holds address and dataplane through the
+// given interface index. This exact shape is the measured Windows mechanism
+// (2026-08-11): `set address source=static` holds address and dataplane through the
 // whole observation window, and flips the interface off DHCP itself, so no service fights
 // the result. name= takes the interface index, which sidesteps localized adapter names.
 //

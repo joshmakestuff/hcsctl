@@ -1,8 +1,8 @@
 # Real-host VM networking smoke test. Run elevated:
-#   sudo pwsh -NoProfile -File tools\Run-VmNetworkSmoke.ps1 -VHDX '<images>\rocky-10\Virtual Hard Disks\rocky-10.vhdx'
+#   sudo pwsh -NoProfile -File tools\Run-VmNetworkSmoke.ps1 -VHDX <path-to-guest.vhdx>
 param(
     [Parameter(Mandatory)] [string]$VHDX,
-    [string]$Store = 'E:\hcsctl-store',
+    [string]$Store = (Join-Path $env:LOCALAPPDATA 'hcsctl-smoke'),
     [string]$DNS = '1.1.1.1,8.8.8.8',
     [string]$Subnet = '172.31.240.0/24',
     [string]$Gateway = '172.31.240.1',

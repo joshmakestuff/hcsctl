@@ -1,7 +1,7 @@
 # Exercises the paths deliberately outside static netconfig. Swap only -VHDX to test Linux or Windows.
 param(
     [Parameter(Mandatory)] [string]$VHDX,
-    [string]$Store = 'E:\hcsctl-store'
+    [string]$Store = (Join-Path $env:LOCALAPPDATA 'hcsctl-smoke')
 )
 
 $ErrorActionPreference = 'Stop'

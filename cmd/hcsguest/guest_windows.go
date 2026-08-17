@@ -41,7 +41,7 @@ func listen() (net.Listener, error) {
 func defaultInterface() string { return "" }
 
 // applyNetConfig programs the adapter through netsh, the measured Windows mechanism
-// (winnetprobe arm b, 2026-08-11): a static address set this way holds address and dataplane
+// (2026-08-11): a static address set this way holds address and dataplane
 // through the whole observation window, because manual assignment itself moves the interface
 // off DHCP -- there is no NetworkManager-analogue teardown to defend against.
 //
@@ -75,8 +75,8 @@ func applyNetConfig(nc *guestproto.NetConfig) (guestproto.NetConfigResult, error
 }
 
 // resolveAdapter picks the adapter to program. A name selects it directly. An empty name
-// selects the single up, non-loopback adapter -- the hcs-images guests have exactly one
-// synthetic NIC -- and anything else is refused rather than guessed at.
+// selects the single up, non-loopback adapter; a guest with several is refused rather than
+// guessed at.
 func resolveAdapter(name string) (net.Interface, error) {
 	if name != "" {
 		i, err := net.InterfaceByName(name)
