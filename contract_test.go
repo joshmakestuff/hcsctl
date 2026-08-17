@@ -515,7 +515,7 @@ func TestSuccessPath(t *testing.T) {
 		}
 		oneDoc(t, r.stdout, true)
 	})
-	t.Run("info carries tool and contract versions (#29)", func(t *testing.T) {
+	t.Run("info carries tool and contract versions", func(t *testing.T) {
 		r := invoke(t, "info", "--store", store, "--json")
 		var doc map[string]any
 		if err := json.Unmarshal([]byte(r.stdout), &doc); err != nil {
@@ -570,7 +570,7 @@ func TestFailurePath(t *testing.T) {
 		}
 		oneDoc(t, r.stdout, false)
 	})
-	t.Run("semantically invalid record cannot panic (#22)", func(t *testing.T) {
+	t.Run("semantically invalid record cannot panic", func(t *testing.T) {
 		// Valid JSON, mismatched arrays: import must error, not panic, on a record like this.
 		store := filepath.Join(t.TempDir(), "store")
 		images := filepath.Join(store, "images")

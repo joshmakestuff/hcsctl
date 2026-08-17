@@ -191,8 +191,8 @@ usage: hcsctl <group> <verb> [options]
                host's process-isolation compatibility window (see hcsctl info).
                --acl DIRECTION:ACTION[:tcp|udp], repeatable. A create-time endpoint ACL, added
                to the endpoint create document like --publish. Enforced on process isolation +
-               NAT and Hyper-V + L2Bridge (measured); refused on every other combination,
-               including Hyper-V + NAT where it would be stored without effect. No runtime mutation.
+               NAT and Hyper-V + L2Bridge; refused on every other combination, including
+               Hyper-V + NAT where it would be stored without effect. No runtime mutation.
                --timeout bounds the primary command; absent means wait forever.
 
   container create --ref <ref> [--id <id>] [--cmd "<cmdline>"] [--cpus N] [--memory-mb N]
@@ -261,12 +261,12 @@ usage: hcsctl <group> <verb> [options]
                Detach the storage filter and the scratch VHD. ELEVATED.
 
   storage export  --layer <volume> --dest <existing-dir> [--parent <dir>]... [--writable]
-               HcsExportLayer. Measured working: a *mounted* writable layer's volume path
-               with --writable, producing Files/Hives/tombstones. A legacy (wclayer)
-               directory layer fails partway -- the legacy variants are not public hcsshim.
+               HcsExportLayer. Works on a *mounted* writable layer's volume path with
+               --writable, producing Files/Hives/tombstones. A legacy (wclayer) directory
+               layer fails partway; the legacy variants are not public hcsshim.
   storage import  --source <dir> --layer <dest-dir> [--parent <dir>]...
-               HcsImportLayer. NOT YET SEEN WORKING -- fails path-not-found after writing
-               Files; destination semantics under investigation, see issue #18. ELEVATED.
+               HcsImportLayer. Not working: fails path-not-found after writing Files
+               (issue #18). ELEVATED.
 
   storage destroy --layer <dir>
                HcsDestroyLayer, verified by directory absence. Layer directories defeat
@@ -315,14 +315,13 @@ usage: hcsctl <group> <verb> [options]
   vm netconfig --id <guid> [--dns <ip,ip>] [--interface eth0] [--timeout 45s] [--store <dir>]
                Program the guest's interface with the endpoint's HNS allocation, through the
                agent and the guest's own NetworkManager. For hcsctl-owned networks (NAT),
-               which have no DHCP server -- measured, see issue #60. The result reports what
-               the interface holds afterwards, not what was asked.
+               which have no DHCP server. The result reports what the interface holds
+               afterwards, not what was asked.
   vm ls      [--all] [--store <dir>]           VMs and the state HCS reports for each.
                --all also lists every compute system on the host with its owner, state and
-               runtime id -- other tools' VMs included. hcsctl does not scavenge and holds no
-               opinion about what a dead run is; it reports facts. A consumer joins three of
-               them: its own --label on a vm, the vm id carried in the endpoint's name, and
-               this list. See issue #44.
+               runtime id -- other tools' VMs included. hcsctl does not scavenge. A consumer
+               that does joins three facts: its own --label on a vm, the vm id carried in the
+               endpoint's name, and this list.
   vm inspect --id <guid> [--store <dir>]      The store's record plus the HCS properties.
   vm console --id <guid> [--no-input] [--timeout 15s] [--store <dir>]
                Attach to the VM's serial console over its COM1 named pipe. This is the
@@ -359,7 +358,4 @@ global options:
 exit codes: 0 ok, 1 ran and failed, 64 bad arguments (nothing attempted)
              a guest process's own exit code is reported as exitCode in the result, not as
              hcsctl's exit code
-
-Deferred behind issues: HCN policies, load balancers, routes, namespaces (#17), CimFS (#16).
-See the roadmap issue.
 `

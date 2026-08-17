@@ -100,7 +100,7 @@ Assert "endpoint removed by teardown" (-not $eps.Contains("$id-ep"))
 Assert "container state removed by teardown" (-not (Test-Path (Join-Path $Store "containers\$id")))
 
 # -- injected state-write failure leaves nothing --------------------------------------
-"== container run with injected writeState failure (#19) =="
+"== container run with injected writeState failure =="
 $env:HCSCTL_TEST_FAIL_WRITESTATE = '1'
 & $bin container run --ref $Ref --id $id --store $Store --network $Network --cmd 'cmd /c ver' 2>&1 | Out-Null
 $code = $LASTEXITCODE
@@ -111,7 +111,7 @@ $eps = (& $bin network endpoints --network $Network --json 2>$null) | Out-String
 Assert "no endpoint left behind" (-not $eps.Contains("$id-ep"))
 
 # -- create / rm: the persisted lifecycle -------------------------------------------------
-"== container create + rm (with labels, #31) =="
+"== container create + rm (with labels) =="
 & $bin container create --ref $Ref --id $id --store $Store --label "owner=smoke:$PID" --label run=r1
 Assert "create exits 0" ($LASTEXITCODE -eq 0)
 Assert "create persisted state.json" (Test-Path (Join-Path $Store "containers\$id\state.json"))
@@ -143,7 +143,7 @@ Assert "primary container rm exits 0" ($LASTEXITCODE -eq 0)
 $interactiveId = "$id-interactive"
 $interactiveInput = Join-Path $Store 'interactive-input.txt'
 $interactiveOutput = Join-Path $Store 'interactive-output.txt'
-"== container exec with forwarded stdin (#7) =="
+"== container exec with forwarded stdin =="
 & $bin container create --ref $Ref --id $interactiveId --store $Store 2>&1 | Out-Null
 Assert "interactive container create exits 0" ($LASTEXITCODE -eq 0)
 & $bin container start --id $interactiveId --store $Store 2>&1 | Out-Null
@@ -161,7 +161,7 @@ Assert "interactive container rm exits 0" ($LASTEXITCODE -eq 0)
 # -- network inspect + private lifecycle --------------------------------------------------
 # Read-only inspect against the shared nat network, then a private create/inspect/rm
 # round-trip. Private only: NAT create is not exercised here.
-"== network inspect + private create/rm (#15) =="
+"== network inspect + private create/rm =="
 $natInspect = (& $bin network inspect --name $Network --json 2>$null) | Out-String | ConvertFrom-Json
 Assert "inspect by name exits 0" ($LASTEXITCODE -eq 0)
 Assert "inspect returns the requested network" ($natInspect.name -eq $Network -and $natInspect.id)
