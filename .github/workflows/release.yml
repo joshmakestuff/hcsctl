@@ -89,13 +89,12 @@ jobs:
       - name: Package
         run: |
           Compress-Archive -Path hcsctl.exe -DestinationPath hcsctl-windows-amd64.zip
-          # One checksum file covering every asset. The format matches what Get-FileHash prints,
-          # because Windows consumers compare against Get-FileHash output, and
-          # `sha256sum -c` accepts the same <hash><two-spaces><name> shape the Linux
-          # installer feeds it.
-          'hcsctl-windows-amd64.zip', 'hcsguest-windows-amd64.exe', 'hcsguest-linux-amd64' |
-            ForEach-Object { "$((Get-FileHash $_ -Algorithm SHA256).Hash)  $_" } |
-            Out-File -FilePath SHA256SUMS -Encoding ascii
+          # One checksum file covering every asset: <hash><two spaces><name>, LF line endings,
+          # so `sha256sum -c SHA256SUMS` passes on Linux and Get-FileHash output matches on
+          # Windows.
+          $lines = 'hcsctl-windows-amd64.zip', 'hcsguest-windows-amd64.exe', 'hcsguest-linux-amd64' |
+            ForEach-Object { "$((Get-FileHash $_ -Algorithm SHA256).Hash)  $_" }
+          [IO.File]::WriteAllText((Join-Path $PWD 'SHA256SUMS'), (($lines -join "`n") + "`n"), [Text.Encoding]::ASCII)
           Get-Content SHA256SUMS
 
       - name: Publish
