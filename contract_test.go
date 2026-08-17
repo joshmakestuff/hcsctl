@@ -19,6 +19,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/joshmakestuff/hcsctl/internal/store"
 )
 
 var bin string
@@ -269,7 +271,7 @@ func TestStreamJSONTypesStderr(t *testing.T) {
 		}
 	}
 	rec := `{"ref":"fake/img:1","layerDigests":["` + digest + `"],"diffIDs":["` + digest + `"]}`
-	if err := os.WriteFile(filepath.Join(store, "images", "fake_img_1.json"), []byte(rec), 0o644); err != nil {
+	if err := os.WriteFile(recordPath(t, store, "fake/img:1"), []byte(rec), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	args := []string{"container", "run", "--ref", "fake/img:1", "--store", store, "--json"}
@@ -557,7 +559,7 @@ func TestFailurePath(t *testing.T) {
 		if err := os.MkdirAll(images, 0o755); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(filepath.Join(images, "x.json"), []byte("not json"), 0o644); err != nil {
+		if err := os.WriteFile(recordPath(t, store, "x"), []byte("not json"), 0o644); err != nil {
 			t.Fatal(err)
 		}
 		return store
@@ -579,7 +581,7 @@ func TestFailurePath(t *testing.T) {
 		}
 		d := `"sha256:` + strings.Repeat("0", 64) + `"`
 		rec := `{"ref":"x","layerDigests":[],"diffIDs":[` + d + `]}`
-		if err := os.WriteFile(filepath.Join(images, "x.json"), []byte(rec), 0o644); err != nil {
+		if err := os.WriteFile(recordPath(t, store, "x"), []byte(rec), 0o644); err != nil {
 			t.Fatal(err)
 		}
 		r := invoke(t, "image", "rm", "--ref", "x", "--store", store, "--json")
@@ -600,4 +602,14 @@ func TestFailurePath(t *testing.T) {
 			t.Fatalf("failure said nothing on stderr")
 		}
 	})
+}
+
+// recordPath is where the store keys ref's record; fixtures write there directly.
+func recordPath(t *testing.T, root, ref string) string {
+	t.Helper()
+	st, err := store.New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return st.RecordPath(ref)
 }
