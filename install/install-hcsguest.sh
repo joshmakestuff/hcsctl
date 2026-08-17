@@ -108,7 +108,7 @@ else
     # Verify the SHA-256 for this asset against the release's SHA256SUMS. sha256sum -c compares
     # case-insensitively, so the uppercase hashes Windows generated check cleanly. CR is
     # stripped in case the file was written with CRLF.
-    expected=$(awk -v a="$ASSET" '{ sub(/$/, "") } $2 == a { print $1 }' "$sums")
+    expected=$(awk -v a="$ASSET" '{ sub(/\r$/, "") } $2 == a { print $1 }' "$sums")
     if [ -z "$expected" ]; then
         echo "error: SHA256SUMS does not list $ASSET" >&2
         exit 1
