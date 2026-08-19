@@ -265,8 +265,8 @@ usage: hcsctl <group> <verb> [options]
                --writable, producing Files/Hives/tombstones. A legacy (wclayer) directory
                layer fails partway; the legacy variants are not public hcsshim.
   storage import  --source <dir> --layer <dest-dir> [--parent <dir>]...
-               HcsImportLayer. Not working: fails path-not-found after writing Files
-               (issue #18). ELEVATED.
+               HcsImportLayer. Not working: fails path-not-found after writing Files.
+               ELEVATED.
 
   storage destroy --layer <dir>
                HcsDestroyLayer, verified by directory absence. Layer directories defeat
