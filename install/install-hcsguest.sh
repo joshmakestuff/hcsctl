@@ -66,6 +66,10 @@ candidate=
 
 # --- acquire ---
 if [ -n "$path" ]; then
+    if [ ! -f "$path" ]; then
+        echo "error: artifact '$path' does not exist" >&2
+        exit 64
+    fi
     candidate="$staging/$ASSET"
     cp "$path" "$candidate"
     if [ -n "$sha256" ]; then
@@ -220,3 +224,6 @@ fi
 # host can reach it; that is a host-side check.
 "$BIN" info >/dev/null
 echo "hcsguest info: ok"
+
+# The prior binary is only needed for rollback; the install is now proven.
+rm -f "$BACKUP"

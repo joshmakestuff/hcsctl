@@ -1,0 +1,2 @@
+# Shell scripts are run inside Linux guests; a CRLF working copy breaks them.
+*.sh text eol=lf
