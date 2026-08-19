@@ -2,7 +2,7 @@
 # Hosted runners have no Hyper-V and no usable elevation, so nothing in this workflow
 # reaches HCS. "Works" is the elevated smoke transcript on a real host.
 name: contract
-# PRs only: direct pushes to main are gated by running the suite locally before pushing.
+# Every change reaches main through a PR, and this check must be green to merge.
 # workflow_dispatch is the manual fallback.
 on:
   pull_request:
