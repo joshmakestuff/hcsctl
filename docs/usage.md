@@ -64,7 +64,7 @@ Pull an image and run a command in a Hyper-V-isolated container:
 hcsctl image pull   --ref mcr.microsoft.com/windows/servercore:ltsc2022
 hcsctl image import --ref mcr.microsoft.com/windows/servercore:ltsc2022   # elevated
 hcsctl container run --ref mcr.microsoft.com/windows/servercore:ltsc2022 \
-                     --cmd "cmd /c ver"                                   # elevated
+                     --cmd "cmd /c ver"
 ```
 
 Run the same under process isolation:
@@ -79,7 +79,7 @@ set when the endpoint is created and cannot be changed at runtime:
 
 ```
 hcsctl container create --ref mcr.microsoft.com/windows/servercore:ltsc2022 \
-                        --network my-nat --publish 39082:8082/tcp           # elevated
+                        --network my-nat --publish 39082:8082/tcp
 ```
 
 Create a VM from a VHDX, start it, and read its address through the guest agent. The VM id is
