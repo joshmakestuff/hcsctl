@@ -7,3 +7,9 @@ hcsguest-linux
 hcsguest-linux-amd64
 hcsctl-windows-amd64.zip
 SHA256SUMS
+
+# Packer example build artifacts and plugin state
+examples/packer/**/output/
+examples/packer/**/.packer_cache/
+.packer.d/
+crash.log
