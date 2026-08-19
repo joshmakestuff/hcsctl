@@ -23,8 +23,9 @@ that need elevation say so in `hcsctl help`; nothing escalates on its own.
   `SeRestorePrivilege`, both removed from a UAC-filtered token. `ProcessBaseLayer` additionally
   needs an enabled `BUILTIN\Administrators` SID, which no user-rights assignment supplies in a
   filtered token.
-- `image rm`, `layer mount|unmount`, `container` commands, and every `storage` command are
-  elevated.
+- `image rm`, `layer mount|unmount`, and every `storage` command are elevated.
+- Hyper-V-isolated `container` commands run unelevated, with two per-option exceptions:
+  `--mount` is elevated, and `--scratch-size` currently fails unelevated.
 - **Process-isolated containers are elevated at every start** (see below).
 - `vm` commands are unelevated; membership of Hyper-V Administrators is enough.
 - `image pull`, `image ls`, `network ls|endpoints|inspect`, `guest` commands and `info` are
