@@ -468,6 +468,19 @@ func TestHelpAndVersion(t *testing.T) {
 	})
 }
 
+// TestJSONFlagGrammarMatchesCobra: the pre-parse that seeds the output mode uses pflag's own
+// grammar, so a --json placed after the -- terminator is a positional to both parses -- the
+// error must arrive as plain text, not as a document the caller never asked for.
+func TestJSONFlagGrammarMatchesCobra(t *testing.T) {
+	r := invoke(t, "network", "ls", "--", "--json")
+	if r.code != 64 {
+		t.Fatalf("exit %d, want 64\nstderr: %s", r.code, r.stderr)
+	}
+	if r.stdout != "" {
+		t.Fatalf("terminated --json still selected JSON mode: %q", r.stdout)
+	}
+}
+
 // TestIDValidationIsWired plants a real target at the traversal destination and asserts the
 // command exits 64 with the target untouched. This discriminates wiring from mere existence of
 // the validator: the plain usageCases for bad ids would pass even without validation (they fall

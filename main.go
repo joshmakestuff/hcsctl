@@ -20,8 +20,8 @@ package main
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
-	"strconv"
 	"strings"
 
 	"github.com/joshmakestuff/hcsctl/internal/cli"
@@ -34,30 +34,32 @@ import (
 	"github.com/joshmakestuff/hcsctl/internal/sysinfo"
 	"github.com/joshmakestuff/hcsctl/internal/vm"
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 )
+
+// scanOutputFlags reads --json/--stream-json before cobra runs, so a malformed command line
+// is still reported in the shape the caller asked for. The pre-parse is pflag itself --
+// unknown flags whitelisted, everything else its real grammar, = forms and the -- terminator
+// included -- so it cannot drift from the parse cobra performs later.
+func scanOutputFlags(argv []string) cli.Emit {
+	fs := pflag.NewFlagSet("hcsctl", pflag.ContinueOnError)
+	fs.ParseErrorsAllowlist.UnknownFlags = true
+	fs.Usage = func() {}
+	fs.SetOutput(io.Discard)
+	wantJSON := fs.Bool("json", false, "")
+	wantStream := fs.Bool("stream-json", false, "")
+	// Declared so an undeclared --help/-h cannot abort this parse with pflag's ErrHelp
+	// before a later --json is reached; the value is cobra's to act on.
+	fs.BoolP("help", "h", false, "")
+	// A parse error (--json=notabool) leaves the defaults standing; cobra reports it.
+	_ = fs.Parse(argv)
+	return cli.Emit{JSON: *wantJSON, StreamJSON: *wantStream}
+}
 
 func main() { os.Exit(run(os.Args[1:])) }
 
 func run(argv []string) int {
-	// Read --json off argv, not off the parse: a malformed command line must still be
-	// reported in the shape the caller asked for. pflag also accepts --json=<bool>, so the
-	// scan must too -- via the same strconv.ParseBool pflag uses -- or the form would be
-	// accepted and silently ignored.
-	wantJSON, wantStream := false, false
-	scanBool := func(a, name string, dst *bool) {
-		if a == name {
-			*dst = true
-		} else if rest, ok := strings.CutPrefix(a, name+"="); ok {
-			if v, err := strconv.ParseBool(rest); err == nil {
-				*dst = v
-			}
-		}
-	}
-	for _, a := range argv {
-		scanBool(a, "--json", &wantJSON)
-		scanBool(a, "--stream-json", &wantStream)
-	}
-	e := cli.Emit{JSON: wantJSON, StreamJSON: wantStream}
+	e := scanOutputFlags(argv)
 
 	// cobra registers its hidden completion machinery at Execute time with no option to
 	// suppress it, and its output is shell script on stdout -- a contract break under
@@ -130,7 +132,7 @@ exit codes: 0 ok, 1 ran and failed, 64 bad arguments (nothing attempted)
 	}
 
 	pf := root.PersistentFlags()
-	// The values are read off raw argv in run(), before parsing, so a malformed command
+	// The values are read by scanOutputFlags before cobra runs, so a malformed command
 	// line is still reported in the requested shape. Declared here so cobra accepts and
 	// documents them.
 	pf.Bool("json", false, "one JSON document on stdout; progress on stderr")
