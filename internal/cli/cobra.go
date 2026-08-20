@@ -5,6 +5,9 @@ package cli
 
 import (
 	"errors"
+	"fmt"
+	"os"
+	"slices"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -14,12 +17,13 @@ import (
 // StringOnce declares a string option that may be given at most once. pflag's own StringVar
 // is last-one-wins, and a silently dropped value is how a command reaches the wrong target.
 func StringOnce(fs *pflag.FlagSet, p *string, name, usage string) {
-	fs.Var(&onceValue{p: p}, name, usage)
+	fs.Var(&onceValue{p: p, name: name}, name, usage)
 }
 
 type onceValue struct {
-	p   *string
-	set bool
+	p    *string
+	name string
+	set  bool
 }
 
 func (o *onceValue) String() string { return *o.p }
@@ -29,11 +33,8 @@ func (o *onceValue) Set(s string) error {
 	if o.set {
 		return errors.New("given more than once")
 	}
-	if strings.HasPrefix(s, "--") {
-		// pflag hands the next argument over as the value no matter what it looks like, so
-		// a forgotten value would silently swallow the following option -- the exact drift
-		// this package exists to prevent, and exit 64 promises nothing was attempted.
-		return errors.New("requires a value")
+	if err := optionShaped(o.name, s); err != nil {
+		return err
 	}
 	o.set = true
 	*o.p = s
@@ -43,20 +44,42 @@ func (o *onceValue) Set(s string) error {
 // StringArray declares a repeatable string option. Like StringOnce it refuses a value that
 // is spelled like an option.
 func StringArray(fs *pflag.FlagSet, p *[]string, name, usage string) {
-	fs.Var(&arrayValue{p: p}, name, usage)
+	fs.Var(&arrayValue{p: p, name: name}, name, usage)
 }
 
-type arrayValue struct{ p *[]string }
+type arrayValue struct {
+	p    *[]string
+	name string
+}
 
 func (a *arrayValue) String() string { return strings.Join(*a.p, ",") }
 func (a *arrayValue) Type() string   { return "stringArray" }
 
 func (a *arrayValue) Set(s string) error {
-	if strings.HasPrefix(s, "--") {
-		return errors.New("requires a value")
+	if err := optionShaped(a.name, s); err != nil {
+		return err
 	}
 	*a.p = append(*a.p, s)
 	return nil
+}
+
+// argv is what optionShaped scans for the = spelling; a variable so tests can plant one.
+var argv = func() []string { return os.Args[1:] }
+
+// optionShaped guards the space form against a forgotten value: pflag hands the next
+// argument over as the value no matter what it looks like, so `--cmd --json` would silently
+// swallow --json -- the exact drift this package exists to prevent, and exit 64 promises
+// nothing was attempted. A value that genuinely begins with -- is still expressible: the
+// = spelling is unambiguous, so `--cmd=--help` is accepted. pflag's Set carries no syntax
+// context, hence the scan of the raw command line for the = token.
+func optionShaped(name, s string) error {
+	if !strings.HasPrefix(s, "--") {
+		return nil
+	}
+	if slices.Contains(argv(), "--"+name+"="+s) {
+		return nil
+	}
+	return fmt.Errorf("requires a value -- to pass a value beginning with --, write --%s=%s", name, s)
 }
 
 // NoExtraArgs rejects stray positionals as a usage error. cobra's own NoArgs returns a plain

@@ -435,12 +435,24 @@ func TestHelpAndVersion(t *testing.T) {
 		}
 		oneDoc(t, r.stdout, true)
 	})
-	t.Run("an option value spelled --help is not hijacked", func(t *testing.T) {
-		// Leading position only: exec's --cmd may legitimately be the string --help. This
-		// must reach normal dispatch (and fail on the missing container), not print usage.
-		r := invoke(t, "container", "exec", "--id", "zz-no-such", "--cmd", "--help")
+	t.Run("an option value spelled --help passes through the = spelling", func(t *testing.T) {
+		// exec's --cmd may legitimately be the string --help. The = spelling is
+		// unambiguous, so it must reach normal dispatch (and fail on the missing
+		// container), not be rejected as a forgotten value or hijacked as help.
+		r := invoke(t, "container", "exec", "--id", "zz-no-such", "--cmd=--help")
 		if r.code == 0 || strings.Contains(r.stdout, "usage: hcsctl") {
 			t.Fatalf("option value --help hijacked the invocation: exit %d", r.code)
+		}
+		if !strings.Contains(r.stderr, "zz-no-such") {
+			t.Fatalf("=-spelled value did not reach dispatch: %q", r.stderr)
+		}
+	})
+	t.Run("space form with an option-shaped value is a forgotten value", func(t *testing.T) {
+		// Without the = the value would have been swallowed silently by pflag; the guard
+		// rejects it and names the escape hatch.
+		r := invoke(t, "container", "exec", "--id", "zz-no-such", "--cmd", "--help")
+		if r.code != 64 || !strings.Contains(r.stderr, "requires a value") {
+			t.Fatalf("exit %d, stderr %q", r.code, r.stderr)
 		}
 	})
 }
