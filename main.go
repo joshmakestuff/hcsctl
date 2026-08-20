@@ -74,10 +74,18 @@ func run(argv []string) int {
 		return versionCmd(e)
 	}
 
-	root := newRoot(e)
+	helpRequested := false
+	root := newRoot(e, &helpRequested)
 	root.SetArgs(argv)
 	cmd, err := root.ExecuteC()
 	if err == nil {
+		if helpRequested {
+			// The help text is on stderr and the verb never ran. Exit 64 keeps the safe
+			// signal for a script that forwarded a stray --help into a real invocation:
+			// exit 0 is never emitted without the verb having run.
+			e.Failure("usage", fmt.Errorf("help requested; nothing attempted"))
+			return cli.Usage
+		}
 		return cli.OK
 	}
 	if errors.Is(err, cli.ErrReported) {
@@ -95,7 +103,7 @@ func run(argv []string) int {
 	return cli.Failed
 }
 
-func newRoot(e cli.Emit) *cobra.Command {
+func newRoot(e cli.Emit, helpRequested *bool) *cobra.Command {
 	root := &cobra.Command{
 		Use:   "hcsctl <group> <verb> [options]",
 		Short: "a CLI over the Windows Host Compute Service",
@@ -145,20 +153,36 @@ exit codes: 0 ok, 1 ran and failed, 64 bad arguments (nothing attempted)
 		return cli.Usagef("%v", err)
 	})
 
-	// Requested help honours the output contract: exit 0, help on stdout, one document
-	// under --json. The usage text that accompanies an error stays on stderr.
+	// Requested help means nothing was attempted, so it is exit 64 like every other
+	// command line that ran no verb: the full help text on stderr, where usage has always
+	// lived, and run() emits the one failure document under --json. Exit 0 with help would
+	// let a forwarded --help make a script record a verb as succeeded when it never ran.
 	root.SetHelpFunc(func(c *cobra.Command, _ []string) {
+		*helpRequested = true
 		var b strings.Builder
 		if long := strings.TrimRight(c.Long, "\n"); long != "" {
-			b.WriteString(long + "\n\n")
+			b.WriteString(long)
+			b.WriteString("\n\n")
 		} else if c.Short != "" {
-			b.WriteString(c.Short + "\n\n")
+			b.WriteString(c.Short)
+			b.WriteString("\n\n")
 		}
 		b.WriteString(c.UsageString())
-		text := b.String()
-		e.Result(map[string]any{"ok": true, "command": "help", "usage": text}, func() {
-			fmt.Print(text)
-		})
+		fmt.Fprint(os.Stderr, b.String())
+	})
+
+	// cobra's default help command exits 0 even for an unknown topic. This one routes a
+	// known topic through the help func above; either way the exit-64 rule holds.
+	root.SetHelpCommand(&cobra.Command{
+		Use:   "help [command]",
+		Short: "help about any command",
+		RunE: func(_ *cobra.Command, args []string) error {
+			target, rest, _ := root.Find(args)
+			if len(rest) > 0 {
+				return cli.Usagef("unknown help topic %q", strings.Join(args, " "))
+			}
+			return target.Help()
+		},
 	})
 
 	root.SetUsageTemplate(usageTemplate)

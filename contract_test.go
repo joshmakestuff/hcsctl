@@ -377,20 +377,41 @@ func TestContainerLogs(t *testing.T) {
 	})
 }
 
-// Requested help and version are exit 0 with output on stdout -- unlike the usage text that
-// accompanies an error, which stays on stderr.
+// Requested help is exit 64 with the help text on stderr: nothing ran, and exit 0 must never
+// be emitted without the verb having run -- a forwarded --help inside a real invocation would
+// otherwise record a destructive verb as succeeded. Version is a real verb: exit 0.
 func TestHelpAndVersion(t *testing.T) {
-	for _, args := range [][]string{{"--help"}, {"-h"}, {"help"}} {
-		t.Run(strings.Join(args, ""), func(t *testing.T) {
+	for _, args := range [][]string{
+		{"--help"}, {"-h"}, {"help"}, {"help", "vm"},
+		// The review scenario: --help riding a complete destructive invocation.
+		{"vm", "stop", "--id", "eb95e0a7-ee3e-4c7b-ba10-4089b4771083", "--help"},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
 			r := invoke(t, args...)
-			if r.code != 0 {
-				t.Fatalf("exit %d, want 0\nstderr: %s", r.code, r.stderr)
+			if r.code != 64 {
+				t.Fatalf("exit %d, want 64\nstderr: %s", r.code, r.stderr)
 			}
-			if !strings.Contains(r.stdout, "usage: hcsctl") {
-				t.Fatalf("help did not render usage on stdout: %q", r.stdout[:min(len(r.stdout), 80)])
+			if r.stdout != "" {
+				t.Fatalf("help wrote to stdout without --json: %q", r.stdout)
+			}
+			if !strings.Contains(r.stderr, "usage: hcsctl") {
+				t.Fatalf("help did not render usage on stderr: %q", r.stderr[:min(len(r.stderr), 80)])
 			}
 		})
 	}
+	t.Run("help with --json emits one failure document", func(t *testing.T) {
+		r := invoke(t, "vm", "stop", "--id", "eb95e0a7-ee3e-4c7b-ba10-4089b4771083", "--help", "--json")
+		if r.code != 64 {
+			t.Fatalf("exit %d, want 64\nstderr: %s", r.code, r.stderr)
+		}
+		oneDoc(t, r.stdout, false)
+	})
+	t.Run("unknown help topic", func(t *testing.T) {
+		r := invoke(t, "help", "bogus")
+		if r.code != 64 || !strings.Contains(r.stderr, "bogus") {
+			t.Fatalf("exit %d, stderr %q", r.code, r.stderr)
+		}
+	})
 	for _, args := range [][]string{{"--version"}, {"version"}} {
 		t.Run(strings.Join(args, ""), func(t *testing.T) {
 			r := invoke(t, args...)
@@ -403,13 +424,16 @@ func TestHelpAndVersion(t *testing.T) {
 		})
 	}
 	t.Run("json keeps the one-document contract", func(t *testing.T) {
-		for _, args := range [][]string{{"help", "--json"}, {"version", "--json"}} {
-			r := invoke(t, args...)
-			if r.code != 0 {
-				t.Fatalf("%v: exit %d, want 0", args, r.code)
-			}
-			oneDoc(t, r.stdout, true)
+		r := invoke(t, "help", "--json")
+		if r.code != 64 {
+			t.Fatalf("help --json: exit %d, want 64", r.code)
 		}
+		oneDoc(t, r.stdout, false)
+		r = invoke(t, "version", "--json")
+		if r.code != 0 {
+			t.Fatalf("version --json: exit %d, want 0", r.code)
+		}
+		oneDoc(t, r.stdout, true)
 	})
 	t.Run("an option value spelled --help is not hijacked", func(t *testing.T) {
 		// Leading position only: exec's --cmd may legitimately be the string --help. This
