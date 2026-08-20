@@ -33,6 +33,7 @@ import (
 	"github.com/Microsoft/go-winio/vhd"
 	"github.com/Microsoft/hcsshim"
 	"github.com/Microsoft/hcsshim/computestorage"
+	"github.com/Microsoft/hcsshim/osversion"
 	"github.com/joshmakestuff/hcsctl/internal/cli"
 	"github.com/joshmakestuff/hcsctl/internal/store"
 	"github.com/spf13/cobra"
@@ -42,18 +43,25 @@ import (
 // Command is `hcsctl storage`.
 func Command(e cli.Emit) *cobra.Command {
 	return cli.Group("storage", "VHD-backed layers via computestorage",
-		setupBaseCmd(e), mountCmd(e), unmountCmd(e), importCmd(e), exportCmd(e), destroyCmd(e),
-		attachOverlayCmd(e), detachOverlayCmd(e))
+		setupBaseCmd(e), setupVolumeCmd(e), mountCmd(e), unmountCmd(e), importCmd(e), exportCmd(e),
+		destroyCmd(e), attachOverlayCmd(e), detachOverlayCmd(e))
 }
 
 func setupBaseCmd(e cli.Emit) *cobra.Command {
 	var layer, sizeGB string
+	var uvm bool
 	cmd := &cobra.Command{
-		Use:   "setup-base --layer <dir> [--size-gb N]",
+		Use:   "setup-base --layer <dir> [--uvm] [--size-gb N]",
 		Short: "prepare a base layer for VHD-backed use. MUTATES the layer, ELEVATED",
 		Long: `Prepare a base layer for VHD-backed (computestorage) use: blank-base.vhdx and
 blank.vhdx created inside the layer directory. MUTATES the layer -- Hives/ and
-Layout are regenerated -- so point it at a copy, not a store layer. ELEVATED.`,
+Layout are regenerated -- so point it at a copy, not a store layer.
+
+--uvm prepares the layer's utility VM instead: SystemTemplateBase.vhdx and
+SystemTemplate.vhdx under UtilityVM\, from UtilityVM\Files. The UVM base VHD
+is created but not formatted -- SetupBaseOSLayer writes the boot filesystem --
+so a container base and a utility VM base are separate preparations of the
+same layer. ELEVATED.`,
 		Args: cli.NoExtraArgs,
 		RunE: func(*cobra.Command, []string) error {
 			if err := requireDir("--layer", layer); err != nil {
@@ -67,8 +75,16 @@ Layout are regenerated -- so point it at a copy, not a store layer. ELEVATED.`,
 					return cli.Usagef("--size-gb %v", err)
 				}
 			}
-			// SetupBaseOSLayer mutates its input (regenerates Hives/ and Layout); the layer
-			// check runs before the mutation.
+			// Both calls mutate their input (SetupBaseOSLayer regenerates Hives/ and
+			// Layout); the shape check runs before the mutation.
+			if uvm {
+				// The call takes the UtilityVM directory, but Files under it is what
+				// proves the layer actually carries a utility VM.
+				if _, err := os.Stat(filepath.Join(layer, uvmFilesPath)); err != nil {
+					return cli.Usagef(`--layer %s has no %s -- the image carries no utility VM`, layer, uvmFilesPath)
+				}
+				return setupUVMBase(layer, size, e)
+			}
 			if _, err := os.Stat(filepath.Join(layer, "Files")); err != nil {
 				return cli.Usagef("--layer %s has no Files directory -- not a materialized layer", layer)
 			}
@@ -78,7 +94,88 @@ Layout are regenerated -- so point it at a copy, not a store layer. ELEVATED.`,
 	cli.StringOnce(cmd.Flags(), &layer, "layer", "layer directory to prepare")
 	cli.Required(cmd, "layer")
 	cli.StringOnce(cmd.Flags(), &sizeGB, "size-gb", "base VHD size in GB (default 10)")
+	cmd.Flags().BoolVar(&uvm, "uvm", false, "prepare the layer's utility VM base instead of the container base")
 	return cmd
+}
+
+func setupVolumeCmd(e cli.Emit) *cobra.Command {
+	var layer, volume, layerType string
+	cmd := &cobra.Command{
+		Use:   "setup-volume --layer <dir> --volume <volume> [--type container|vm]",
+		Short: "HcsSetupBaseOSVolume: write the base OS onto a mounted volume. ELEVATED",
+		Long: `HcsSetupBaseOSVolume -- the volume-taking variant of the base OS setup that
+setup-base performs against a VHD handle.
+
+Two measured requirements, neither of which the API reports as an error:
+
+The volume must be a writable-layer-formatted volume (what storage mount
+attaches). On a plain NTFS volume the call returns SUCCESS and does nothing at
+all, so this verb verifies the WcSandboxState marker afterwards and fails if
+the call was a no-op.
+
+The layer must NOT already carry Hives\ or layout: either one alone makes the
+call fail "file already exists", so this runs on a layer that has been through
+neither wclayer import nor a previous base setup -- and the call regenerates
+both, so a layer is single-use here.
+
+Build 19645 or newer. MUTATES both the layer and the volume. ELEVATED.`,
+		Args: cli.NoExtraArgs,
+		RunE: func(*cobra.Command, []string) error {
+			opts, err := osLayerOptions(layerType)
+			if err != nil {
+				return err
+			}
+			if err := requireDir("--layer", layer); err != nil {
+				return err
+			}
+			if err := requireDir("--volume", volume); err != nil {
+				return err
+			}
+			if b := osversion.Build(); b < 19645 {
+				return cli.Usagef("SetupBaseOSVolume needs build 19645 or newer, host is %d", b)
+			}
+			// Measured: either artifact alone makes the call fail "file already exists",
+			// which names neither the layer nor the artifact.
+			for _, a := range []string{"Hives", "layout"} {
+				if _, err := os.Stat(filepath.Join(layer, a)); err == nil {
+					return cli.Usagef("--layer %s already carries %s -- SetupBaseOSVolume needs a layer that has been through neither wclayer import nor a previous base setup", layer, a)
+				}
+			}
+			e.Progress("SetupBaseOSVolume: %s -> %s (%s) -- regenerates Hives/ and Layout in the layer", layer, volume, opts.Type)
+			if err := computestorage.SetupBaseOSVolume(context.Background(), layer, volume, opts); err != nil {
+				return fmt.Errorf("SetupBaseOSVolume: %w", err)
+			}
+			// Measured: on a volume that is not writable-layer-formatted the call returns
+			// success and writes nothing, so the nil return proves nothing on its own.
+			// WcSandboxState is what the handle variant leaves behind.
+			if _, err := os.Stat(volumeJoin(volume, "WcSandboxState")); err != nil {
+				return fmt.Errorf("SetupBaseOSVolume returned success but wrote nothing to %s -- the volume is not writable-layer-formatted (use the volume from storage mount)", volume)
+			}
+			e.Result(map[string]any{
+				"ok": true, "command": "storage setup-volume", "layer": layer,
+				"volume": volume, "type": string(opts.Type),
+			}, func() {
+				fmt.Printf("base OS written\n  layer:  %s\n  volume: %s\n", layer, volume)
+			})
+			return nil
+		},
+	}
+	cli.StringOnce(cmd.Flags(), &layer, "layer", "layer directory carrying the base OS files")
+	cli.StringOnce(cmd.Flags(), &volume, "volume", "mounted, formatted volume to write onto")
+	cli.Required(cmd, "layer", "volume")
+	cli.StringOnce(cmd.Flags(), &layerType, "type", "container (default) or vm")
+	return cmd
+}
+
+func osLayerOptions(layerType string) (computestorage.OsLayerOptions, error) {
+	switch strings.ToLower(layerType) {
+	case "", "container":
+		return computestorage.OsLayerOptions{Type: computestorage.OsLayerTypeContainer}, nil
+	case "vm":
+		return computestorage.OsLayerOptions{Type: computestorage.OsLayerTypeVM}, nil
+	default:
+		return computestorage.OsLayerOptions{}, cli.Usagef("--type must be container or vm, got %q", layerType)
+	}
 }
 
 func mountCmd(e cli.Emit) *cobra.Command {
@@ -477,6 +574,12 @@ const (
 	blankName     = "blank.vhdx"
 	sandboxName   = "sandbox.vhdx"
 	defaultSizeGB = 10
+
+	// The utility VM layout, matching hcsshim's own names for these files.
+	uvmPath        = `UtilityVM`
+	uvmFilesPath   = `UtilityVM\Files`
+	uvmBaseVhd     = "SystemTemplateBase.vhdx"
+	uvmTemplateVhd = "SystemTemplate.vhdx"
 )
 
 // requireDir is the shared argument shape: a named option that must be an existing directory.
@@ -513,6 +616,36 @@ func setupBase(layer string, size uint64, e cli.Emit) error {
 		"baseVhd": base, "diffVhd": diff, "sizeGB": size,
 	}, func() {
 		fmt.Printf("base ready\n  blank-base: %s\n  blank:      %s\n", base, diff)
+	})
+	return nil
+}
+
+// setupUVMBase wraps SetupUtilityVMBaseLayer: the utility VM half of base preparation.
+// Unlike the container base, the VHD is created but not formatted -- SetupBaseOSLayer
+// writes the boot filesystem into it.
+//
+// uvmPath is the layer's UtilityVM directory, NOT UtilityVM\Files: hcsshim documents it
+// as "the path to the UtilityVM filesystem", but the Files path fails ERROR_GEN_FAILURE
+// and the directory above it succeeds (measured).
+func setupUVMBase(layer string, size uint64, e cli.Emit) error {
+	uvm := filepath.Join(layer, uvmPath)
+	base := filepath.Join(layer, uvmPath, uvmBaseVhd)
+	tmpl := filepath.Join(layer, uvmPath, uvmTemplateVhd)
+	e.Progress("SetupUtilityVMBaseLayer: %s (%d GB) -- regenerates Hives/ and Layout in the UVM", uvm, size)
+	if err := computestorage.SetupUtilityVMBaseLayer(context.Background(), uvm, base, tmpl, size); err != nil {
+		return fmt.Errorf("SetupUtilityVMBaseLayer: %w", err)
+	}
+	// The helper removes and recreates both VHDs, so their presence is the postcondition.
+	for _, p := range []string{base, tmpl} {
+		if _, err := os.Stat(p); err != nil {
+			return fmt.Errorf("SetupUtilityVMBaseLayer returned success but %s is missing: %w", p, err)
+		}
+	}
+	e.Result(map[string]any{
+		"ok": true, "command": "storage setup-base", "layer": layer, "uvm": true,
+		"uvmPath": uvm, "baseVhd": base, "templateVhd": tmpl, "sizeGB": size,
+	}, func() {
+		fmt.Printf("utility VM base ready\n  base:     %s\n  template: %s\n", base, tmpl)
 	})
 	return nil
 }
