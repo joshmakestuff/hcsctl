@@ -37,16 +37,18 @@ type info struct {
 	Command string `json:"command"`
 	// ToolVersion and ContractVersion are hcsctl's own; Version below is the host OS. A
 	// consumer's preflight checks the contract version; the tool version is for bug reports.
-	ToolVersion     string   `json:"toolVersion"`
-	ContractVersion string   `json:"contractVersion"`
-	Build           uint16   `json:"build"`
-	BuildRevision   uint32   `json:"buildRevision"`
-	Version         string   `json:"version"`
-	Elevated        bool     `json:"elevated"`
-	HyperVAdmin     bool     `json:"hyperVAdministrators"`
-	Privileges      []string `json:"privilegesHeld"`
-	CimFSSupported  bool     `json:"cimfsSupported"`
-	BlockCimSupport bool     `json:"blockCimSupported"`
+	ToolVersion        string   `json:"toolVersion"`
+	ContractVersion    string   `json:"contractVersion"`
+	Build              uint16   `json:"build"`
+	BuildRevision      uint32   `json:"buildRevision"`
+	Version            string   `json:"version"`
+	Elevated           bool     `json:"elevated"`
+	HyperVAdmin        bool     `json:"hyperVAdministrators"`
+	Privileges         []string `json:"privilegesHeld"`
+	CimFSSupported     bool     `json:"cimfsSupported"`
+	BlockCimSupport    bool     `json:"blockCimSupported"`
+	MergedCimSupport   bool     `json:"mergedCimSupported"`
+	VerifiedCimSupport bool     `json:"verifiedCimSupported"`
 	// Services are reported as individual states, so a consumer can see which one is absent
 	// or stopped.
 	Services map[string]string `json:"services"`
@@ -102,15 +104,17 @@ func run(storeDir string, e cli.Emit) error {
 		OK: true, Command: "info",
 		ToolVersion: cli.ToolVersion, ContractVersion: cli.ContractVersion,
 		Build: osversion.Build(), BuildRevision: rev,
-		Version:         fmt.Sprintf("%d.%d.%d.%d", v.MajorVersion, v.MinorVersion, v.Build, rev),
-		Elevated:        isElevated(),
-		HyperVAdmin:     inHyperVAdministrators(),
-		Privileges:      heldPrivileges(),
-		CimFSSupported:  cimfs.IsCimFSSupported(),
-		BlockCimSupport: cimfs.IsBlockCimSupported(),
-		Services:        serviceStates(),
-		Store:           storeState(st),
-		Images:          imageCompats(st, v),
+		Version:            fmt.Sprintf("%d.%d.%d.%d", v.MajorVersion, v.MinorVersion, v.Build, rev),
+		Elevated:           isElevated(),
+		HyperVAdmin:        inHyperVAdministrators(),
+		Privileges:         heldPrivileges(),
+		CimFSSupported:     cimfs.IsCimFSSupported(),
+		BlockCimSupport:    cimfs.IsBlockCimSupported(),
+		MergedCimSupport:   cimfs.IsMergedCimSupported(),
+		VerifiedCimSupport: cimfs.IsVerifiedCimSupported(),
+		Services:           serviceStates(),
+		Store:              storeState(st),
+		Images:             imageCompats(st, v),
 	}
 
 	e.Result(i, func() {
@@ -118,7 +122,8 @@ func run(storeDir string, e cli.Emit) error {
 		fmt.Printf("windows      %s\n", i.Version)
 		fmt.Printf("elevated     %v\n", i.Elevated)
 		fmt.Printf("hypervAdmin  %v\n", i.HyperVAdmin)
-		fmt.Printf("cimfs        supported=%v blockCim=%v\n", i.CimFSSupported, i.BlockCimSupport)
+		fmt.Printf("cimfs        supported=%v blockCim=%v mergedCim=%v verifiedCim=%v\n",
+			i.CimFSSupported, i.BlockCimSupport, i.MergedCimSupport, i.VerifiedCimSupport)
 		fmt.Printf("services     ")
 		for n, name := range servicesOfInterest {
 			if n > 0 {

@@ -184,6 +184,41 @@ var usageCases = []struct {
 	{"network inspect missing identity", []string{"network", "inspect"}},
 	{"network inspect ambiguous identity", []string{"network", "inspect", "--id", "x", "--name", "x"}},
 	{"network inspect unknown option", []string{"network", "inspect", "--name", "x", "--force"}},
+	// cim cases are argument-shaped only: capability gates depend on the host build, so
+	// they are exercised in the smoke scripts, never here.
+	{"cim missing subcommand", []string{"cim"}},
+	{"cim create missing dir", []string{"cim", "create", "--cim", `C:\hcsctl-no-such-dir\a.cim`}},
+	{"cim create neither cim nor block", []string{"cim", "create", "--dir", `C:\Windows`}},
+	{"cim create cim and block exclusive", []string{"cim", "create", "--dir", `C:\Windows`, "--cim", `C:\x\a.cim`, "--block", `C:\x\a.bcim`}},
+	{"cim create dir not a directory", []string{"cim", "create", "--dir", `C:\Windows\notepad.exe`, "--cim", `C:\x\a.cim`}},
+	{"cim create unlink without fork", []string{"cim", "create", "--dir", `C:\Windows`, "--cim", `C:\x\a.cim`, "--unlink", "f.txt"}},
+	{"cim create tombstone on standard cim", []string{"cim", "create", "--dir", `C:\Windows`, "--cim", `C:\x\a.cim`, "--tombstone", "f.txt"}},
+	{"cim create consistent on standard cim", []string{"cim", "create", "--dir", `C:\Windows`, "--cim", `C:\x\a.cim`, "--consistent"}},
+	{"cim create merged-link without equals", []string{"cim", "create", "--dir", `C:\Windows`, "--block", `C:\x\a.bcim`, "--merged-link", "bad"}},
+	{"cim create fork of block cim", []string{"cim", "create", "--dir", `C:\Windows`, "--block", `C:\x\a.bcim`, "--fork-of", "p.cim"}},
+	{"cim create fork-of is a path", []string{"cim", "create", "--dir", `C:\Windows`, "--cim", `C:\x\a.cim`, "--fork-of", `sub\p.cim`}},
+	{"cim create block device without name", []string{"cim", "create", "--dir", `C:\Windows`, "--block", `\\.\PhysicalDrive9`}},
+	{"cim mount neither cim nor block", []string{"cim", "mount"}},
+	{"cim mount no such cim", []string{"cim", "mount", "--cim", `C:\hcsctl-no-such-dir\a.cim`}},
+	{"cim mount single source", []string{"cim", "mount", "--block", `C:\x\m.bcim`, "--source", `C:\x\l1.bcim`}},
+	{"cim mount source with standard cim", []string{"cim", "mount", "--cim", `C:\x\a.cim`, "--source", `C:\x\l1.bcim`, "--source", `C:\x\l2.bcim`}},
+	{"cim mount verified with sources", []string{"cim", "mount", "--block", `C:\x\m.bcim`, "--verified", "--source", `C:\x\l1.bcim`, "--source", `C:\x\l2.bcim`}},
+	{"cim mount root-hash without verified", []string{"cim", "mount", "--block", `C:\x\a.bcim`, "--root-hash", "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"}},
+	{"cim mount root-hash wrong length", []string{"cim", "mount", "--block", `C:\x\a.bcim`, "--verified", "--root-hash", "abcd"}},
+	{"cim mount guid not a guid", []string{"cim", "mount", "--cim", `C:\x\a.cim`, "--guid", "not-a-guid"}},
+	{"cim unmount nothing given", []string{"cim", "unmount"}},
+	{"cim unmount volume and cim both", []string{"cim", "unmount", "--volume", `\\?\Volume{eb95e0a7-ee3e-4c7b-ba10-4089b4771083}\`, "--cim", `C:\x\a.cim`}},
+	{"cim unmount not a volume path", []string{"cim", "unmount", "--volume", `C:\x`}},
+	{"cim merge missing block", []string{"cim", "merge", "--source", `C:\x\l1.bcim`, "--source", `C:\x\l2.bcim`}},
+	{"cim merge one source", []string{"cim", "merge", "--block", `C:\x\m.bcim`, "--source", `C:\x\l1.bcim`}},
+	{"cim merge source type mismatch", []string{"cim", "merge", "--block", `C:\x\m.bcim`, "--source", `C:\x\l1.bcim`, "--source", `\\.\PhysicalDrive9::b.cim`}},
+	{"cim usage missing cim", []string{"cim", "usage"}},
+	{"cim usage no such cim", []string{"cim", "usage", "--cim", `C:\hcsctl-no-such-dir\a.cim`}},
+	{"cim usage not a cim", []string{"cim", "usage", "--cim", `C:\Windows\notepad.exe`}},
+	{"cim verify missing block", []string{"cim", "verify"}},
+	{"cim destroy missing cim", []string{"cim", "destroy"}},
+	{"cim destroy no such cim", []string{"cim", "destroy", "--cim", `C:\hcsctl-no-such-dir\a.cim`}},
+	{"cim destroy not a cim", []string{"cim", "destroy", "--cim", `C:\Windows\notepad.exe`}},
 }
 
 func TestUsageErrorsExit64(t *testing.T) {
@@ -267,6 +302,20 @@ func TestUsageErrorAttemptsNothing(t *testing.T) {
 				t.Fatalf("usage error created the store at %s", store)
 			}
 		})
+	}
+}
+
+// TestCimUsageErrorAttemptsNothing: the cim verbs take no --store, so the observable
+// side effect a usage error must not have is the target image directory itself.
+func TestCimUsageErrorAttemptsNothing(t *testing.T) {
+	target := filepath.Join(t.TempDir(), "cims")
+	r := invoke(t, "cim", "create", "--dir", t.TempDir(),
+		"--cim", filepath.Join(target, "a.cim"), "--tombstone", "t")
+	if r.code != 64 {
+		t.Fatalf("exit %d, want 64\nstderr: %s", r.code, r.stderr)
+	}
+	if _, err := os.Stat(target); !os.IsNotExist(err) {
+		t.Fatalf("usage error created the image directory at %s", target)
 	}
 }
 

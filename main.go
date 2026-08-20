@@ -24,6 +24,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/joshmakestuff/hcsctl/internal/cim"
 	"github.com/joshmakestuff/hcsctl/internal/cli"
 	"github.com/joshmakestuff/hcsctl/internal/container"
 	"github.com/joshmakestuff/hcsctl/internal/guest"
@@ -157,6 +158,7 @@ exit codes: 0 ok, 1 ran and failed, 64 bad arguments (nothing attempted)
 		layer.Command(e),
 		container.Command(e),
 		storage.Command(e),
+		cim.Command(e),
 		network.Command(e),
 		vm.Command(e),
 		guest.Command(e),
