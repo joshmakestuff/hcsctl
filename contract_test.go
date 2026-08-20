@@ -98,6 +98,9 @@ var usageCases = []struct {
 }{
 	{"bare invocation", nil},
 	{"unknown verb group", []string{"frobnicate"}},
+	{"completion command", []string{"completion", "bash"}},
+	{"hidden completion command", []string{"__complete", "image", ""}},
+	{"hidden no-desc completion command", []string{"__completeNoDesc", "image", ""}},
 	{"missing subcommand", []string{"container"}},
 	{"unknown subcommand", []string{"container", "frobnicate"}},
 	{"unknown option", []string{"image", "ls", "--bogus", "x"}},

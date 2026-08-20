@@ -59,6 +59,14 @@ func run(argv []string) int {
 	}
 	e := cli.Emit{JSON: wantJSON, StreamJSON: wantStream}
 
+	// cobra registers its hidden completion machinery at Execute time with no option to
+	// suppress it, and its output is shell script on stdout -- a contract break under
+	// --json. Rejected here, before cobra ever sees it.
+	if len(argv) > 0 && (argv[0] == cobra.ShellCompRequestCmd || argv[0] == cobra.ShellCompNoDescRequestCmd) {
+		e.Failure("usage", fmt.Errorf("shell completion is not supported"))
+		return cli.Usage
+	}
+
 	// version is answered before cobra runs so `hcsctl --version --json` keeps the
 	// one-document contract; cobra's own --version handling prints bare text. Leading
 	// position only: an option's *value* may be the string "--version".
@@ -96,7 +104,10 @@ func newRoot(e cli.Emit) *cobra.Command {
 exit codes: 0 ok, 1 ran and failed, 64 bad arguments (nothing attempted)
             a guest process's own exit code is reported as exitCode in the result, not as
             hcsctl's exit code`,
-		Args: cobra.ArbitraryArgs,
+		// No completion command: its output is shell script on stdout, which the --json
+		// contract cannot admit. The hidden __complete twin is rejected in run().
+		CompletionOptions: cobra.CompletionOptions{DisableDefaultCmd: true},
+		Args:              cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
 			if len(args) == 0 {
 				return cli.Usagef("a verb group is required (image, layer, container, vm, guest, network, storage, info)")
