@@ -972,6 +972,11 @@ func buildConfig(o *createOptions, e cli.Emit, st *store.Store, id string) (*hcs
 		if scratchSize, err = cli.ParseSize(o.scratchSize); err != nil {
 			return nil, s, err
 		}
+		// Rejected here, before any disk work, so a missing grant is exit 64 with a named
+		// reason instead of an attach failure after the scratch was created.
+		if err := sysinfo.ExpandScratchReady(); err != nil {
+			return nil, s, err
+		}
 	}
 
 	chain, err := chainFor(st, o.ref)
@@ -1039,11 +1044,11 @@ func buildConfig(o *createOptions, e cli.Emit, st *store.Store, id string) (*hcs
 	e.Progress("CreateScratchLayer ok")
 
 	if scratchSize != 0 {
-		if err := hcsshim.ExpandScratchSize(hcsshim.DriverInfo{}, sd, scratchSize); err != nil {
+		if err := layer.ExpandScratch(sd, scratchSize); err != nil {
 			destroyScratch(st, id)
-			return nil, s, fmt.Errorf("ExpandScratchSize: %w", err)
+			return nil, s, fmt.Errorf("ExpandScratch: %w", err)
 		}
-		e.Progress("ExpandScratchSize to %d bytes ok", scratchSize)
+		e.Progress("ExpandScratch to %d bytes ok", scratchSize)
 	}
 
 	// A xenon hands the layers to the utility VM, which stacks them in the guest; an argon

@@ -25,7 +25,8 @@ that need elevation say so in `hcsctl help`; nothing escalates on its own.
   filtered token.
 - `image rm`, `layer mount|unmount`, and every `storage` command are elevated.
 - Hyper-V-isolated `container` commands run unelevated, with two per-option exceptions:
-  `--mount` is elevated, and `--scratch-size` currently fails unelevated.
+  `--mount` is elevated, and `--scratch-size` needs the grantable `SeManageVolumePrivilege`
+  ("Perform volume maintenance tasks") -- a per-user setup step, not elevation.
 - **Process-isolated containers are elevated at every start** (see below).
 - `vm` commands are unelevated; membership of Hyper-V Administrators is enough.
 - `image pull`, `image ls`, `network ls|endpoints|inspect`, `guest` commands and `info` are
