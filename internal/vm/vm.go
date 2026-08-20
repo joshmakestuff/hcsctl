@@ -240,18 +240,17 @@ and never interpreted -- record an owner pid; scavenge only on proof it is dead.
 				}
 			}
 
-			// Resolved before anything is made. This is argument validation -- a name that
-			// matches no network is exit 64, and 64 means nothing was attempted, so it cannot
-			// happen after a differencing disk has been written and rolled back. A failure
-			// listing the networks has always been 64 here too, so it is kept that way.
+			// Resolved before anything is made. A name that matches no network is exit 64
+			// (argument validation, typed by resolveVMNetwork), and 64 means nothing was
+			// attempted, so it cannot happen after a differencing disk has been written and
+			// rolled back. A failure listing the networks at all -- HNS unavailable, access
+			// denied -- is not bad arguments: the RPC was attempted and failed, so it flows
+			// through as exit 1, and a consumer retrying on 64 does not loop on a broken
+			// service (#78).
 			var netw *hcn.HostComputeNetwork
 			if network != "" {
 				if netw, err = resolveVMNetwork(network); err != nil {
-					var ue *cli.UsageError
-					if errors.As(err, &ue) {
-						return err
-					}
-					return cli.Usagef("%v", err)
+					return err
 				}
 			}
 			dns, err := parseDNS(dnsCSV)
