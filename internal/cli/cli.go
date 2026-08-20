@@ -23,7 +23,9 @@ const (
 // result document changes, a field's meaning changes, or an exit code's meaning changes --
 // and ONLY then. Adding a new verb, option, or document field is not a bump: a consumer
 // reading fields it knows keeps working.
-const ContractVersion = "1"
+// "2": requested help became exit 64 with a usage-failure document (it was exit 0 with an
+// ok:true help document) -- an exit code's meaning changed.
+const ContractVersion = "2"
 
 // ToolVersion identifies the build for humans in a bug report. Release builds stamp it:
 //

@@ -63,10 +63,19 @@ func run(argv []string) int {
 
 	// cobra registers its hidden completion machinery at Execute time with no option to
 	// suppress it, and its output is shell script on stdout -- a contract break under
-	// --json. Rejected here, before cobra ever sees it.
-	if len(argv) > 0 && (argv[0] == cobra.ShellCompRequestCmd || argv[0] == cobra.ShellCompNoDescRequestCmd) {
-		e.Failure("usage", fmt.Errorf("shell completion is not supported"))
-		return cli.Usage
+	// --json. Rejected here, before cobra ever sees it. The scan skips leading flags
+	// because cobra does too: `--json __complete ...` resolves the hidden command just as
+	// well as a bare one. Global flags are all booleans, so the first non-flag token is
+	// the group word, never a flag's value.
+	for _, a := range argv {
+		if strings.HasPrefix(a, "-") {
+			continue
+		}
+		if a == cobra.ShellCompRequestCmd || a == cobra.ShellCompNoDescRequestCmd {
+			e.Failure("usage", fmt.Errorf("shell completion is not supported"))
+			return cli.Usage
+		}
+		break
 	}
 
 	helpRequested := false

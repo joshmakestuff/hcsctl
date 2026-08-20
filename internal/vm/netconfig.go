@@ -83,7 +83,8 @@ func newNetConfig(addrs []string, netw *hcn.HostComputeNetwork, iface string, dn
 
 func netconfigCmd(e cli.Emit) *cobra.Command {
 	var id *cli.GUIDFlag
-	var dnsCSV, iface, storeDir string
+	var storeDir *string
+	var dnsCSV, iface string
 	var timeout time.Duration
 	cmd := &cobra.Command{
 		Use:   "netconfig --id <guid> [--dns <ip,ip>] [--interface eth0] [--timeout 45s] [--store <dir>]",
@@ -98,19 +99,18 @@ afterwards, not what was asked.`,
 			if err != nil {
 				return err
 			}
-			return netconfig(id.Value().String(), dns, iface, timeout, storeDir, e)
+			return netconfig(id.Value(), dns, iface, timeout, *storeDir, e)
 		},
 	}
-	id = cli.GUID(cmd.Flags(), "id", "VM id, a GUID")
-	cli.Required(cmd, "id")
+	id, storeDir = idStoreFlags(cmd)
 	cli.StringOnce(cmd.Flags(), &dnsCSV, "dns", "comma-separated IPv4 DNS servers to program")
 	cli.StringOnce(cmd.Flags(), &iface, "interface", "guest interface to program (default: the guest's own default)")
 	cli.Duration(cmd.Flags(), &timeout, "timeout", 45*time.Second, 0, "agent call deadline")
-	cli.StringOnce(cmd.Flags(), &storeDir, "store", "store directory")
 	return cmd
 }
 
-func netconfig(id string, dns []string, iface string, timeout time.Duration, storeDir string, e cli.Emit) error {
+func netconfig(vmid guid.GUID, dns []string, iface string, timeout time.Duration, storeDir string, e cli.Emit) error {
+	id := vmid.String()
 	s, err := store.New(storeDir)
 	if err != nil {
 		return err
@@ -138,10 +138,6 @@ func netconfig(id string, dns []string, iface string, timeout time.Duration, sto
 		return err
 	}
 
-	vmid, err := guid.FromString(id)
-	if err != nil {
-		return cli.Usagef("--id is not a GUID: %v", err)
-	}
 	ifaceLabel := nc.Interface
 	if ifaceLabel == "" {
 		ifaceLabel = "the guest's default interface"

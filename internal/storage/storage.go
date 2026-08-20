@@ -103,9 +103,6 @@ store image's chain instead -- store base layers already carry blank.vhdx
 					return err
 				}
 			}
-			if err := cli.Require("--scratch-dir", scratchDir); err != nil {
-				return err
-			}
 			return mount(ref, base, storeDir, scratchDir, parents, e)
 		},
 	}
@@ -113,6 +110,8 @@ store image's chain instead -- store base layers already carry blank.vhdx
 	cli.StringOnce(cmd.Flags(), &ref, "ref", "store image reference; resolves the whole chain")
 	cli.StringOnce(cmd.Flags(), &storeDir, "store", "store directory")
 	cli.StringOnce(cmd.Flags(), &scratchDir, "scratch-dir", "directory holding sandbox.vhdx")
+	// Required in both the --ref and --base forms; only the ref/base choice is conditional.
+	cli.Required(cmd, "scratch-dir")
 	cli.StringArray(cmd.Flags(), &parents, "parent", "parent layer directory, topmost first, repeatable")
 	return cmd
 }

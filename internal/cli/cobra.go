@@ -35,7 +35,7 @@ func (o *onceValue) Set(s string) error {
 	if o.set {
 		return errors.New("given more than once")
 	}
-	if err := optionShaped(o.name, s); err != nil {
+	if err := optionShaped(o.name, s, 0); err != nil {
 		return err
 	}
 	o.set = true
@@ -58,7 +58,7 @@ func (a *arrayValue) String() string { return strings.Join(*a.p, ",") }
 func (a *arrayValue) Type() string   { return "stringArray" }
 
 func (a *arrayValue) Set(s string) error {
-	if err := optionShaped(a.name, s); err != nil {
+	if err := optionShaped(a.name, s, len(*a.p)); err != nil {
 		return err
 	}
 	*a.p = append(*a.p, s)
@@ -155,13 +155,27 @@ var argv = func() []string { return os.Args[1:] }
 // swallow --json -- the exact drift this package exists to prevent, and exit 64 promises
 // nothing was attempted. A value that genuinely begins with -- is still expressible: the
 // = spelling is unambiguous, so `--cmd=--help` is accepted. pflag's Set carries no syntax
-// context, hence the scan of the raw command line for the = token.
-func optionShaped(name, s string) error {
+// context, so the check locates this Set's own occurrence -- the nth token spelling the
+// flag -- in the raw command line and asks whether THAT token used the = form; a match
+// anywhere else (an earlier =-spelled instance of a repeatable flag) proves nothing about
+// this one.
+func optionShaped(name, s string, occurrence int) error {
 	if !strings.HasPrefix(s, "--") {
 		return nil
 	}
-	if slices.Contains(argv(), "--"+name+"="+s) {
-		return nil
+	long, eq := "--"+name, "--"+name+"="
+	n := 0
+	for _, a := range argv() {
+		if a != long && !strings.HasPrefix(a, eq) {
+			continue
+		}
+		if n == occurrence {
+			if a == eq+s {
+				return nil
+			}
+			break
+		}
+		n++
 	}
 	return fmt.Errorf("requires a value -- to pass a value beginning with --, write --%s=%s", name, s)
 }
@@ -218,26 +232,53 @@ func SubcommandNames(cmd *cobra.Command) string {
 	return strings.Join(names, ", ")
 }
 
-// Group builds a verb-group command. cobra routes to the verbs; a bare group or an unknown
-// verb is a usage error naming the verbs that exist. Without the RunE, cobra would print
-// help and exit 0 for a bare group, and exit 1 for an unknown verb.
+// Group builds a verb-group command. cobra routes to the verbs; anything that lands on the
+// group itself -- a bare group, a mistyped verb, a flag or -- terminator ahead of the verb
+// -- is a usage error naming the actual mistake. Flag parsing is disabled on the group: it
+// has no flags of its own, and letting pflag run would consume the verb after an unknown
+// boolean flag (`container --follow logs` would eat "logs" as --follow's value) and
+// misdiagnose the line as a bare group. With parsing off, the RunE reads the raw tokens.
+// Leaf verbs parse strictly as ever.
 func Group(use, short string, verbs ...*cobra.Command) *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   use,
-		Short: short,
-		Args:  cobra.ArbitraryArgs,
-		// A group has no local flags, so a flag reaching it rode behind a mistyped verb
-		// (`vm frobnicate --id x`). Strict parsing would report the flag; allowing unknown
-		// flags lets the RunE name the actual mistake, the verb. Leaf verbs stay strict --
-		// the allowance is per-command, not inherited.
-		FParseErrWhitelist: cobra.FParseErrWhitelist{UnknownFlags: true},
+		Use:                use,
+		Short:              short,
+		Args:               cobra.ArbitraryArgs,
+		DisableFlagParsing: true,
 		RunE: func(c *cobra.Command, args []string) error {
-			if len(args) == 0 {
-				return Usagef("%s needs a subcommand: %s", c.Name(), SubcommandNames(c))
+			// Parsing is off, so --help is honoured by hand; Help() routes through the
+			// root's help func and run() turns it into exit 64 like any other help.
+			if slices.Contains(args, "--help") || slices.Contains(args, "-h") {
+				return c.Help()
 			}
-			return Usagef("unknown %s subcommand %q (expected %s)", c.Name(), args[0], SubcommandNames(c))
+			verb := ""
+			for _, a := range args {
+				if !strings.HasPrefix(a, "-") {
+					verb = a
+					break
+				}
+			}
+			switch {
+			case verb == "":
+				return Usagef("%s needs a subcommand: %s", c.Name(), SubcommandNames(c))
+			case hasVerb(c, verb):
+				// The verb exists; a flag or -- ahead of it kept cobra from routing there.
+				return Usagef("%s %s: the verb must come before any flags or -- (write: %s %s [options])",
+					c.Name(), verb, c.CommandPath(), verb)
+			default:
+				return Usagef("unknown %s subcommand %q (expected %s)", c.Name(), verb, SubcommandNames(c))
+			}
 		},
 	}
 	cmd.AddCommand(verbs...)
 	return cmd
+}
+
+func hasVerb(c *cobra.Command, name string) bool {
+	for _, sub := range c.Commands() {
+		if sub.Name() == name {
+			return true
+		}
+	}
+	return false
 }

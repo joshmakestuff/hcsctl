@@ -109,6 +109,20 @@ func TestGUIDValue(t *testing.T) {
 	}
 }
 
+func TestStringArrayMixedSpellingsKeepTheGuard(t *testing.T) {
+	// One =-spelled instance must not vouch for a later space-form instance: the check is
+	// positional, per occurrence, or a forgotten value rides an unrelated earlier token.
+	plantArgv(t, "container", "run", "--mount=--keep", "--mount", "--keep")
+	var vals []string
+	fs := pflag.NewFlagSet("t", pflag.ContinueOnError)
+	fs.Usage = func() {}
+	StringArray(fs, &vals, "mount", "")
+	err := fs.Parse([]string{"--mount=--keep", "--mount", "--keep"})
+	if err == nil || !strings.Contains(err.Error(), "requires a value") {
+		t.Fatalf("second space-form instance rode the first's = spelling: err=%v values=%v", err, vals)
+	}
+}
+
 func TestStringArrayEqualsSpelling(t *testing.T) {
 	plantArgv(t, "container", "run", "--env=A=--x", "--env", "B=2")
 	var vals []string

@@ -224,6 +224,7 @@ func execCmd(e cli.Emit) *cobra.Command {
 	}
 	addTargetFlags(cmd.Flags(), &o.targetOptions)
 	cli.StringOnce(cmd.Flags(), &o.cmd, "cmd", "command to run in the guest")
+	cli.Required(cmd, "cmd")
 	cli.StringOnce(cmd.Flags(), &o.cwd, "cwd", "guest working directory")
 	cli.StringOnce(cmd.Flags(), &o.user, "user", "guest user")
 	cli.StringArray(cmd.Flags(), &o.env, "env", envUsage)
@@ -1542,9 +1543,6 @@ func exec(o *execOptions, e cli.Emit) error {
 	if err != nil {
 		return err
 	}
-	if err := cli.Require("--cmd", o.cmd); err != nil {
-		return err
-	}
 	env, err := parseEnv(o.env)
 	if err != nil {
 		return err
@@ -1579,7 +1577,9 @@ func exec(o *execOptions, e cli.Emit) error {
 		restoreTerminal()
 		printExec(res)
 		if res.Interrupted {
-			return fmt.Errorf("interrupted, killed pid %d", res.Pid)
+			// printExec already reported the interruption; ErrReported keeps the exit-1
+			// verdict without a second voice on stderr.
+			return cli.ErrReported
 		}
 		return nil
 	}
@@ -2267,7 +2267,10 @@ func pidAlive(pid int) bool {
 func resolve(o targetOptions) (*store.Store, string, error) {
 	st, err := store.New(o.storeDir)
 	if err != nil {
-		return nil, "", err
+		// Exit 64, as the pre-cobra dispatch classified every resolve failure: the command
+		// line (with its environment) names a store that cannot be resolved, and nothing
+		// was attempted.
+		return nil, "", cli.Usagef("store: %v", err)
 	}
 	id := o.id
 	if id == "" {

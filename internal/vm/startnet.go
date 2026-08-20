@@ -28,7 +28,12 @@ func configureStartNetwork(id string, st state, netw *hcn.HostComputeNetwork, ti
 	if err != nil {
 		return startNetworkResult{}, err
 	}
-	vmid, _ := guid.FromString(id)
+	// id came from the flag (already canonical) or a store record; a record holding a
+	// non-GUID id is corrupt, not ignorable.
+	vmid, err := guid.FromString(id)
+	if err != nil {
+		return startNetworkResult{}, fmt.Errorf("vm id %q in the store record is not a GUID: %w", id, err)
+	}
 	if err = waitForGuestAgent(vmid, timeout); err != nil {
 		return startNetworkResult{}, err
 	}

@@ -107,6 +107,12 @@ var usageCases = []struct {
 	{"unknown subcommand", []string{"container", "frobnicate"}},
 	{"unknown subcommand with trailing flag", []string{"vm", "frobnicate", "--id", "eb95e0a7-ee3e-4c7b-ba10-4089b4771083"}},
 	{"unknown verb group with trailing flag", []string{"frobnicate", "--id", "x"}},
+	{"bool flag before the verb", []string{"container", "--follow", "logs", "--id", "x"}},
+	// A -- terminator before the verb is exercised in TestUnknownSubcommandIsNamed: this
+	// harness appends --json, which a -- would correctly demote to a positional.
+	{"mixed spellings keep the option-shaped guard", []string{"container", "run", "--ref", "r", "--mount=--keep", "--mount", "--keep"}},
+	{"exec without cmd", []string{"container", "exec", "--id", "a"}},
+	{"storage mount missing scratch-dir", []string{"storage", "mount", "--ref", "r"}},
 	{"unknown option", []string{"image", "ls", "--bogus", "x"}},
 	{"duplicate option", []string{"container", "exec", "--id", "a", "--id", "b", "--cmd", "c"}},
 	{"missing required option", []string{"image", "pull"}},
@@ -387,7 +393,7 @@ func TestContainerLogs(t *testing.T) {
 // otherwise record a destructive verb as succeeded. Version is a real verb: exit 0.
 func TestHelpAndVersion(t *testing.T) {
 	for _, args := range [][]string{
-		{"--help"}, {"-h"}, {"help"}, {"help", "vm"},
+		{"--help"}, {"-h"}, {"help"}, {"help", "vm"}, {"container", "--help"},
 		// The review scenario: --help riding a complete destructive invocation.
 		{"vm", "stop", "--id", "eb95e0a7-ee3e-4c7b-ba10-4089b4771083", "--help"},
 	} {
@@ -481,6 +487,11 @@ func TestUnknownSubcommandIsNamed(t *testing.T) {
 	}{
 		{[]string{"vm", "frobnicate", "--id", "eb95e0a7-ee3e-4c7b-ba10-4089b4771083"}, `unknown vm subcommand "frobnicate"`},
 		{[]string{"frobnicate", "--id", "x"}, `unknown verb group "frobnicate"`},
+		// A real verb behind a flag or -- is diagnosed as misplacement, not misspelling:
+		// pflag must not swallow the verb as the unknown flag's value, and the message must
+		// not call a listed verb unknown.
+		{[]string{"container", "--follow", "logs", "--id", "x"}, "the verb must come before"},
+		{[]string{"vm", "--", "start"}, "the verb must come before"},
 	} {
 		t.Run(strings.Join(tc.args[:2], " "), func(t *testing.T) {
 			r := invoke(t, tc.args...)
@@ -492,6 +503,37 @@ func TestUnknownSubcommandIsNamed(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestCompletionMachineryRejected: cobra's hidden __complete command resolves even behind
+// leading flags, and its output is completion text on stdout with exit 0 -- both contract
+// breaks. The guard must hold wherever the word can reach cobra.
+func TestCompletionMachineryRejected(t *testing.T) {
+	r := invoke(t, "--json", "__complete", "network", "")
+	if r.code != 64 {
+		t.Fatalf("exit %d, want 64\nstdout: %q", r.code, r.stdout)
+	}
+	oneDoc(t, r.stdout, false)
+}
+
+// TestResolveStoreFailureIsUsage: with no --store and no LOCALAPPDATA the default store
+// cannot resolve; the command line (with its environment) is bad and nothing was attempted,
+// so this is exit 64 -- the classification the pre-cobra dispatch gave every resolve failure.
+func TestResolveStoreFailureIsUsage(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	cmd := exec.Command(bin, "container", "logs", "--id", "p", "--json")
+	for _, kv := range os.Environ() {
+		if !strings.HasPrefix(strings.ToUpper(kv), "LOCALAPPDATA=") {
+			cmd.Env = append(cmd.Env, kv)
+		}
+	}
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	_ = cmd.Run()
+	if code := cmd.ProcessState.ExitCode(); code != 64 {
+		t.Fatalf("exit %d, want 64\nstderr: %s", code, stderr.String())
+	}
+	oneDoc(t, stdout.String(), false)
 }
 
 // TestJSONFlagGrammarMatchesCobra: the pre-parse that seeds the output mode uses pflag's own

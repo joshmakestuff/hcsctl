@@ -129,6 +129,18 @@ func writeState(s *store.Store, st state) error {
 	return os.WriteFile(filepath.Join(vmDir(s, st.ID), "state.json"), b, 0o644)
 }
 
+// idStoreFlags declares the --id/--store pair every vm verb that acts on an existing VM
+// takes -- one producer, in the style of container's addTargetFlags, so the verbs cannot
+// disagree on wording or required-ness. stop is the exception: it drives HCS by id alone
+// and takes no --store.
+func idStoreFlags(cmd *cobra.Command) (id *cli.GUIDFlag, storeDir *string) {
+	id = cli.GUID(cmd.Flags(), "id", "VM id, a GUID")
+	cli.Required(cmd, "id")
+	storeDir = new(string)
+	cli.StringOnce(cmd.Flags(), storeDir, "store", "store directory")
+	return id, storeDir
+}
+
 // -- create ------------------------------------------------------------------------------
 
 type createResult struct {
@@ -539,7 +551,7 @@ type startResult struct {
 
 func startCmd(e cli.Emit) *cobra.Command {
 	var id *cli.GUIDFlag
-	var storeDir string
+	var storeDir *string
 	cmd := &cobra.Command{
 		Use:   "start --id <guid> [--store <dir>]",
 		Short: "start a VM; recreates the compute system if it exited",
@@ -547,12 +559,10 @@ func startCmd(e cli.Emit) *cobra.Command {
 applied and attested static IPv4 networking. Other starts mean firmware running.`,
 		Args: cli.NoExtraArgs,
 		RunE: func(*cobra.Command, []string) error {
-			return start(id.Value().String(), storeDir, e)
+			return start(id.Value().String(), *storeDir, e)
 		},
 	}
-	id = cli.GUID(cmd.Flags(), "id", "VM id, a GUID")
-	cli.Required(cmd, "id")
-	cli.StringOnce(cmd.Flags(), &storeDir, "store", "store directory")
+	id, storeDir = idStoreFlags(cmd)
 	return cmd
 }
 
@@ -637,10 +647,11 @@ type stopResult struct {
 
 func stopCmd(e cli.Emit) *cobra.Command {
 	var id *cli.GUIDFlag
-	var storeDir string
 	var force bool
 	cmd := &cobra.Command{
-		Use:   "stop --id <guid> [--force] [--store <dir>]",
+		// No --store: stop drives HCS by id alone. The flag it used to advertise was
+		// silently swallowed.
+		Use:   "stop --id <guid> [--force]",
 		Short: "shut down through the guest, or power off with --force",
 		Long: `Without --force, asks the guest through the shutdown integration service; a
 guest that lacks one cannot be asked. --force powers it off.`,
@@ -652,7 +663,6 @@ guest that lacks one cannot be asked. --force powers it off.`,
 	id = cli.GUID(cmd.Flags(), "id", "VM id, a GUID")
 	cli.Required(cmd, "id")
 	cmd.Flags().BoolVar(&force, "force", false, "power off instead of asking the guest")
-	cli.StringOnce(cmd.Flags(), &storeDir, "store", "store directory")
 	return cmd
 }
 
@@ -705,7 +715,7 @@ type removeResult struct {
 
 func rmCmd(e cli.Emit) *cobra.Command {
 	var id *cli.GUIDFlag
-	var storeDir string
+	var storeDir *string
 	var force bool
 	cmd := &cobra.Command{
 		Use:   "rm --id <guid> [--force] [--store <dir>]",
@@ -714,13 +724,11 @@ func rmCmd(e cli.Emit) *cobra.Command {
 base image is never removed.`,
 		Args: cli.NoExtraArgs,
 		RunE: func(*cobra.Command, []string) error {
-			return remove(id.Value().String(), force, storeDir, e)
+			return remove(id.Value().String(), force, *storeDir, e)
 		},
 	}
-	id = cli.GUID(cmd.Flags(), "id", "VM id, a GUID")
-	cli.Required(cmd, "id")
+	id, storeDir = idStoreFlags(cmd)
 	cmd.Flags().BoolVar(&force, "force", false, "remove even when terminate, endpoint delete or the directory removal fails")
-	cli.StringOnce(cmd.Flags(), &storeDir, "store", "store directory")
 	return cmd
 }
 
@@ -833,7 +841,7 @@ const ipPollInterval = 2 * time.Second
 
 func ipCmd(e cli.Emit) *cobra.Command {
 	var id *cli.GUIDFlag
-	var storeDir string
+	var storeDir *string
 	var timeout time.Duration
 	cmd := &cobra.Command{
 		Use:   "ip --id <guid> [--timeout 60s] [--store <dir>]",
@@ -842,13 +850,11 @@ func ipCmd(e cli.Emit) *cobra.Command {
 used only to identify the guest address, never returned without guest evidence.`,
 		Args: cli.NoExtraArgs,
 		RunE: func(*cobra.Command, []string) error {
-			return ip(id.Value().String(), timeout, storeDir, e)
+			return ip(id.Value(), timeout, *storeDir, e)
 		},
 	}
-	id = cli.GUID(cmd.Flags(), "id", "VM id, a GUID")
-	cli.Required(cmd, "id")
+	id, storeDir = idStoreFlags(cmd)
 	cli.Duration(cmd.Flags(), &timeout, "timeout", 60*time.Second, 0, "how long to wait for an address")
-	cli.StringOnce(cmd.Flags(), &storeDir, "store", "store directory")
 	return cmd
 }
 
@@ -860,7 +866,8 @@ used only to identify the guest address, never returned without guest evidence.`
 //
 // It waits rather than answering once. `vm start` returning means the firmware is running --
 // the guest has not booted, let alone leased -- so a single-shot read would answer "none".
-func ip(id string, timeout time.Duration, storeDir string, e cli.Emit) error {
+func ip(vmid guid.GUID, timeout time.Duration, storeDir string, e cli.Emit) error {
+	id := vmid.String()
 	st, err := store.New(storeDir)
 	if err != nil {
 		return err
@@ -883,7 +890,6 @@ func ip(id string, timeout time.Duration, storeDir string, e cli.Emit) error {
 		if aerr != nil {
 			return fmt.Errorf("reading endpoint %s: %w", record.EndpointID, aerr)
 		}
-		vmid, _ := guid.FromString(id)
 		info, ierr := guest.ReadInfo(vmid, ipPollInterval)
 		if ierr == nil {
 			addrs := guestIPv4Addresses(info.Addresses, expected)
@@ -1100,18 +1106,16 @@ type inspectResult struct {
 
 func inspectCmd(e cli.Emit) *cobra.Command {
 	var id *cli.GUIDFlag
-	var storeDir string
+	var storeDir *string
 	cmd := &cobra.Command{
 		Use:   "inspect --id <guid> [--store <dir>]",
 		Short: "the store's record plus the HCS properties",
 		Args:  cli.NoExtraArgs,
 		RunE: func(*cobra.Command, []string) error {
-			return inspect(id.Value().String(), storeDir, e)
+			return inspect(id.Value().String(), *storeDir, e)
 		},
 	}
-	id = cli.GUID(cmd.Flags(), "id", "VM id, a GUID")
-	cli.Required(cmd, "id")
-	cli.StringOnce(cmd.Flags(), &storeDir, "store", "store directory")
+	id, storeDir = idStoreFlags(cmd)
 	return cmd
 }
 
