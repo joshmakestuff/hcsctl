@@ -105,6 +105,8 @@ var usageCases = []struct {
 	{"hidden no-desc completion command", []string{"__completeNoDesc", "image", ""}},
 	{"missing subcommand", []string{"container"}},
 	{"unknown subcommand", []string{"container", "frobnicate"}},
+	{"unknown subcommand with trailing flag", []string{"vm", "frobnicate", "--id", "eb95e0a7-ee3e-4c7b-ba10-4089b4771083"}},
+	{"unknown verb group with trailing flag", []string{"frobnicate", "--id", "x"}},
 	{"unknown option", []string{"image", "ls", "--bogus", "x"}},
 	{"duplicate option", []string{"container", "exec", "--id", "a", "--id", "b", "--cmd", "c"}},
 	{"missing required option", []string{"image", "pull"}},
@@ -466,6 +468,29 @@ func TestHelpAndVersion(t *testing.T) {
 			t.Fatalf("exit %d, stderr %q", r.code, r.stderr)
 		}
 	})
+}
+
+// TestUnknownSubcommandIsNamed discriminates the diagnostic from the exit code: a mistyped
+// verb followed by a flag must be reported as the unknown verb, not as the unknown flag the
+// verb's absence made unparseable.
+func TestUnknownSubcommandIsNamed(t *testing.T) {
+	for _, tc := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"vm", "frobnicate", "--id", "eb95e0a7-ee3e-4c7b-ba10-4089b4771083"}, `unknown vm subcommand "frobnicate"`},
+		{[]string{"frobnicate", "--id", "x"}, `unknown verb group "frobnicate"`},
+	} {
+		t.Run(strings.Join(tc.args[:2], " "), func(t *testing.T) {
+			r := invoke(t, tc.args...)
+			if r.code != 64 {
+				t.Fatalf("exit %d, want 64\nstderr: %s", r.code, r.stderr)
+			}
+			if !strings.Contains(r.stderr, tc.want) {
+				t.Fatalf("stderr does not name the mistake %q: %q", tc.want, r.stderr)
+			}
+		})
+	}
 }
 
 // TestJSONFlagGrammarMatchesCobra: the pre-parse that seeds the output mode uses pflag's own

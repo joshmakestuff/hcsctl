@@ -110,7 +110,11 @@ exit codes: 0 ok, 1 ran and failed, 64 bad arguments (nothing attempted)
 		// No completion command: its output is shell script on stdout, which the --json
 		// contract cannot admit. The hidden __complete twin is rejected in run().
 		CompletionOptions: cobra.CompletionOptions{DisableDefaultCmd: true},
-		Args:              cobra.ArbitraryArgs,
+		// An unknown flag at the root rode behind a mistyped group (`hcsctl frobnicate
+		// --id x`); allowing it lets the RunE name the group, the actual mistake, exactly
+		// as cli.Group does for verbs.
+		FParseErrWhitelist: cobra.FParseErrWhitelist{UnknownFlags: true},
+		Args:               cobra.ArbitraryArgs,
 		RunE: func(c *cobra.Command, args []string) error {
 			if len(args) == 0 {
 				// --version is a root-local flag, not cobra's Version field: cobra's own

@@ -105,6 +105,11 @@ func Group(use, short string, verbs ...*cobra.Command) *cobra.Command {
 		Use:   use,
 		Short: short,
 		Args:  cobra.ArbitraryArgs,
+		// A group has no local flags, so a flag reaching it rode behind a mistyped verb
+		// (`vm frobnicate --id x`). Strict parsing would report the flag; allowing unknown
+		// flags lets the RunE name the actual mistake, the verb. Leaf verbs stay strict --
+		// the allowance is per-command, not inherited.
+		FParseErrWhitelist: cobra.FParseErrWhitelist{UnknownFlags: true},
 		RunE: func(_ *cobra.Command, args []string) error {
 			if len(args) == 0 {
 				return Usagef("%s needs a subcommand: %s", name, list)
