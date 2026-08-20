@@ -34,28 +34,185 @@ import (
 	"github.com/Microsoft/hcsshim/computestorage"
 	"github.com/joshmakestuff/hcsctl/internal/cli"
 	"github.com/joshmakestuff/hcsctl/internal/store"
+	"github.com/spf13/cobra"
 	"golang.org/x/sys/windows"
 )
 
-func Dispatch(a *cli.Args, e cli.Emit) (int, error) {
-	switch a.Word(1) {
-	case "setup-base":
-		return setupBase(a, e)
-	case "mount":
-		return mount(a, e)
-	case "unmount":
-		return unmount(a, e)
-	case "import":
-		return importLayer(a, e)
-	case "export":
-		return exportLayer(a, e)
-	case "destroy":
-		return destroy(a, e)
-	case "":
-		return cli.Usage, cli.Usagef("storage needs a subcommand: setup-base, mount, unmount, import, export, destroy")
-	default:
-		return cli.Usage, cli.Usagef("unknown storage subcommand %q (expected setup-base, mount, unmount, import, export, destroy)", a.Word(1))
+// Command is `hcsctl storage`.
+func Command(e cli.Emit) *cobra.Command {
+	return cli.Group("storage", "VHD-backed layers via computestorage",
+		setupBaseCmd(e), mountCmd(e), unmountCmd(e), importCmd(e), exportCmd(e), destroyCmd(e))
+}
+
+func setupBaseCmd(e cli.Emit) *cobra.Command {
+	var layer, sizeGB string
+	cmd := &cobra.Command{
+		Use:   "setup-base --layer <dir> [--size-gb N]",
+		Short: "prepare a base layer for VHD-backed use. MUTATES the layer, ELEVATED",
+		Long: `Prepare a base layer for VHD-backed (computestorage) use: blank-base.vhdx and
+blank.vhdx created inside the layer directory. MUTATES the layer -- Hives/ and
+Layout are regenerated -- so point it at a copy, not a store layer. ELEVATED.`,
+		Args: cli.NoExtraArgs,
+		RunE: func(*cobra.Command, []string) error {
+			if err := requireDir("--layer", layer); err != nil {
+				return err
+			}
+			size := uint64(defaultSizeGB)
+			if sizeGB != "" {
+				// SetupContainerBaseLayer takes GB; 65536 GB is the VHDX format ceiling (64 TB).
+				var err error
+				if size, err = cli.ParseUint(sizeGB, 65536); err != nil {
+					return cli.Usagef("--size-gb %v", err)
+				}
+			}
+			// SetupBaseOSLayer mutates its input (regenerates Hives/ and Layout); the layer
+			// check runs before the mutation.
+			if _, err := os.Stat(filepath.Join(layer, "Files")); err != nil {
+				return cli.Usagef("--layer %s has no Files directory -- not a materialized layer", layer)
+			}
+			return setupBase(layer, size, e)
+		},
 	}
+	cli.StringOnce(cmd.Flags(), &layer, "layer", "layer directory to prepare")
+	cli.StringOnce(cmd.Flags(), &sizeGB, "size-gb", "base VHD size in GB (default 10)")
+	return cmd
+}
+
+func mountCmd(e cli.Emit) *cobra.Command {
+	var base, ref, storeDir, scratchDir string
+	var parents []string
+	cmd := &cobra.Command{
+		Use:   "mount (--base <dir> | --ref <ref>) --scratch-dir <dir> [--parent <dir>]... [--store <dir>]",
+		Short: "attach a writable scratch over a base and print the merged volume. ELEVATED",
+		Long: `Copy blank.vhdx to sandbox.vhdx (first time), attach it, initialize the
+writable layer and attach the storage filter. Prints the volume carrying the
+merged view. Parents topmost first; defaults to the base. --ref resolves a
+store image's chain instead -- store base layers already carry blank.vhdx
+(wclayer import creates it), so nothing mutates the store. ELEVATED.`,
+		Args: cli.NoExtraArgs,
+		RunE: func(*cobra.Command, []string) error {
+			if ref != "" && base != "" {
+				return cli.Usagef("--ref and --base are exclusive: a ref resolves the whole chain")
+			}
+			if ref == "" {
+				if err := requireDir("--base", base); err != nil {
+					return err
+				}
+				if err := checkParents(parents); err != nil {
+					return err
+				}
+			}
+			if err := cli.Require("--scratch-dir", scratchDir); err != nil {
+				return err
+			}
+			return mount(ref, base, storeDir, scratchDir, parents, e)
+		},
+	}
+	cli.StringOnce(cmd.Flags(), &base, "base", "base layer directory carrying blank.vhdx")
+	cli.StringOnce(cmd.Flags(), &ref, "ref", "store image reference; resolves the whole chain")
+	cli.StringOnce(cmd.Flags(), &storeDir, "store", "store directory")
+	cli.StringOnce(cmd.Flags(), &scratchDir, "scratch-dir", "directory holding sandbox.vhdx")
+	cli.StringArray(cmd.Flags(), &parents, "parent", "parent layer directory, topmost first, repeatable")
+	return cmd
+}
+
+func unmountCmd(e cli.Emit) *cobra.Command {
+	var scratchDir string
+	cmd := &cobra.Command{
+		Use:   "unmount --scratch-dir <dir>",
+		Short: "detach the storage filter and the scratch VHD. ELEVATED",
+		Long:  `Detach the storage filter and the scratch VHD. ELEVATED.`,
+		Args:  cli.NoExtraArgs,
+		RunE: func(*cobra.Command, []string) error {
+			if err := cli.Require("--scratch-dir", scratchDir); err != nil {
+				return err
+			}
+			return unmount(scratchDir, e)
+		},
+	}
+	cli.StringOnce(cmd.Flags(), &scratchDir, "scratch-dir", "directory holding sandbox.vhdx")
+	return cmd
+}
+
+func importCmd(e cli.Emit) *cobra.Command {
+	var src, layer string
+	var parents []string
+	cmd := &cobra.Command{
+		Use:   "import --source <dir> --layer <dest-dir> [--parent <dir>]...",
+		Short: "HcsImportLayer, folder to folder. ELEVATED",
+		Long: `HcsImportLayer. Not working: fails path-not-found after writing Files.
+ELEVATED.`,
+		Args: cli.NoExtraArgs,
+		RunE: func(*cobra.Command, []string) error {
+			if err := requireDir("--source", src); err != nil {
+				return err
+			}
+			if err := cli.Require("--layer", layer); err != nil {
+				return err
+			}
+			if err := checkParents(parents); err != nil {
+				return err
+			}
+			return importLayer(src, layer, parents, e)
+		},
+	}
+	cli.StringOnce(cmd.Flags(), &src, "source", "source layer directory")
+	cli.StringOnce(cmd.Flags(), &layer, "layer", "destination layer directory")
+	cli.StringArray(cmd.Flags(), &parents, "parent", "parent layer directory, topmost first, repeatable")
+	return cmd
+}
+
+func exportCmd(e cli.Emit) *cobra.Command {
+	var layer, dest string
+	var parents []string
+	var writable bool
+	cmd := &cobra.Command{
+		Use:   "export --layer <volume> --dest <existing-dir> [--parent <dir>]... [--writable]",
+		Short: "HcsExportLayer from a mounted writable layer's volume",
+		Long: `HcsExportLayer. Works on a *mounted* writable layer's volume path with
+--writable, producing Files/Hives/tombstones. A legacy (wclayer) directory
+layer fails partway; the legacy variants are not public hcsshim.`,
+		Args: cli.NoExtraArgs,
+		RunE: func(*cobra.Command, []string) error {
+			if err := requireDir("--layer", layer); err != nil {
+				return err
+			}
+			// The destination must exist (API contract). HcsExportLayer's own error for a
+			// missing destination does not name the path.
+			if err := requireDir("--dest", dest); err != nil {
+				return err
+			}
+			if err := checkParents(parents); err != nil {
+				return err
+			}
+			return exportLayer(layer, dest, parents, writable, e)
+		},
+	}
+	cli.StringOnce(cmd.Flags(), &layer, "layer", "layer to export: a mounted writable layer's volume path")
+	cli.StringOnce(cmd.Flags(), &dest, "dest", "existing destination directory")
+	cli.StringArray(cmd.Flags(), &parents, "parent", "parent layer directory, topmost first, repeatable")
+	cmd.Flags().BoolVar(&writable, "writable", false, "export as a writable layer")
+	return cmd
+}
+
+func destroyCmd(e cli.Emit) *cobra.Command {
+	var layer string
+	cmd := &cobra.Command{
+		Use:   "destroy --layer <dir>",
+		Short: "HcsDestroyLayer, verified by directory absence. ELEVATED",
+		Long: `HcsDestroyLayer, verified by directory absence. Layer directories defeat
+ordinary deletion (restored security descriptors); this is the tool that
+removes them. ELEVATED.`,
+		Args: cli.NoExtraArgs,
+		RunE: func(*cobra.Command, []string) error {
+			if err := requireDir("--layer", layer); err != nil {
+				return err
+			}
+			return destroy(layer, e)
+		},
+	}
+	cli.StringOnce(cmd.Flags(), &layer, "layer", "layer directory to destroy")
+	return cmd
 }
 
 // layerDataFor builds the LayerData every computestorage call wants: parents topmost first,
@@ -72,36 +229,20 @@ func layerDataFor(parents []string) (computestorage.LayerData, error) {
 	return data, nil
 }
 
-func checkParents(a *cli.Args) ([]string, error) {
-	parents := a.Options("--parent")
+func checkParents(parents []string) error {
 	for _, p := range parents {
 		if _, err := os.Stat(p); err != nil {
-			return nil, cli.Usagef("--parent %s: %v", p, err)
+			return cli.Usagef("--parent %s: %v", p, err)
 		}
 	}
-	return parents, nil
+	return nil
 }
 
 // importLayer wraps HcsImportLayer: folder to folder, not a tar.
-func importLayer(a *cli.Args, e cli.Emit) (int, error) {
-	if err := a.RejectUnknown("--source", "--layer", "--parent"); err != nil {
-		return cli.Usage, err
-	}
-	src, err := requireDir(a, "--source")
-	if err != nil {
-		return cli.Usage, err
-	}
-	dest, err := a.Require("--layer")
-	if err != nil {
-		return cli.Usage, err
-	}
-	parents, err := checkParents(a)
-	if err != nil {
-		return cli.Usage, err
-	}
+func importLayer(src, dest string, parents []string, e cli.Emit) error {
 	data, err := layerDataFor(parents)
 	if err != nil {
-		return cli.Failed, err
+		return err
 	}
 
 	// Unlike ociwclayer, the raw computestorage syscalls do not enable privileges, and an
@@ -110,45 +251,28 @@ func importLayer(a *cli.Args, e cli.Emit) (int, error) {
 		return computestorage.ImportLayer(context.Background(), dest, src, data)
 	})
 	if err != nil {
-		return cli.Failed, fmt.Errorf("ImportLayer: %w", err)
+		return fmt.Errorf("ImportLayer: %w", err)
 	}
 	e.Result(map[string]any{
 		"ok": true, "command": "storage import", "layer": dest, "source": src, "parents": parents,
 	}, func() {
 		fmt.Printf("imported %s\n  from: %s\n", dest, src)
 	})
-	return cli.OK, nil
+	return nil
 }
 
-func exportLayer(a *cli.Args, e cli.Emit) (int, error) {
-	if err := a.RejectUnknown("--layer", "--dest", "--parent", "--writable"); err != nil {
-		return cli.Usage, err
-	}
-	layer, err := requireDir(a, "--layer")
-	if err != nil {
-		return cli.Usage, err
-	}
-	// The destination must exist (API contract). HcsExportLayer's own error for a missing
-	// destination does not name the path.
-	dest, err := requireDir(a, "--dest")
-	if err != nil {
-		return cli.Usage, err
-	}
-	parents, err := checkParents(a)
-	if err != nil {
-		return cli.Usage, err
-	}
+func exportLayer(layer, dest string, parents []string, writable bool, e cli.Emit) error {
 	data, err := layerDataFor(parents)
 	if err != nil {
-		return cli.Failed, err
+		return err
 	}
-	opts := computestorage.ExportLayerOptions{IsWritableLayer: a.Flag("--writable")}
+	opts := computestorage.ExportLayerOptions{IsWritableLayer: writable}
 
 	err = winio.RunWithPrivileges([]string{winio.SeBackupPrivilege, winio.SeRestorePrivilege}, func() error {
 		return computestorage.ExportLayer(context.Background(), layer, dest, data, opts)
 	})
 	if err != nil {
-		return cli.Failed, fmt.Errorf("ExportLayer: %w", err)
+		return fmt.Errorf("ExportLayer: %w", err)
 	}
 	e.Result(map[string]any{
 		"ok": true, "command": "storage export", "layer": layer, "dest": dest,
@@ -156,31 +280,24 @@ func exportLayer(a *cli.Args, e cli.Emit) (int, error) {
 	}, func() {
 		fmt.Printf("exported %s\n  to: %s\n", layer, dest)
 	})
-	return cli.OK, nil
+	return nil
 }
 
 // destroy wraps HcsDestroyLayer. Same caveat as wclayer's DestroyLayer: it can
 // return success and leave the tree, so absence is verified rather than assumed.
-func destroy(a *cli.Args, e cli.Emit) (int, error) {
-	if err := a.RejectUnknown("--layer"); err != nil {
-		return cli.Usage, err
-	}
-	layer, err := requireDir(a, "--layer")
-	if err != nil {
-		return cli.Usage, err
-	}
+func destroy(layer string, e cli.Emit) error {
 	if err := computestorage.DestroyLayer(context.Background(), layer); err != nil {
-		return cli.Failed, fmt.Errorf("DestroyLayer: %w", err)
+		return fmt.Errorf("DestroyLayer: %w", err)
 	}
 	if _, err := os.Stat(layer); err == nil {
-		return cli.Failed, fmt.Errorf("DestroyLayer returned success but %s still exists", layer)
+		return fmt.Errorf("DestroyLayer returned success but %s still exists", layer)
 	}
 	e.Result(map[string]any{
 		"ok": true, "command": "storage destroy", "layer": layer,
 	}, func() {
 		fmt.Printf("destroyed %s\n", layer)
 	})
-	return cli.OK, nil
+	return nil
 }
 
 const (
@@ -193,10 +310,9 @@ const (
 // requireDir is the shared argument shape: a named option that must be an existing directory.
 // A \\?\Volume{...} path is a directory for every purpose here, but stat wants the trailing
 // separator that callers conventionally omit.
-func requireDir(a *cli.Args, name string) (string, error) {
-	v, err := a.Require(name)
-	if err != nil {
-		return "", err
+func requireDir(name, v string) error {
+	if err := cli.Require(name, v); err != nil {
+		return err
 	}
 	probe := v
 	if strings.HasPrefix(v, `\\?\Volume{`) && !strings.HasSuffix(v, `\`) {
@@ -204,40 +320,20 @@ func requireDir(a *cli.Args, name string) (string, error) {
 	}
 	fi, err := os.Stat(probe)
 	if err != nil {
-		return "", cli.Usagef("%s %s: %v", name, v, err)
+		return cli.Usagef("%s %s: %v", name, v, err)
 	}
 	if !fi.IsDir() {
-		return "", cli.Usagef("%s %s is not a directory", name, v)
+		return cli.Usagef("%s %s is not a directory", name, v)
 	}
-	return v, nil
+	return nil
 }
 
-func setupBase(a *cli.Args, e cli.Emit) (int, error) {
-	if err := a.RejectUnknown("--layer", "--size-gb"); err != nil {
-		return cli.Usage, err
-	}
-	layer, err := requireDir(a, "--layer")
-	if err != nil {
-		return cli.Usage, err
-	}
-	size := uint64(defaultSizeGB)
-	if v := a.Option("--size-gb"); v != "" {
-		// SetupContainerBaseLayer takes GB; 65536 GB is the VHDX format ceiling (64 TB).
-		if size, err = cli.ParseUint(v, 65536); err != nil {
-			return cli.Usage, cli.Usagef("--size-gb %v", err)
-		}
-	}
-	// SetupBaseOSLayer mutates its input (regenerates Hives/ and Layout); the layer check runs
-	// before the mutation.
-	if _, err := os.Stat(filepath.Join(layer, "Files")); err != nil {
-		return cli.Usage, cli.Usagef("--layer %s has no Files directory -- not a materialized layer", layer)
-	}
-
+func setupBase(layer string, size uint64, e cli.Emit) error {
 	base := filepath.Join(layer, blankBaseName)
 	diff := filepath.Join(layer, blankName)
 	e.Progress("SetupContainerBaseLayer: %s (%d GB) -- regenerates Hives/ and Layout in the layer", layer, size)
 	if err := computestorage.SetupContainerBaseLayer(context.Background(), layer, base, diff, size); err != nil {
-		return cli.Failed, fmt.Errorf("SetupContainerBaseLayer: %w", err)
+		return fmt.Errorf("SetupContainerBaseLayer: %w", err)
 	}
 
 	e.Result(map[string]any{
@@ -246,7 +342,7 @@ func setupBase(a *cli.Args, e cli.Emit) (int, error) {
 	}, func() {
 		fmt.Printf("base ready\n  blank-base: %s\n  blank:      %s\n", base, diff)
 	})
-	return cli.OK, nil
+	return nil
 }
 
 // openScratch opens sandbox.vhdx in dir. AccessNone + no flags is what both attach and
@@ -285,64 +381,41 @@ func chainFor(st *store.Store, ref string) ([]string, error) {
 	return chain, nil
 }
 
-func mount(a *cli.Args, e cli.Emit) (int, error) {
-	if err := a.RejectUnknown("--base", "--ref", "--store", "--scratch-dir", "--parent"); err != nil {
-		return cli.Usage, err
-	}
-	var base string
-	var parents []string
-	var err error
-	switch ref := a.Option("--ref"); {
-	case ref != "" && a.Option("--base") != "":
-		return cli.Usage, cli.Usagef("--ref and --base are exclusive: a ref resolves the whole chain")
-	case ref != "":
+func mount(ref, base, storeDir, scratchDir string, parents []string, e cli.Emit) error {
+	if ref != "" {
 		// wclayer import creates blank.vhdx in base layers, so a store layer mounts as-is;
 		// nothing here mutates the store.
-		st, err := store.New(a.Option("--store"))
+		st, err := store.New(storeDir)
 		if err != nil {
-			return cli.Failed, err
+			return err
 		}
 		chain, err := chainFor(st, ref)
 		if err != nil {
-			return exitFor(err), err
+			return err
 		}
 		base = chain[len(chain)-1]
 		parents = chain
-	default:
-		base, err = requireDir(a, "--base")
-		if err != nil {
-			return cli.Usage, err
-		}
-		parents, err = checkParents(a)
-		if err != nil {
-			return cli.Usage, err
-		}
-		if len(parents) == 0 {
-			parents = []string{base}
-		}
-	}
-	dir, err := a.Require("--scratch-dir")
-	if err != nil {
-		return cli.Usage, err
+	} else if len(parents) == 0 {
+		parents = []string{base}
 	}
 	blank := filepath.Join(base, blankName)
 	if _, err := os.Stat(blank); err != nil {
-		return cli.Usage, cli.Usagef("%s has no %s -- run storage setup-base first", base, blankName)
+		return cli.Usagef("%s has no %s -- run storage setup-base first", base, blankName)
 	}
 
 	data, err := layerDataFor(parents)
 	if err != nil {
-		return cli.Failed, err
+		return err
 	}
 
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return cli.Failed, err
+	if err := os.MkdirAll(scratchDir, 0o755); err != nil {
+		return err
 	}
-	sandbox := filepath.Join(dir, sandboxName)
+	sandbox := filepath.Join(scratchDir, sandboxName)
 	fresh := false
 	if _, err := os.Stat(sandbox); err != nil {
 		if err := copyFile(blank, sandbox); err != nil {
-			return cli.Failed, fmt.Errorf("copy %s -> %s: %w", blank, sandbox, err)
+			return fmt.Errorf("copy %s -> %s: %w", blank, sandbox, err)
 		}
 		fresh = true
 		e.Progress("scratch:   %s (fresh from %s)", sandbox, blankName)
@@ -352,7 +425,7 @@ func mount(a *cli.Args, e cli.Emit) (int, error) {
 
 	h, err := vhd.OpenVirtualDisk(sandbox, vhd.VirtualDiskAccessNone, vhd.OpenVirtualDiskFlagNone)
 	if err != nil {
-		return cli.Failed, fmt.Errorf("OpenVirtualDisk(%s): %w", sandbox, err)
+		return fmt.Errorf("OpenVirtualDisk(%s): %w", sandbox, err)
 	}
 	defer syscall.CloseHandle(h)
 
@@ -361,7 +434,7 @@ func mount(a *cli.Args, e cli.Emit) (int, error) {
 	ctx := context.Background()
 	if err := vhd.AttachVirtualDisk(h, vhd.AttachVirtualDiskFlagPermanentLifetime,
 		&vhd.AttachVirtualDiskParameters{Version: 2}); err != nil {
-		return cli.Failed, fmt.Errorf("AttachVirtualDisk: %w", err)
+		return fmt.Errorf("AttachVirtualDisk: %w", err)
 	}
 	undo := func() {
 		_ = vhd.DetachVirtualDisk(h)
@@ -373,20 +446,20 @@ func mount(a *cli.Args, e cli.Emit) (int, error) {
 	vol, err := computestorage.GetLayerVhdMountPath(ctx, windows.Handle(h))
 	if err != nil {
 		undo()
-		return cli.Failed, fmt.Errorf("GetLayerVhdMountPath: %w", err)
+		return fmt.Errorf("GetLayerVhdMountPath: %w", err)
 	}
 	e.Progress("volume:    %s", vol)
 
 	if fresh {
 		if err := computestorage.InitializeWritableLayer(ctx, vol, data); err != nil {
 			undo()
-			return cli.Failed, fmt.Errorf("InitializeWritableLayer: %w", err)
+			return fmt.Errorf("InitializeWritableLayer: %w", err)
 		}
 		e.Progress("InitializeWritableLayer ok")
 	}
 	if err := computestorage.AttachLayerStorageFilter(ctx, vol, data); err != nil {
 		undo()
-		return cli.Failed, fmt.Errorf("AttachLayerStorageFilter: %w", err)
+		return fmt.Errorf("AttachLayerStorageFilter: %w", err)
 	}
 
 	e.Result(map[string]any{
@@ -395,20 +468,13 @@ func mount(a *cli.Args, e cli.Emit) (int, error) {
 	}, func() {
 		fmt.Printf("mounted\n  scratch: %s\n  volume:  %s\n", sandbox, vol)
 	})
-	return cli.OK, nil
+	return nil
 }
 
-func unmount(a *cli.Args, e cli.Emit) (int, error) {
-	if err := a.RejectUnknown("--scratch-dir"); err != nil {
-		return cli.Usage, err
-	}
-	dir, err := a.Require("--scratch-dir")
-	if err != nil {
-		return cli.Usage, err
-	}
+func unmount(dir string, e cli.Emit) error {
 	h, sandbox, err := openScratch(dir)
 	if err != nil {
-		return exitFor(err), err
+		return err
 	}
 	defer syscall.CloseHandle(h)
 	ctx := context.Background()
@@ -431,7 +497,7 @@ func unmount(a *cli.Args, e cli.Emit) (int, error) {
 		first = fmt.Errorf("DetachVirtualDisk: %w", err)
 	}
 	if first != nil {
-		return cli.Failed, first
+		return first
 	}
 
 	e.Result(map[string]any{
@@ -439,7 +505,7 @@ func unmount(a *cli.Args, e cli.Emit) (int, error) {
 	}, func() {
 		fmt.Printf("unmounted %s\n", sandbox)
 	})
-	return cli.OK, nil
+	return nil
 }
 
 func copyFile(src, dst string) error {
@@ -457,11 +523,4 @@ func copyFile(src, dst string) error {
 		return err
 	}
 	return d.Sync()
-}
-
-func exitFor(err error) int {
-	if _, ok := err.(*cli.UsageError); ok {
-		return cli.Usage
-	}
-	return cli.Failed
 }

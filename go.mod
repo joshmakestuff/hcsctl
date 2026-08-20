@@ -7,6 +7,8 @@ require (
 	github.com/Microsoft/hcsshim v0.14.1
 	github.com/google/go-containerregistry v0.21.9
 	github.com/mdlayher/vsock v1.3.0
+	github.com/spf13/cobra v1.10.2
+	github.com/spf13/pflag v1.0.10
 	golang.org/x/sys v0.47.0
 	golang.org/x/term v0.43.0
 )
@@ -20,6 +22,7 @@ require (
 	github.com/docker/docker-credential-helpers v0.9.3 // indirect
 	github.com/gogo/protobuf v1.3.2 // indirect
 	github.com/golang/groupcache v0.0.0-20210331224755-41bb18bfe9da // indirect
+	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/klauspost/compress v1.19.1 // indirect
 	github.com/mdlayher/socket v0.6.0 // indirect
 	github.com/opencontainers/go-digest v1.0.0 // indirect

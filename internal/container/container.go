@@ -44,6 +44,8 @@ import (
 	"github.com/joshmakestuff/hcsctl/internal/layer"
 	"github.com/joshmakestuff/hcsctl/internal/store"
 	"github.com/joshmakestuff/hcsctl/internal/sysinfo"
+	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 
 	"golang.org/x/sys/windows"
 )
@@ -57,41 +59,329 @@ const defaultCmd = `cmd /c ver`
 
 const startTimeout = 5 * time.Minute
 
-func Dispatch(a *cli.Args, e cli.Emit) (int, error) {
-	switch a.Word(1) {
-	case "run":
-		return run(a, e)
-	case "create":
-		return create(a, e)
-	case "start":
-		return start(a, e)
-	case "exec":
-		return exec(a, e)
-	case "kill":
-		return kill(a, e)
-	case "stop":
-		return stop(a, e)
-	case "rm":
-		return remove(a, e)
-	case "ls":
-		return list(a, e)
-	case "stats":
-		return stats(a, e)
-	case "ps":
-		return ps(a, e)
-	case "inspect":
-		return inspect(a, e)
-	case "pause":
-		return pauseResume(a, e, "pause")
-	case "resume":
-		return pauseResume(a, e, "resume")
-	case "logs":
-		return logsCmd(a, e)
-	case "":
-		return cli.Usage, cli.Usagef("container needs a subcommand: run, create, start, exec, kill, logs, stop, rm, ls, stats, ps, inspect, pause, resume")
-	default:
-		return cli.Usage, cli.Usagef("unknown container subcommand %q (expected run, create, start, exec, kill, logs, stop, rm, ls, stats, ps, inspect, pause, resume)", a.Word(1))
+// Command is `hcsctl container`.
+func Command(e cli.Emit) *cobra.Command {
+	return cli.Group("container", "run a Windows container on a materialized image chain",
+		runCmd(e), createCmd(e), startCmd(e), execCmd(e), killCmd(e), logsCmd(e),
+		stopCmd(e), rmCmd(e), lsCmd(e), statsCmd(e), psCmd(e), inspectCmd(e),
+		pauseCmd(e), resumeCmd(e))
+}
+
+// createOptions is the option set create and run share: everything buildConfig consumes.
+// Numeric and size options stay strings here and are parsed in buildConfig, so their error
+// messages keep naming the option and its sink's range.
+type createOptions struct {
+	ref, id, storeDir   string
+	cpus, memoryMB      string
+	hostname, isolation string
+	network, dnsSearch  string
+	scratchSize, cmd    string
+	publish, acl, mount []string
+	label               []string
+}
+
+// addCreateFlags declares the shared create/run option set once, --cmd excepted: both verbs
+// take it, but it means "record the primary" to create and "run this now" to run, so each
+// declares it with its own usage text.
+func addCreateFlags(fs *pflag.FlagSet, o *createOptions) {
+	cli.StringOnce(fs, &o.ref, "ref", "image reference, registry/repo:tag")
+	cli.StringOnce(fs, &o.id, "id", "container id; defaults to one derived from --ref")
+	cli.StringOnce(fs, &o.storeDir, "store", "store directory")
+	cli.StringOnce(fs, &o.cpus, "cpus", "processor count")
+	cli.StringOnce(fs, &o.memoryMB, "memory-mb", "memory ceiling in MB")
+	cli.StringOnce(fs, &o.hostname, "hostname", "guest hostname")
+	cli.StringOnce(fs, &o.isolation, "isolation", "hyperv (default) or process. Process isolation stacks layers on the host, needs elevation at every start, and requires an image build inside the host's process-isolation compatibility window (see hcsctl info)")
+	cli.StringOnce(fs, &o.network, "network", "attach an endpoint on an existing host compute network (name or id) and report its address")
+	cli.StringOnce(fs, &o.dnsSearch, "dns-search", "DNS search list for the endpoint; only means something with --network")
+	cli.StringArray(fs, &o.publish, "publish", "HOST_PORT:CONTAINER_PORT/tcp|udp, repeatable. A NAT port mapping created while the endpoint is created; it exposes the requested host port")
+	cli.StringArray(fs, &o.acl, "acl", "DIRECTION:ACTION[:tcp|udp], repeatable. A create-time endpoint ACL, added to the endpoint create document like --publish. Enforced on process isolation + NAT and Hyper-V + L2Bridge; refused on every other combination, including Hyper-V + NAT where it would be stored without effect. No runtime mutation")
+	cli.StringArray(fs, &o.mount, "mount", "HOST:CONTAINER[:ro], repeatable. Maps a host directory into the guest over VSMB -- not a bind mount, and not Docker semantics; both paths drive-letter absolute")
+	cli.StringOnce(fs, &o.scratchSize, "scratch-size", "grow the scratch VHD, e.g. 40GB, so the guest's C: is bigger than the default -- anything writing real data wants this")
+	cli.StringArray(fs, &o.label, "label", "key=value, repeatable. Stored in state.json, reported by ls and inspect, never interpreted -- ownership and run identity are the consumer's policy")
+}
+
+// targetOptions is the trio every verb acting on an existing container takes.
+type targetOptions struct {
+	id, ref, storeDir string
+}
+
+func addTargetFlags(fs *pflag.FlagSet, o *targetOptions) {
+	cli.StringOnce(fs, &o.id, "id", "container id")
+	cli.StringOnce(fs, &o.ref, "ref", "image reference the container was created from; derives the id when --id is absent")
+	cli.StringOnce(fs, &o.storeDir, "store", "store directory")
+}
+
+const envUsage = "NAME=value, repeatable. The value keeps everything after the first '='; an empty value is rejected because HCS drops it before the guest sees it"
+
+// runOptions is create's option set plus run's exec-shaped extras.
+type runOptions struct {
+	createOptions
+	cwd, user, timeout string
+	env                []string
+	keep               bool
+}
+
+// execOptions is the target trio plus the process to run and how to attach to it.
+type execOptions struct {
+	targetOptions
+	cmd, cwd, user, timeout string
+	env                     []string
+	interactive, tty        bool
+}
+
+func runCmd(e cli.Emit) *cobra.Command {
+	var o runOptions
+	cmd := &cobra.Command{
+		Use:   `run --ref <ref> [--cmd "<cmdline>"] [--id <id>] [--cpus N] [--memory-mb N] [--hostname H] [--cwd D] [--user U] [--env NAME=value]... [--network <name|id>] [--dns-search list] [--publish HOST_PORT:CONTAINER_PORT/tcp|udp]... [--acl DIRECTION:ACTION[:tcp|udp]]... [--mount HOST:CONTAINER[:ro]]... [--scratch-size 40GB] [--isolation hyperv|process] [--timeout <dur>] [--label key=value]... [--store <dir>] [--keep]`,
+		Short: "create, boot and run one command in a container, then tear it down. ELEVATED",
+		Long: `Create, boot and run one command in a container (hyperv by default), then tear
+it down. --cmd defaults to "cmd /c ver". --network attaches an endpoint on an
+existing host compute network and reports its address. --publish creates a NAT
+endpoint mapping while the endpoint is created; it exposes the requested host
+port. --mount maps a host directory into the guest over VSMB -- not a bind
+mount, and not Docker semantics; both paths drive-letter absolute. ELEVATED.
+--isolation hyperv (default) or process. Process isolation stacks layers on
+the host, needs elevation at every start, and requires an image build inside
+the host's process-isolation compatibility window (see hcsctl info).
+--acl DIRECTION:ACTION[:tcp|udp], repeatable. A create-time endpoint ACL,
+added to the endpoint create document like --publish. Enforced on process
+isolation + NAT and Hyper-V + L2Bridge; refused on every other combination,
+including Hyper-V + NAT where it would be stored without effect. No runtime
+mutation. --timeout bounds the primary command; absent means wait forever.`,
+		Args: cli.NoExtraArgs,
+		RunE: func(*cobra.Command, []string) error {
+			if err := cli.Require("--ref", o.ref); err != nil {
+				return err
+			}
+			return run(&o, e)
+		},
 	}
+	addCreateFlags(cmd.Flags(), &o.createOptions)
+	cli.StringOnce(cmd.Flags(), &o.cmd, "cmd", `command to run; defaults to "cmd /c ver"`)
+	cli.StringOnce(cmd.Flags(), &o.cwd, "cwd", "guest working directory")
+	cli.StringOnce(cmd.Flags(), &o.user, "user", "guest user")
+	cli.StringArray(cmd.Flags(), &o.env, "env", envUsage)
+	cli.StringOnce(cmd.Flags(), &o.timeout, "timeout", "bound the primary command, e.g. 30s or 2m; absent means wait forever")
+	cmd.Flags().BoolVar(&o.keep, "keep", false, "leave the container in place instead of tearing it down")
+	return cmd
+}
+
+func createCmd(e cli.Emit) *cobra.Command {
+	var o createOptions
+	cmd := &cobra.Command{
+		Use:   `create --ref <ref> [--id <id>] [--cmd "<cmdline>"] [--cpus N] [--memory-mb N] [--hostname H] [--network <name|id>] [--dns-search list] [--publish HOST_PORT:CONTAINER_PORT/tcp|udp]... [--acl DIRECTION:ACTION[:tcp|udp]]... [--mount HOST:CONTAINER[:ro]]... [--scratch-size 40GB] [--isolation hyperv|process] [--label key=value]... [--store <dir>]`,
+		Short: "create a container without starting it. ELEVATED",
+		Long: `Create a container without starting it. --label stores opaque key=value pairs
+in state.json, reported by ls and inspect and never interpreted -- ownership
+and run identity are the consumer's policy (record an owner pid; scavenge only
+on proof it is dead). --scratch-size grows the scratch VHD so the guest's C:
+is bigger than the default -- anything writing real data wants this. --cmd
+records the primary process; start launches it. Exec the target directly, not
+via cmd /c -- a kill terminates one process, not a tree, and a wrapper's
+children survive. --isolation hyperv (default) or process; process needs
+elevation at every start and a host-compatible image build. Recorded in
+state.json and reported by inspect. --acl DIRECTION:ACTION[:tcp|udp],
+repeatable. Create-time endpoint ACL; enforced on process isolation + NAT and
+Hyper-V + L2Bridge, refused elsewhere. Recorded in state.json.`,
+		Args: cli.NoExtraArgs,
+		RunE: func(*cobra.Command, []string) error {
+			if err := cli.Require("--ref", o.ref); err != nil {
+				return err
+			}
+			return create(&o, e)
+		},
+	}
+	addCreateFlags(cmd.Flags(), &o)
+	cli.StringOnce(cmd.Flags(), &o.cmd, "cmd", "record the primary process; start launches it. Exec the target directly, not via cmd /c -- a kill terminates one process, not a tree, and a wrapper's children survive")
+	return cmd
+}
+
+func startCmd(e cli.Emit) *cobra.Command {
+	var o targetOptions
+	cmd := &cobra.Command{
+		Use:   "start --id <id> | --ref <ref> [--store <dir>]",
+		Short: "start a container; launch and pump its recorded primary process",
+		Long: `With a recorded primary process, start launches it and stays attached as its
+pump, teeing output to primary.log and recording the exit in state.json. The
+pump owns the pipes -- if it dies with its caller, the workload keeps running
+and logs reports the truncation honestly.`,
+		Args: cli.NoExtraArgs,
+		RunE: func(*cobra.Command, []string) error { return start(o, e) },
+	}
+	addTargetFlags(cmd.Flags(), &o)
+	return cmd
+}
+
+func execCmd(e cli.Emit) *cobra.Command {
+	var o execOptions
+	cmd := &cobra.Command{
+		Use:   `exec --id <id> --cmd "<cmdline>" [--cwd D] [--user U] [--env NAME=value]... [--timeout 30s] [--interactive [--tty]] [--ref <ref>] [--store <dir>]`,
+		Short: "run a command in a running container",
+		Long: `Run a command in a running container. Default stdin closes immediately.
+--interactive forwards this process's stdin and closes the guest side on EOF;
+--tty adds an emulated console. Neither can be used with --json or
+--stream-json. Ctrl-C kills only the exec process.`,
+		Args: cli.NoExtraArgs,
+		RunE: func(*cobra.Command, []string) error { return exec(&o, e) },
+	}
+	addTargetFlags(cmd.Flags(), &o.targetOptions)
+	cli.StringOnce(cmd.Flags(), &o.cmd, "cmd", "command to run in the guest")
+	cli.StringOnce(cmd.Flags(), &o.cwd, "cwd", "guest working directory")
+	cli.StringOnce(cmd.Flags(), &o.user, "user", "guest user")
+	cli.StringArray(cmd.Flags(), &o.env, "env", envUsage)
+	cli.StringOnce(cmd.Flags(), &o.timeout, "timeout", "bound the command, e.g. 30s or 2m; absent means wait forever")
+	cmd.Flags().BoolVar(&o.interactive, "interactive", false, "forward this process's stdin; close the guest side on EOF")
+	cmd.Flags().BoolVar(&o.tty, "tty", false, "with --interactive: an emulated guest console with the host terminal in raw mode")
+	return cmd
+}
+
+func killCmd(e cli.Emit) *cobra.Command {
+	var o targetOptions
+	var pid string
+	cmd := &cobra.Command{
+		Use:   "kill --id <id> --pid <pid> [--ref <ref>] [--store <dir>]",
+		Short: "kill one guest process by pid and confirm it is gone",
+		Long: `Kill one guest process and confirm it is gone. PIDs come from container ps or
+the exec result. Kill (and --timeout) terminates that process only: a cmd /c
+wrapper's children survive it, so exec the target directly when a kill must be
+total.`,
+		Args: cli.NoExtraArgs,
+		RunE: func(*cobra.Command, []string) error {
+			// The whole command line is judged before any container lookup, so a bad --pid is
+			// exit 64 even when the container does not exist either.
+			if err := cli.Require("--pid", pid); err != nil {
+				return err
+			}
+			// OpenProcess takes an int and a Windows pid is a DWORD; MaxInt32 satisfies both
+			// sinks, and no real pid approaches it.
+			n, err := cli.ParseUint(pid, math.MaxInt32)
+			if err != nil {
+				return cli.Usagef("--pid %v", err)
+			}
+			return kill(o, n, e)
+		},
+	}
+	addTargetFlags(cmd.Flags(), &o)
+	cli.StringOnce(cmd.Flags(), &pid, "pid", "guest pid, from container ps or an exec result")
+	return cmd
+}
+
+func logsCmd(e cli.Emit) *cobra.Command {
+	var o targetOptions
+	var follow bool
+	cmd := &cobra.Command{
+		Use:   "logs --id <id> [--follow] [--ref <ref>] [--store <dir>]",
+		Short: "a primary process's retained output, from any invocation",
+		Long: `A primary process's retained output, from any invocation -- the file the pump
+wrote, plus status: running, exited (with code), or pump dead. --follow tails
+until the primary exits or the pump dies. Under --stream-json, followed lines
+are framed {"stream":"log"} (the file merges guest stdout and stderr).`,
+		Args: cli.NoExtraArgs,
+		RunE: func(*cobra.Command, []string) error { return logs(o, follow, e) },
+	}
+	addTargetFlags(cmd.Flags(), &o)
+	cmd.Flags().BoolVar(&follow, "follow", false, "tail until the primary exits or the pump dies")
+	return cmd
+}
+
+func stopCmd(e cli.Emit) *cobra.Command {
+	var o targetOptions
+	var force bool
+	cmd := &cobra.Command{
+		Use:   "stop --id <id> [--force] [--ref <ref>] [--store <dir>]",
+		Short: "shut a container down, politely then forcibly",
+		Args:  cli.NoExtraArgs,
+		RunE:  func(*cobra.Command, []string) error { return stop(o, force, e) },
+	}
+	addTargetFlags(cmd.Flags(), &o)
+	cmd.Flags().BoolVar(&force, "force", false, "terminate without asking the guest to shut down")
+	return cmd
+}
+
+func rmCmd(e cli.Emit) *cobra.Command {
+	var o targetOptions
+	var force bool
+	cmd := &cobra.Command{
+		Use:   "rm --id <id> [--force] [--ref <ref>] [--store <dir>]",
+		Short: "stop a container and remove its scratch, endpoint and state. ELEVATED",
+		Args:  cli.NoExtraArgs,
+		RunE:  func(*cobra.Command, []string) error { return remove(o, force, e) },
+	}
+	addTargetFlags(cmd.Flags(), &o)
+	cmd.Flags().BoolVar(&force, "force", false, "terminate without asking the guest to shut down")
+	return cmd
+}
+
+func lsCmd(e cli.Emit) *cobra.Command {
+	var storeDir string
+	cmd := &cobra.Command{
+		Use:   "ls [--store <dir>]",
+		Short: "containers and their HCS state",
+		Args:  cli.NoExtraArgs,
+		RunE:  func(*cobra.Command, []string) error { return list(storeDir, e) },
+	}
+	cli.StringOnce(cmd.Flags(), &storeDir, "store", "store directory")
+	return cmd
+}
+
+func statsCmd(e cli.Emit) *cobra.Command {
+	var o targetOptions
+	cmd := &cobra.Command{
+		Use:   "stats --id <id> [--ref <ref>] [--store <dir>]",
+		Short: "uptime, memory, CPU, storage and network",
+		Args:  cli.NoExtraArgs,
+		RunE:  func(*cobra.Command, []string) error { return stats(o, e) },
+	}
+	addTargetFlags(cmd.Flags(), &o)
+	return cmd
+}
+
+func psCmd(e cli.Emit) *cobra.Command {
+	var o targetOptions
+	cmd := &cobra.Command{
+		Use:   "ps --id <id> [--ref <ref>] [--store <dir>]",
+		Short: "processes running in the guest",
+		Args:  cli.NoExtraArgs,
+		RunE:  func(*cobra.Command, []string) error { return ps(o, e) },
+	}
+	addTargetFlags(cmd.Flags(), &o)
+	return cmd
+}
+
+func inspectCmd(e cli.Emit) *cobra.Command {
+	var o targetOptions
+	cmd := &cobra.Command{
+		Use:   "inspect --id <id> [--ref <ref>] [--store <dir>]",
+		Short: "what the store and HCS each know",
+		Args:  cli.NoExtraArgs,
+		RunE:  func(*cobra.Command, []string) error { return inspect(o, e) },
+	}
+	addTargetFlags(cmd.Flags(), &o)
+	return cmd
+}
+
+func pauseCmd(e cli.Emit) *cobra.Command {
+	var o targetOptions
+	cmd := &cobra.Command{
+		Use:   "pause --id <id> [--ref <ref>] [--store <dir>]",
+		Short: "pause a running container",
+		Args:  cli.NoExtraArgs,
+		RunE:  func(*cobra.Command, []string) error { return pauseResume(o, e, "pause") },
+	}
+	addTargetFlags(cmd.Flags(), &o)
+	return cmd
+}
+
+func resumeCmd(e cli.Emit) *cobra.Command {
+	var o targetOptions
+	cmd := &cobra.Command{
+		Use:   "resume --id <id> [--ref <ref>] [--store <dir>]",
+		Short: "resume a paused container",
+		Args:  cli.NoExtraArgs,
+		RunE:  func(*cobra.Command, []string) error { return pauseResume(o, e, "resume") },
+	}
+	addTargetFlags(cmd.Flags(), &o)
+	return cmd
 }
 
 // -- on-disk state -----------------------------------------------------------------------
@@ -194,8 +484,7 @@ func idFor(ref string) string {
 // acting on an existing container. Validation lives in these two functions rather than at
 // call sites, so a future verb cannot forget it -- ids reach DestroyLayer and os.RemoveAll,
 // commonly elevated.
-func newID(a *cli.Args, ref string) (string, error) {
-	id := a.Option("--id")
+func newID(id, ref string) (string, error) {
 	if id == "" {
 		id = idFor(ref)
 	}
@@ -336,8 +625,7 @@ func (p publishedPort) protocolNumber() uint32 {
 // parsePublishedPorts parses repeated --publish HOST_PORT:CONTAINER_PORT/PROTOCOL values.
 // Keeping it separate from endpoint creation makes every rejected value an exit-64 path before
 // the scratch, endpoint, and compute system transactions begin.
-func parsePublishedPorts(a *cli.Args) ([]publishedPort, error) {
-	vals := a.Options("--publish")
+func parsePublishedPorts(vals []string) ([]publishedPort, error) {
 	if len(vals) == 0 {
 		return nil, nil
 	}
@@ -442,8 +730,7 @@ func (a aclRule) policy() (hcn.EndpointPolicy, error) {
 
 // parseACLs parses repeated --acl DIRECTION:ACTION[:tcp|udp] values. Like parsePublishedPorts,
 // it runs before any disk or endpoint transaction so every rejected value is exit 64.
-func parseACLs(a *cli.Args) ([]aclRule, error) {
-	vals := a.Options("--acl")
+func parseACLs(vals []string) ([]aclRule, error) {
 	if len(vals) == 0 {
 		return nil, nil
 	}
@@ -574,8 +861,7 @@ var mountRe = regexp.MustCompile(`^([A-Za-z]:\\[^:]*):([A-Za-z]:\\[^:]*?)(:ro)?$
 
 // parseMounts turns repeated --mount HOST:CONTAINER[:ro] into MappedDirectories. For a xenon
 // these go over VSMB, not a bind mount -- different performance, different semantics.
-func parseMounts(a *cli.Args) ([]hcsshim.MappedDir, error) {
-	vals := a.Options("--mount")
+func parseMounts(vals []string) ([]hcsshim.MappedDir, error) {
 	if len(vals) == 0 {
 		return nil, nil
 	}
@@ -614,8 +900,8 @@ var reservedLabelKeys = map[string]bool{
 }
 
 // parseLabels is cli.ParseLabels with this package's reserved key set.
-func parseLabels(a *cli.Args) (map[string]string, error) {
-	return cli.ParseLabels(a, reservedLabelKeys)
+func parseLabels(vals []string) (map[string]string, error) {
+	return cli.ParseLabels(vals, reservedLabelKeys)
 }
 
 // -- isolation ---------------------------------------------------------------------------
@@ -627,8 +913,8 @@ const (
 	isolationProcess = "process"
 )
 
-func parseIsolation(a *cli.Args) (string, error) {
-	switch v := a.Option("--isolation"); v {
+func parseIsolation(v string) (string, error) {
+	switch v {
 	case "", isolationHyperV:
 		return isolationHyperV, nil
 	case isolationProcess:
@@ -640,61 +926,58 @@ func parseIsolation(a *cli.Args) (string, error) {
 
 // -- create ------------------------------------------------------------------------------
 
-var createOptions = []string{"--ref", "--id", "--store", "--cpus", "--memory-mb", "--hostname", "--isolation",
-	"--network", "--dns-search", "--publish", "--acl", "--mount", "--scratch-size", "--cmd", "--label"}
-
 // buildConfig assembles the compute system document. Split out from create() because `run`
 // needs the same document and the same failure messages.
-func buildConfig(a *cli.Args, e cli.Emit, st *store.Store, id, ref string) (*hcsshim.ContainerConfig, state, error) {
+func buildConfig(o *createOptions, e cli.Emit, st *store.Store, id string) (*hcsshim.ContainerConfig, state, error) {
 	var s state
 
 	// Every argument is validated before anything touches the disk, because exit 64 promises
 	// nothing was attempted -- and because from CreateScratchLayer on, an early return has an
 	// increasing amount to clean up.
-	if a.Option("--dns-search") != "" && a.Option("--network") == "" {
+	if o.dnsSearch != "" && o.network == "" {
 		return nil, s, cli.Usagef("--dns-search only means something with --network")
 	}
-	isolation, err := parseIsolation(a)
+	isolation, err := parseIsolation(o.isolation)
 	if err != nil {
 		return nil, s, err
 	}
-	published, err := parsePublishedPorts(a)
+	published, err := parsePublishedPorts(o.publish)
 	if err != nil {
 		return nil, s, err
 	}
-	acls, err := parseACLs(a)
+	acls, err := parseACLs(o.acl)
 	if err != nil {
 		return nil, s, err
 	}
 	var cpus, memoryMB uint64
-	if v := a.Option("--cpus"); v != "" {
+	if o.cpus != "" {
 		// ProcessorCount is a uint32 in the config document.
-		if cpus, err = cli.ParseUint(v, math.MaxUint32); err != nil {
+		if cpus, err = cli.ParseUint(o.cpus, math.MaxUint32); err != nil {
 			return nil, s, cli.Usagef("--cpus %v", err)
 		}
 	}
-	if v := a.Option("--memory-mb"); v != "" {
+	if o.memoryMB != "" {
 		// MemoryMaximumInMB is an int64 in the config document.
-		if memoryMB, err = cli.ParseUint(v, math.MaxInt64); err != nil {
+		if memoryMB, err = cli.ParseUint(o.memoryMB, math.MaxInt64); err != nil {
 			return nil, s, cli.Usagef("--memory-mb %v", err)
 		}
 	}
-	mounts, err := parseMounts(a)
+	mounts, err := parseMounts(o.mount)
 	if err != nil {
 		return nil, s, err
 	}
-	labels, err := parseLabels(a)
+	labels, err := parseLabels(o.label)
 	if err != nil {
 		return nil, s, err
 	}
 	var scratchSize uint64
-	if v := a.Option("--scratch-size"); v != "" {
-		if scratchSize, err = cli.ParseSize(v); err != nil {
+	if o.scratchSize != "" {
+		if scratchSize, err = cli.ParseSize(o.scratchSize); err != nil {
 			return nil, s, err
 		}
 	}
 
-	chain, err := chainFor(st, ref)
+	chain, err := chainFor(st, o.ref)
 	if err != nil {
 		return nil, s, err
 	}
@@ -708,7 +991,7 @@ func buildConfig(a *cli.Args, e cli.Emit, st *store.Store, id, ref string) (*hcs
 	// the host/image build compatibility window. Xenon needs a utility VM instead.
 	var uvm string
 	if isolation == isolationProcess {
-		rec, err := st.ReadRecord(ref)
+		rec, err := st.ReadRecord(o.ref)
 		if err != nil {
 			return nil, s, err
 		}
@@ -725,8 +1008,8 @@ func buildConfig(a *cli.Args, e cli.Emit, st *store.Store, id, ref string) (*hcs
 	// Resolved before anything touches the disk, so a bad name is exit 64 with nothing to
 	// clean up.
 	var netw *hcn.HostComputeNetwork
-	if want := a.Option("--network"); want != "" {
-		if netw, err = resolveNetwork(want); err != nil {
+	if o.network != "" {
+		if netw, err = resolveNetwork(o.network); err != nil {
 			return nil, s, err
 		}
 	}
@@ -807,8 +1090,8 @@ func buildConfig(a *cli.Args, e cli.Emit, st *store.Store, id, ref string) (*hcs
 	} else {
 		cfg.VolumePath = volumePath
 	}
-	if h := a.Option("--hostname"); h != "" {
-		cfg.HostName = h
+	if o.hostname != "" {
+		cfg.HostName = o.hostname
 	}
 	if cpus != 0 {
 		cfg.ProcessorCount = uint32(cpus)
@@ -822,10 +1105,10 @@ func buildConfig(a *cli.Args, e cli.Emit, st *store.Store, id, ref string) (*hcs
 		// Unqualified lookups are what a developer's `ping example.com` is, so this defaults
 		// on rather than being a switch nobody remembers.
 		cfg.AllowUnqualifiedDNSQuery = true
-		cfg.DNSSearchList = a.Option("--dns-search")
+		cfg.DNSSearchList = o.dnsSearch
 	}
 
-	s = state{ID: id, Ref: ref, Scratch: sd, UVM: uvm, Isolation: isolation, Chain: chain, Labels: labels, Published: published, ACLs: acls}
+	s = state{ID: id, Ref: o.ref, Scratch: sd, UVM: uvm, Isolation: isolation, Chain: chain, Labels: labels, Published: published, ACLs: acls}
 	if ep != nil {
 		s.Endpoint = ep.Id
 		s.Addresses = addrs
@@ -833,38 +1116,31 @@ func buildConfig(a *cli.Args, e cli.Emit, st *store.Store, id, ref string) (*hcs
 	return cfg, s, nil
 }
 
-func create(a *cli.Args, e cli.Emit) (int, error) {
-	if err := a.RejectUnknown(createOptions...); err != nil {
-		return cli.Usage, err
-	}
-	ref, err := a.Require("--ref")
+func create(o *createOptions, e cli.Emit) error {
+	st, err := store.New(o.storeDir)
 	if err != nil {
-		return cli.Usage, err
+		return err
 	}
-	st, err := store.New(a.Option("--store"))
+	id, err := newID(o.id, o.ref)
 	if err != nil {
-		return cli.Failed, err
-	}
-	id, err := newID(a, ref)
-	if err != nil {
-		return cli.Usage, err
+		return err
 	}
 
-	cfg, s, err := buildConfig(a, e, st, id, ref)
+	cfg, s, err := buildConfig(o, e, st, id)
 	if err != nil {
-		return exitFor(err), err
+		return err
 	}
 	// The primary process is recorded, not started: `start` launches it. The cmd
 	// should be the target directly, not a `cmd /c` wrapper -- Kill terminates one process,
 	// not a tree, and a wrapper's children would survive a later kill.
-	if cmd := a.Option("--cmd"); cmd != "" {
-		s.Primary = &primaryState{Cmd: cmd}
+	if o.cmd != "" {
+		s.Primary = &primaryState{Cmd: o.cmd}
 	}
 
 	c, err := hcsshim.CreateContainer(id, cfg)
 	if err != nil {
 		destroy(st, s)
-		return cli.Failed, fmt.Errorf("CreateContainer: %w", err)
+		return fmt.Errorf("CreateContainer: %w", err)
 	}
 
 	// State is part of the creation transaction: without state.json, `rm` can never
@@ -879,17 +1155,17 @@ func create(a *cli.Args, e cli.Emit) (int, error) {
 		if derr := destroy(st, s); derr != nil {
 			e.Progress("cleanup after failed state write: %v", derr)
 		}
-		return cli.Failed, fmt.Errorf("writing state: %w", err)
+		return fmt.Errorf("writing state: %w", err)
 	}
 	// The handle is dropped here: the compute system outlives this process and is reopened by
 	// id. state.json records what HCS does not.
 	c.Close()
 	e.Result(map[string]any{
-		"ok": true, "command": "container create", "id": id, "ref": ref,
+		"ok": true, "command": "container create", "id": id, "ref": o.ref,
 		"utilityVM": s.UVM, "isolation": s.Isolation, "scratch": s.Scratch, "chain": s.Chain,
 		"endpoint": s.Endpoint, "addresses": s.Addresses, "published": s.Published, "acls": s.ACLs,
 	}, func() {
-		fmt.Printf("created %s\n  id:      %s\n  scratch: %s\n", ref, id, s.Scratch)
+		fmt.Printf("created %s\n  id:      %s\n  scratch: %s\n", o.ref, id, s.Scratch)
 		if s.Endpoint != "" {
 			fmt.Printf("  address: %s\n", strings.Join(s.Addresses, ","))
 		}
@@ -900,40 +1176,37 @@ func create(a *cli.Args, e cli.Emit) (int, error) {
 			fmt.Printf("  acl:     %s\n", a)
 		}
 	})
-	return cli.OK, nil
+	return nil
 }
 
 // -- start / stop ------------------------------------------------------------------------
 
-func start(a *cli.Args, e cli.Emit) (int, error) {
-	if err := a.RejectUnknown("--id", "--ref", "--store"); err != nil {
-		return cli.Usage, err
-	}
-	st, id, err := resolve(a)
+func start(o targetOptions, e cli.Emit) error {
+	st, id, err := resolve(o)
 	if err != nil {
-		return cli.Usage, err
+		return err
 	}
 	s, err := readState(st, id)
 	if err != nil {
-		return exitFor(err), err
+		return err
 	}
 	c, err := hcsshim.OpenContainer(id)
 	if err != nil {
-		return cli.Failed, fmt.Errorf("OpenContainer(%s): %w", id, err)
+		return fmt.Errorf("OpenContainer(%s): %w", id, err)
 	}
 	defer c.Close()
 
 	e.Progress("starting container...")
 
 	if err := c.Start(); err != nil {
-		return cli.Failed, fmt.Errorf("Start: %w", err)
+		return fmt.Errorf("Start: %w", err)
 	}
 
 	if s.Primary == nil {
 		e.Result(map[string]any{"ok": true, "command": "container start", "id": id}, func() {
 			fmt.Printf("started %s\n", id)
 		})
-		return cli.OK, nil
+		return nil
 	}
 
 	// A primary process is recorded: launch it and stay attached as its pump. This
@@ -944,7 +1217,7 @@ func start(a *cli.Args, e cli.Emit) (int, error) {
 	// `logs` reports the pump's death rather than pretending the file is complete.
 	logFile, err := os.Create(primaryLogPath(st, id))
 	if err != nil {
-		return cli.Failed, fmt.Errorf("primary.log: %w", err)
+		return fmt.Errorf("primary.log: %w", err)
 	}
 	defer logFile.Close()
 	e.Progress("primary: %s", s.Primary.Cmd)
@@ -975,7 +1248,7 @@ func start(a *cli.Args, e cli.Emit) (int, error) {
 		e.Progress("recording primary exit: %v", werr)
 	}
 	if execErr != nil {
-		return cli.Failed, execErr
+		return execErr
 	}
 	e.Result(map[string]any{
 		"ok": true, "command": "container start", "id": id,
@@ -983,7 +1256,7 @@ func start(a *cli.Args, e cli.Emit) (int, error) {
 	}, func() {
 		fmt.Printf("started %s; primary pid %d exited %d\n", id, res.Pid, res.ExitCode)
 	})
-	return cli.OK, nil
+	return nil
 }
 
 // lockedWriter serializes two concurrent guest streams into one log file, so lines from
@@ -999,30 +1272,27 @@ func (l *lockedWriter) Write(p []byte) (int, error) {
 	return l.w.Write(p)
 }
 
-func stop(a *cli.Args, e cli.Emit) (int, error) {
-	if err := a.RejectUnknown("--id", "--ref", "--store", "--force"); err != nil {
-		return cli.Usage, err
-	}
-	st, id, err := resolve(a)
+func stop(o targetOptions, force bool, e cli.Emit) error {
+	st, id, err := resolve(o)
 	if err != nil {
-		return cli.Usage, err
+		return err
 	}
 	if _, err := readState(st, id); err != nil {
-		return exitFor(err), err
+		return err
 	}
 	c, err := hcsshim.OpenContainer(id)
 	if err != nil {
-		return cli.Failed, fmt.Errorf("OpenContainer(%s): %w", id, err)
+		return fmt.Errorf("OpenContainer(%s): %w", id, err)
 	}
 	defer c.Close()
 
-	if err := shutdown(c, e, a.Flag("--force")); err != nil {
-		return cli.Failed, err
+	if err := shutdown(c, e, force); err != nil {
+		return err
 	}
 	e.Result(map[string]any{"ok": true, "command": "container stop", "id": id}, func() {
 		fmt.Printf("stopped %s\n", id)
 	})
-	return cli.OK, nil
+	return nil
 }
 
 // shutdown asks politely, then insists. Both Shutdown and Terminate report
@@ -1061,8 +1331,7 @@ func shutdown(c hcsshim.Container, e cli.Emit, force bool) error {
 // the wire intact, but the variable never appears in the guest (Win32 treats empty as
 // deleted). There is no inherited environment here, so "unset" is expressed by omitting the
 // variable.
-func parseEnv(a *cli.Args) (map[string]string, error) {
-	vals := a.Options("--env")
+func parseEnv(vals []string) (map[string]string, error) {
 	if len(vals) == 0 {
 		return nil, nil
 	}
@@ -1083,8 +1352,7 @@ func parseEnv(a *cli.Args) (map[string]string, error) {
 // parseTimeout reads --timeout as a Go duration. Zero means absent, which means wait
 // forever -- the default an integration's log-following exec depends on, so the bound is
 // strictly opt-in.
-func parseTimeout(a *cli.Args) (time.Duration, error) {
-	v := a.Option("--timeout")
+func parseTimeout(v string) (time.Duration, error) {
 	if v == "" {
 		return 0, nil
 	}
@@ -1281,48 +1549,43 @@ func waitAfterKill(exited <-chan error, pid int) error {
 	}
 }
 
-func exec(a *cli.Args, e cli.Emit) (int, error) {
-	if err := a.RejectUnknown("--id", "--ref", "--store", "--cmd", "--cwd", "--user", "--env", "--timeout", "--interactive", "--tty"); err != nil {
-		return cli.Usage, err
+func exec(o *execOptions, e cli.Emit) error {
+	if o.tty && !o.interactive {
+		return cli.Usagef("--tty requires --interactive")
 	}
-	interactive, tty := a.Flag("--interactive"), a.Flag("--tty")
-	if tty && !interactive {
-		return cli.Usage, cli.Usagef("--tty requires --interactive")
+	if o.interactive && (e.JSON || e.StreamJSON) {
+		return cli.Usagef("--interactive cannot be used with --json or --stream-json")
 	}
-	if interactive && (e.JSON || e.StreamJSON) {
-		return cli.Usage, cli.Usagef("--interactive cannot be used with --json or --stream-json")
-	}
-	st, id, err := resolve(a)
+	st, id, err := resolve(o.targetOptions)
 	if err != nil {
-		return cli.Usage, err
+		return err
 	}
-	cmdline, err := a.Require("--cmd")
-	if err != nil {
-		return cli.Usage, err
+	if err := cli.Require("--cmd", o.cmd); err != nil {
+		return err
 	}
-	env, err := parseEnv(a)
+	env, err := parseEnv(o.env)
 	if err != nil {
-		return cli.Usage, err
+		return err
 	}
-	timeout, err := parseTimeout(a)
+	timeout, err := parseTimeout(o.timeout)
 	if err != nil {
-		return cli.Usage, err
+		return err
 	}
 	if _, err := readState(st, id); err != nil {
-		return exitFor(err), err
+		return err
 	}
 	c, err := hcsshim.OpenContainer(id)
 	if err != nil {
-		return cli.Failed, fmt.Errorf("OpenContainer(%s): %w", id, err)
+		return fmt.Errorf("OpenContainer(%s): %w", id, err)
 	}
 	defer c.Close()
 
-	mode := execMode{interactive: interactive, tty: tty}
+	mode := execMode{interactive: o.interactive, tty: o.tty}
 	restoreTerminal := func() {}
 	if mode.tty {
 		restore, consoleSize, terr := prepareTerminal()
 		if terr != nil {
-			return cli.Failed, fmt.Errorf("--tty requires attached stdin and stdout terminals: %w", terr)
+			return fmt.Errorf("--tty requires attached stdin and stdout terminals: %w", terr)
 		}
 		var restoreOnce sync.Once
 		restoreTerminal = func() { restoreOnce.Do(restore) }
@@ -1330,29 +1593,29 @@ func exec(a *cli.Args, e cli.Emit) (int, error) {
 		mode.consoleSize = consoleSize
 	}
 	if mode.interactive {
-		res, err := execIn(c, e, cmdline, a.Option("--cwd"), a.Option("--user"), env, timeout, os.Stdout, os.Stderr, nil, mode)
+		res, err := execIn(c, e, o.cmd, o.cwd, o.user, env, timeout, os.Stdout, os.Stderr, nil, mode)
 		if err != nil {
-			return cli.Failed, err
+			return err
 		}
 		restoreTerminal()
 		printExec(res)
 		if res.Interrupted {
-			return cli.Failed, nil
+			return fmt.Errorf("interrupted, killed pid %d", res.Pid)
 		}
-		return cli.OK, nil
+		return nil
 	}
 
 	out := &captured{json: e.JSON}
 	outSink, errSink, closeFraming := guestSinks(e, out)
-	res, err := execIn(c, e, cmdline, a.Option("--cwd"), a.Option("--user"), env, timeout, outSink, errSink, nil, mode)
+	res, err := execIn(c, e, o.cmd, o.cwd, o.user, env, timeout, outSink, errSink, nil, mode)
 	closeFraming()
 	if err != nil {
-		return cli.Failed, err
+		return err
 	}
-	e.Result(execDoc("container exec", id, cmdline, res, out), func() {
+	e.Result(execDoc("container exec", id, o.cmd, res, out), func() {
 		printExec(res)
 	})
-	return cli.OK, nil
+	return nil
 }
 
 // guestSinks wires guest output for one exec. Default: both guest streams merge into the
@@ -1434,39 +1697,31 @@ func (c *captured) String() string {
 
 // run is create + start + exec + stop + rm in one call: the shape you want for a smoke test and
 // for one-shot work, and the shape that leaves nothing behind when a step fails.
-func run(a *cli.Args, e cli.Emit) (int, error) {
-	known := append([]string{"--cmd", "--cwd", "--user", "--env", "--timeout", "--keep"}, createOptions...)
-	if err := a.RejectUnknown(known...); err != nil {
-		return cli.Usage, err
-	}
-	ref, err := a.Require("--ref")
+func run(o *runOptions, e cli.Emit) error {
+	env, err := parseEnv(o.env)
 	if err != nil {
-		return cli.Usage, err
+		return err
 	}
-	env, err := parseEnv(a)
+	timeout, err := parseTimeout(o.timeout)
 	if err != nil {
-		return cli.Usage, err
+		return err
 	}
-	timeout, err := parseTimeout(a)
+	st, err := store.New(o.storeDir)
 	if err != nil {
-		return cli.Usage, err
+		return err
 	}
-	st, err := store.New(a.Option("--store"))
+	id, err := newID(o.id, o.ref)
 	if err != nil {
-		return cli.Failed, err
+		return err
 	}
-	id, err := newID(a, ref)
-	if err != nil {
-		return cli.Usage, err
-	}
-	cmdline := a.Option("--cmd")
+	cmdline := o.cmd
 	if cmdline == "" {
 		cmdline = defaultCmd
 	}
 
-	cfg, s, err := buildConfig(a, e, st, id, ref)
+	cfg, s, err := buildConfig(&o.createOptions, e, st, id)
 	if err != nil {
-		return exitFor(err), err
+		return err
 	}
 	// Same transaction rule as create: buildConfig has acquired the scratch and any
 	// endpoint by now, and without state.json nothing can ever find them to clean them up.
@@ -1474,19 +1729,19 @@ func run(a *cli.Args, e cli.Emit) (int, error) {
 		if derr := destroy(st, s); derr != nil {
 			e.Progress("cleanup after failed state write: %v", derr)
 		}
-		return cli.Failed, fmt.Errorf("writing state: %w", err)
+		return fmt.Errorf("writing state: %w", err)
 	}
 
 	c, err := hcsshim.CreateContainer(id, cfg)
 	if err != nil {
 		destroy(st, s)
-		return cli.Failed, fmt.Errorf("CreateContainer: %w", err)
+		return fmt.Errorf("CreateContainer: %w", err)
 	}
 	e.Progress("CreateContainer ok")
 
 	// From here the container exists in HCS and must be torn down on every path out.
 	cleanup := func() {
-		if a.Flag("--keep") {
+		if o.keep {
 			e.Progress("--keep: leaving %s in place", id)
 			c.Close()
 			return
@@ -1508,30 +1763,30 @@ func run(a *cli.Args, e cli.Emit) (int, error) {
 	case err := <-started:
 		if err != nil {
 			cleanup()
-			return cli.Failed, fmt.Errorf("Start: %w", err)
+			return fmt.Errorf("Start: %w", err)
 		}
 	case <-time.After(startTimeout):
 		cleanup()
-		return cli.Failed, fmt.Errorf("container did not start within %s", startTimeout)
+		return fmt.Errorf("container did not start within %s", startTimeout)
 	}
 	e.Progress("started")
 
 	out := &captured{json: e.JSON}
 	outSink, errSink, closeFraming := guestSinks(e, out)
-	res, execErr := execIn(c, e, cmdline, a.Option("--cwd"), a.Option("--user"), env, timeout, outSink, errSink, nil, execMode{})
+	res, execErr := execIn(c, e, cmdline, o.cwd, o.user, env, timeout, outSink, errSink, nil, execMode{})
 	closeFraming()
 	cleanup()
 	if execErr != nil {
-		return cli.Failed, execErr
+		return execErr
 	}
 
 	// The CLI's own exit code stays on contract -- 0 means hcsctl ran the thing -- and the
 	// guest's exit code is reported in the document rather than conflated with it.
 	doc := execDoc("container run", id, cmdline, res, out)
-	doc["ref"] = ref
+	doc["ref"] = o.ref
 	doc["utilityVM"] = s.UVM
 	doc["isolation"] = s.Isolation
-	doc["kept"] = a.Flag("--keep")
+	doc["kept"] = o.keep
 	doc["endpoint"] = s.Endpoint
 	doc["addresses"] = s.Addresses
 	doc["published"] = s.Published
@@ -1539,38 +1794,24 @@ func run(a *cli.Args, e cli.Emit) (int, error) {
 	e.Result(doc, func() {
 		printExec(res)
 	})
-	return cli.OK, nil
+	return nil
 }
 
 // kill terminates one guest process by pid. It exists because an exec that hcsctl no longer
 // owns -- a crashed caller, an abandoned long-running app -- leaves a process nothing can
 // reach: HCS pipes belong to whoever created them, but Kill needs only the pid.
-func kill(a *cli.Args, e cli.Emit) (int, error) {
-	// The whole command line is judged before any container lookup, so a bad --pid is exit 64
-	// even when the container does not exist either.
-	if err := a.RejectUnknown("--id", "--ref", "--store", "--pid"); err != nil {
-		return cli.Usage, err
-	}
-	v, err := a.Require("--pid")
+// --pid was required and parsed by killCmd before any container lookup.
+func kill(o targetOptions, pid uint64, e cli.Emit) error {
+	st, id, err := resolve(o)
 	if err != nil {
-		return cli.Usage, err
-	}
-	// OpenProcess takes an int and a Windows pid is a DWORD; MaxInt32 satisfies both sinks,
-	// and no real pid approaches it.
-	pid, err := cli.ParseUint(v, math.MaxInt32)
-	if err != nil {
-		return cli.Usage, cli.Usagef("--pid %v", err)
-	}
-	st, id, err := resolve(a)
-	if err != nil {
-		return cli.Usage, err
+		return err
 	}
 	if _, err := readState(st, id); err != nil {
-		return exitFor(err), err
+		return err
 	}
 	c, err := hcsshim.OpenContainer(id)
 	if err != nil {
-		return cli.Failed, fmt.Errorf("OpenContainer(%s): %w", id, err)
+		return fmt.Errorf("OpenContainer(%s): %w", id, err)
 	}
 	defer c.Close()
 
@@ -1578,16 +1819,16 @@ func kill(a *cli.Args, e cli.Emit) (int, error) {
 	// exited a moment ago, so it is exit 1 with the message.
 	p, err := c.OpenProcess(int(pid))
 	if err != nil {
-		return cli.Failed, fmt.Errorf("OpenProcess(%d): %w", pid, err)
+		return fmt.Errorf("OpenProcess(%d): %w", pid, err)
 	}
 	defer p.Close()
 
 	if err := p.Kill(); err != nil {
-		return cli.Failed, fmt.Errorf("Kill(%d): %w", pid, err)
+		return fmt.Errorf("Kill(%d): %w", pid, err)
 	}
 	// The post-condition, not the return value: Kill signals, WaitTimeout is what confirms.
 	if err := p.WaitTimeout(killWait); err != nil {
-		return cli.Failed, fmt.Errorf("pid %d still running %s after Kill: %w", pid, killWait, err)
+		return fmt.Errorf("pid %d still running %s after Kill: %w", pid, killWait, err)
 	}
 
 	e.Result(map[string]any{
@@ -1595,7 +1836,7 @@ func kill(a *cli.Args, e cli.Emit) (int, error) {
 	}, func() {
 		fmt.Printf("killed pid %d in %s\n", pid, id)
 	})
-	return cli.OK, nil
+	return nil
 }
 
 // -- rm / ls -----------------------------------------------------------------------------
@@ -1648,23 +1889,20 @@ func destroy(st *store.Store, s state) error {
 	return first
 }
 
-func remove(a *cli.Args, e cli.Emit) (int, error) {
-	if err := a.RejectUnknown("--id", "--ref", "--store", "--force"); err != nil {
-		return cli.Usage, err
-	}
-	st, id, err := resolve(a)
+func remove(o targetOptions, force bool, e cli.Emit) error {
+	st, id, err := resolve(o)
 	if err != nil {
-		return cli.Usage, err
+		return err
 	}
 	s, err := readState(st, id)
 	if err != nil {
-		return exitFor(err), err
+		return err
 	}
 
 	// A container that is gone from HCS but still on disk is the normal state after a crash, so
 	// a failure to open is not fatal here -- the scratch and endpoint still need removing.
 	if c, err := hcsshim.OpenContainer(id); err == nil {
-		if err := shutdown(c, e, a.Flag("--force")); err != nil {
+		if err := shutdown(c, e, force); err != nil {
 			e.Progress("stop: %v", err)
 		}
 		c.Close()
@@ -1673,25 +1911,22 @@ func remove(a *cli.Args, e cli.Emit) (int, error) {
 	}
 
 	if err := destroy(st, s); err != nil {
-		return cli.Failed, err
+		return err
 	}
 	e.Result(map[string]any{"ok": true, "command": "container rm", "id": id}, func() {
 		fmt.Printf("removed %s\n", id)
 	})
-	return cli.OK, nil
+	return nil
 }
 
-func list(a *cli.Args, e cli.Emit) (int, error) {
-	if err := a.RejectUnknown("--store"); err != nil {
-		return cli.Usage, err
-	}
-	st, err := store.New(a.Option("--store"))
+func list(storeDir string, e cli.Emit) error {
+	st, err := store.New(storeDir)
 	if err != nil {
-		return cli.Failed, err
+		return err
 	}
 	entries, err := os.ReadDir(containersRoot(st))
 	if err != nil && !os.IsNotExist(err) {
-		return cli.Failed, err
+		return err
 	}
 
 	// HCS is the authority on whether a container is running; the store is the authority on
@@ -1743,18 +1978,15 @@ func list(a *cli.Args, e cli.Emit) (int, error) {
 			fmt.Printf("%-40s %-12s %s\n", r.ID, r.State, r.Ref)
 		}
 	})
-	return cli.OK, nil
+	return nil
 }
 
 // -- introspection -----------------------------------------------------------------------
 
 // open is the common preamble for every verb that inspects a live container: resolve the id,
 // confirm we know about it, and get a handle.
-func open(a *cli.Args, known ...string) (hcsshim.Container, string, error) {
-	if err := a.RejectUnknown(append([]string{"--id", "--ref", "--store"}, known...)...); err != nil {
-		return nil, "", err
-	}
-	st, id, err := resolve(a)
+func open(o targetOptions) (hcsshim.Container, string, error) {
+	st, id, err := resolve(o)
 	if err != nil {
 		return nil, "", err
 	}
@@ -1768,16 +2000,16 @@ func open(a *cli.Args, known ...string) (hcsshim.Container, string, error) {
 	return c, id, nil
 }
 
-func stats(a *cli.Args, e cli.Emit) (int, error) {
-	c, id, err := open(a)
+func stats(o targetOptions, e cli.Emit) error {
+	c, id, err := open(o)
 	if err != nil {
-		return exitFor(err), err
+		return err
 	}
 	defer c.Close()
 
 	s, err := c.Statistics()
 	if err != nil {
-		return cli.Failed, fmt.Errorf("Statistics: %w", err)
+		return fmt.Errorf("Statistics: %w", err)
 	}
 	e.Result(map[string]any{
 		"ok": true, "command": "container stats", "id": id, "statistics": s,
@@ -1798,19 +2030,19 @@ func stats(a *cli.Args, e cli.Emit) (int, error) {
 			fmt.Printf("net[%d] rx/tx      %s / %s\n", i, bytes(n.BytesReceived), bytes(n.BytesSent))
 		}
 	})
-	return cli.OK, nil
+	return nil
 }
 
-func ps(a *cli.Args, e cli.Emit) (int, error) {
-	c, id, err := open(a)
+func ps(o targetOptions, e cli.Emit) error {
+	c, id, err := open(o)
 	if err != nil {
-		return exitFor(err), err
+		return err
 	}
 	defer c.Close()
 
 	procs, err := c.ProcessList()
 	if err != nil {
-		return cli.Failed, fmt.Errorf("ProcessList: %w", err)
+		return fmt.Errorf("ProcessList: %w", err)
 	}
 	sort.Slice(procs, func(i, j int) bool { return procs[i].ProcessId < procs[j].ProcessId })
 
@@ -1828,28 +2060,25 @@ func ps(a *cli.Args, e cli.Emit) (int, error) {
 				time.Duration((p.KernelTime100ns+p.UserTime100ns)*100).Round(time.Millisecond))
 		}
 	})
-	return cli.OK, nil
+	return nil
 }
 
 // inspect reports what HCS itself knows, which is a different and larger set than state.json.
-func inspect(a *cli.Args, e cli.Emit) (int, error) {
-	if err := a.RejectUnknown("--id", "--ref", "--store"); err != nil {
-		return cli.Usage, err
-	}
-	st, id, err := resolve(a)
+func inspect(o targetOptions, e cli.Emit) error {
+	st, id, err := resolve(o)
 	if err != nil {
-		return cli.Usage, err
+		return err
 	}
 	s, err := readState(st, id)
 	if err != nil {
-		return exitFor(err), err
+		return err
 	}
 
 	// GetContainers answers for a container that exists but was never started, where
 	// OpenContainer().Properties() tells very little.
 	props, err := hcsshim.GetContainers(hcsshim.ComputeSystemQuery{IDs: []string{id}})
 	if err != nil {
-		return cli.Failed, fmt.Errorf("GetContainers: %w", err)
+		return fmt.Errorf("GetContainers: %w", err)
 	}
 
 	doc := map[string]any{"ok": true, "command": "container inspect", "id": id, "state": s}
@@ -1880,14 +2109,14 @@ func inspect(a *cli.Args, e cli.Emit) (int, error) {
 			fmt.Printf("stopped    true (exitType %s)\n", orDash(p.ExitType))
 		}
 	})
-	return cli.OK, nil
+	return nil
 }
 
 // pauseResume covers both: the same verb with a different call and a different past participle.
-func pauseResume(a *cli.Args, e cli.Emit, verb string) (int, error) {
-	c, id, err := open(a)
+func pauseResume(o targetOptions, e cli.Emit, verb string) error {
+	c, id, err := open(o)
 	if err != nil {
-		return exitFor(err), err
+		return err
 	}
 	defer c.Close()
 
@@ -1896,12 +2125,12 @@ func pauseResume(a *cli.Args, e cli.Emit, verb string) (int, error) {
 		call, done, api = c.Resume, "resumed", "Resume"
 	}
 	if err := call(); err != nil {
-		return cli.Failed, fmt.Errorf("%s: %w", api, err)
+		return fmt.Errorf("%s: %w", api, err)
 	}
 	e.Result(map[string]any{
 		"ok": true, "command": "container " + verb, "id": id,
 	}, func() { fmt.Printf("%s %s\n", done, id) })
-	return cli.OK, nil
+	return nil
 }
 
 func bytes(n uint64) string {
@@ -1933,24 +2162,21 @@ func trunc(s string, n int) string {
 
 // -- logs --------------------------------------------------------------------------------
 
-// logsCmd reads a primary process's retained output from a fresh invocation. It reads the
+// logs reads a primary process's retained output from a fresh invocation. It reads the
 // file the pump wrote, never the pipes -- those died with their creator. Status comes from
 // state.json: running (pump alive), exited (code recorded), or pump dead (the log may be
 // truncated and the exit unrecorded).
-func logsCmd(a *cli.Args, e cli.Emit) (int, error) {
-	if err := a.RejectUnknown("--id", "--ref", "--store", "--follow"); err != nil {
-		return cli.Usage, err
-	}
-	st, id, err := resolve(a)
+func logs(o targetOptions, follow bool, e cli.Emit) error {
+	st, id, err := resolve(o)
 	if err != nil {
-		return cli.Usage, err
+		return err
 	}
 	s, err := readState(st, id)
 	if err != nil {
-		return exitFor(err), err
+		return err
 	}
 	if s.Primary == nil {
-		return cli.Usage, cli.Usagef("no primary process recorded for %q -- `container create --cmd` records one", id)
+		return cli.Usagef("no primary process recorded for %q -- `container create --cmd` records one", id)
 	}
 
 	lp := primaryLogPath(st, id)
@@ -1967,10 +2193,10 @@ func logsCmd(a *cli.Args, e cli.Emit) (int, error) {
 		}
 	}
 
-	if !a.Flag("--follow") {
+	if !follow {
 		b, err := os.ReadFile(lp)
 		if err != nil && !os.IsNotExist(err) {
-			return cli.Failed, err
+			return err
 		}
 		e.Result(map[string]any{
 			"ok": true, "command": "container logs", "id": id,
@@ -1978,7 +2204,7 @@ func logsCmd(a *cli.Args, e cli.Emit) (int, error) {
 		}, func() {
 			fmt.Print(string(b))
 		})
-		return cli.OK, nil
+		return nil
 	}
 
 	// Follow: emit the file as it grows, re-reading state each pass to notice the exit (or
@@ -1987,7 +2213,7 @@ func logsCmd(a *cli.Args, e cli.Emit) (int, error) {
 	// file merges guest stdout and stderr, so there is no per-stream attribution.
 	f, err := os.Open(lp)
 	if err != nil && !os.IsNotExist(err) {
-		return cli.Failed, err
+		return err
 	}
 	emit := func(chunk []byte) {
 		if len(chunk) == 0 {
@@ -2022,7 +2248,7 @@ func logsCmd(a *cli.Args, e cli.Emit) (int, error) {
 		if drained || f == nil {
 			cur, rerr := readState(st, id)
 			if rerr != nil || cur.Primary == nil {
-				return cli.Failed, fmt.Errorf("state disappeared while following: %v", rerr)
+				return fmt.Errorf("state disappeared while following: %v", rerr)
 			}
 			if st := status(cur); st != "running" {
 				if f != nil {
@@ -2034,7 +2260,7 @@ func logsCmd(a *cli.Args, e cli.Emit) (int, error) {
 				}, func() {
 					fmt.Fprintf(os.Stderr, "-- %s\n", st)
 				})
-				return cli.OK, nil
+				return nil
 			}
 			time.Sleep(500 * time.Millisecond)
 		}
@@ -2062,15 +2288,15 @@ func pidAlive(pid int) bool {
 // resolve accepts --id or --ref for every verb that acts on an existing container, so a caller
 // that created one by reference never has to know how the id was derived. Together with newID
 // it is the only producer of ids, which is why validation lives here.
-func resolve(a *cli.Args) (*store.Store, string, error) {
-	st, err := store.New(a.Option("--store"))
+func resolve(o targetOptions) (*store.Store, string, error) {
+	st, err := store.New(o.storeDir)
 	if err != nil {
 		return nil, "", err
 	}
-	id := a.Option("--id")
+	id := o.id
 	if id == "" {
-		if ref := a.Option("--ref"); ref != "" {
-			id = idFor(ref)
+		if o.ref != "" {
+			id = idFor(o.ref)
 		} else {
 			return nil, "", cli.Usagef("--id or --ref is required")
 		}
@@ -2079,11 +2305,4 @@ func resolve(a *cli.Args) (*store.Store, string, error) {
 		return nil, "", err
 	}
 	return st, id, nil
-}
-
-func exitFor(err error) int {
-	if _, ok := err.(*cli.UsageError); ok {
-		return cli.Usage
-	}
-	return cli.Failed
 }

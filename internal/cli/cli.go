@@ -32,6 +32,11 @@ const ContractVersion = "1"
 // A dev build reports "dev".
 var ToolVersion = "dev"
 
+// ErrReported is returned by a verb that already emitted its one result document and
+// failed: exit 1 with nothing further, because a second document would break the
+// one-document contract.
+var ErrReported = errors.New("failed; already reported")
+
 // UsageError means the command line was wrong and nothing was attempted.
 type UsageError struct{ Msg string }
 
@@ -41,95 +46,11 @@ func Usagef(format string, a ...any) error {
 	return &UsageError{Msg: fmt.Sprintf(format, a...)}
 }
 
-// Args is a minimal flag parser. Not the flag package: verbs are nouns followed by verbs
-// followed by options, and `flag` wants options first.
-type Args struct {
-	Words   []string // positional, e.g. ["image", "pull"]
-	options map[string]string
-	multi   map[string][]string
-	flags   map[string]bool
-}
-
-// repeatable options accumulate instead of hitting the duplicate check; any other option
-// given twice is a usage error.
-var repeatable = map[string]bool{"--env": true, "--mount": true, "--parent": true, "--label": true, "--publish": true, "--acl": true}
-
-// Parse splits argv. Anything starting with "--" is an option; those in boolFlags take no
-// value, the rest consume the next argument.
-func Parse(argv []string, boolFlags ...string) (*Args, error) {
-	isFlag := map[string]bool{}
-	for _, f := range boolFlags {
-		isFlag[f] = true
-	}
-	a := &Args{options: map[string]string{}, multi: map[string][]string{}, flags: map[string]bool{}}
-	for i := 0; i < len(argv); i++ {
-		s := argv[i]
-		switch {
-		case !strings.HasPrefix(s, "--"):
-			a.Words = append(a.Words, s)
-		case isFlag[s]:
-			a.flags[s] = true
-		case repeatable[s]:
-			if i+1 >= len(argv) || strings.HasPrefix(argv[i+1], "--") {
-				return nil, Usagef("%s requires a value", s)
-			}
-			a.multi[s] = append(a.multi[s], argv[i+1])
-			i++
-		default:
-			if i+1 >= len(argv) || strings.HasPrefix(argv[i+1], "--") {
-				return nil, Usagef("%s requires a value", s)
-			}
-			if _, dup := a.options[s]; dup {
-				return nil, Usagef("%s given more than once", s)
-			}
-			a.options[s] = argv[i+1]
-			i++
-		}
-	}
-	return a, nil
-}
-
-func (a *Args) Word(i int) string {
-	if i < len(a.Words) {
-		return a.Words[i]
-	}
-	return ""
-}
-
-func (a *Args) Option(name string) string { return a.options[name] }
-func (a *Args) Flag(name string) bool     { return a.flags[name] }
-
-// Options returns every value a repeatable option was given, in order.
-func (a *Args) Options(name string) []string { return a.multi[name] }
-
-func (a *Args) Require(name string) (string, error) {
-	if v := a.options[name]; v != "" {
-		return v, nil
-	}
-	return "", Usagef("%s is required", name)
-}
-
-// RejectUnknown fails on any option the command does not understand, so a typo is an error
-// rather than a silently ignored setting.
-func (a *Args) RejectUnknown(known ...string) error {
-	ok := map[string]bool{"--json": true, "--stream-json": true}
-	for _, k := range known {
-		ok[k] = true
-	}
-	for k := range a.options {
-		if !ok[k] {
-			return Usagef("unknown option %s", k)
-		}
-	}
-	for k := range a.multi {
-		if !ok[k] {
-			return Usagef("unknown option %s", k)
-		}
-	}
-	for k := range a.flags {
-		if !ok[k] {
-			return Usagef("unknown option %s", k)
-		}
+// Require rejects a required option that was not given. The caller holds the value in a
+// flag-bound variable; empty means unset, because no option here accepts an empty value.
+func Require(name, value string) error {
+	if value == "" {
+		return Usagef("%s is required", name)
 	}
 	return nil
 }
@@ -350,8 +271,7 @@ var labelKeyRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
 // reserved is the caller's own state-document field names. A label may not shadow one: a
 // consumer that flattens the document would get the label instead of the field. Each verb
 // group carries its own set.
-func ParseLabels(a *Args, reserved map[string]bool) (map[string]string, error) {
-	vals := a.Options("--label")
+func ParseLabels(vals []string, reserved map[string]bool) (map[string]string, error) {
 	if len(vals) == 0 {
 		return nil, nil
 	}

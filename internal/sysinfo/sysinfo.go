@@ -14,6 +14,7 @@ import (
 	"github.com/Microsoft/hcsshim/pkg/cimfs"
 	"github.com/joshmakestuff/hcsctl/internal/cli"
 	"github.com/joshmakestuff/hcsctl/internal/store"
+	"github.com/spf13/cobra"
 	"golang.org/x/sys/windows"
 )
 
@@ -67,13 +68,28 @@ var privilegesOfInterest = []string{
 	"SeSecurityPrivilege",
 }
 
-func Run(a *cli.Args, e cli.Emit) (int, error) {
-	if err := a.RejectUnknown("--store"); err != nil {
-		return cli.Usage, err
+// Command is `hcsctl info`.
+func Command(e cli.Emit) *cobra.Command {
+	var storeDir string
+	cmd := &cobra.Command{
+		Use:   "info [--store <dir>]",
+		Short: "host build and capability. Unelevated",
+		Long: `Host build and capability: CimFS support, elevation, Hyper-V Administrators
+membership, privilege state, vmcompute/vmms/hvhost service states, the store,
+and per-image process-isolation compatibility. Unelevated.`,
+		Args: cli.NoExtraArgs,
+		RunE: func(*cobra.Command, []string) error {
+			return run(storeDir, e)
+		},
 	}
-	st, err := store.New(a.Option("--store"))
+	cli.StringOnce(cmd.Flags(), &storeDir, "store", "store directory")
+	return cmd
+}
+
+func run(storeDir string, e cli.Emit) error {
+	st, err := store.New(storeDir)
 	if err != nil {
-		return cli.Failed, err
+		return err
 	}
 
 	rev, err := osversion.BuildRevision()
@@ -127,7 +143,7 @@ func Run(a *cli.Args, e cli.Emit) (int, error) {
 			fmt.Printf("image        %-52s %s processIsolation=%v\n", img.Ref, img.OSVersion, img.ProcessIsolation)
 		}
 	})
-	return cli.OK, nil
+	return nil
 }
 
 func storeState(st *store.Store) storeInfo {

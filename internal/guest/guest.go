@@ -14,28 +14,133 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/Microsoft/go-winio"
 	"github.com/Microsoft/go-winio/pkg/guid"
 	"github.com/joshmakestuff/hcsctl/internal/cli"
 	"github.com/joshmakestuff/hcsctl/internal/guestproto"
+	"github.com/spf13/cobra"
 	"golang.org/x/sys/windows"
 )
 
-func Dispatch(a *cli.Args, e cli.Emit) (int, error) {
-	switch a.Word(1) {
-	case "info":
-		return info(a, e)
-	case "forward":
-		return forward(a, e)
-	case "exec":
-		return execVerb(a, e)
-	case "":
-		return cli.Usage, cli.Usagef("guest needs a subcommand: info, exec, forward")
-	default:
-		return cli.Usage, cli.Usagef("unknown guest subcommand %q (expected info, exec, forward)", a.Word(1))
+// Command is `hcsctl guest`.
+func Command(e cli.Emit) *cobra.Command {
+	return cli.Group("guest", "reach a guest VM's agent over a Hyper-V socket",
+		infoCmd(e), execCmd(e), forwardCmd(e))
+}
+
+func infoCmd(e cli.Emit) *cobra.Command {
+	var vmidRaw, timeoutRaw string
+	cmd := &cobra.Command{
+		Use:   "info --vmid <guid> [--timeout 35s]",
+		Short: "what a guest VM says about itself, over a Hyper-V socket",
+		Long: `What a guest VM says about itself, over a Hyper-V socket. Needs no NIC,
+no DHCP lease and no elevation; needs hcsguest in the image.`,
+		Args: cli.NoExtraArgs,
+		RunE: func(*cobra.Command, []string) error {
+			if err := cli.Require("--vmid", vmidRaw); err != nil {
+				return err
+			}
+			vmid, err := guid.FromString(vmidRaw)
+			if err != nil {
+				return cli.Usagef("--vmid is not a GUID: %v", err)
+			}
+			timeout := 35 * time.Second
+			if timeoutRaw != "" {
+				d, perr := time.ParseDuration(timeoutRaw)
+				if perr != nil || d <= 0 {
+					return cli.Usagef("--timeout must be a positive duration, e.g. 10s")
+				}
+				timeout = d
+			}
+			return info(vmid, timeout, e)
+		},
 	}
+	cli.StringOnce(cmd.Flags(), &vmidRaw, "vmid", "the VM's id, a GUID -- also its hvsocket address")
+	cli.StringOnce(cmd.Flags(), &timeoutRaw, "timeout", "dial budget, a positive duration, e.g. 10s")
+	return cmd
+}
+
+func execCmd(e cli.Emit) *cobra.Command {
+	var vmidRaw, cmdline, cwd, timeoutRaw string
+	var env []string
+	cmd := &cobra.Command{
+		Use:   `exec --vmid <guid> --cmd "..." [--cwd D] [--env NAME=value]... [--timeout 30s]`,
+		Short: "run a command in the guest",
+		Long: `Run a command in the guest. --timeout must be at least one second. The
+guest's exit code is exitCode in the document, never hcsctl's.`,
+		Args: cli.NoExtraArgs,
+		RunE: func(*cobra.Command, []string) error {
+			if err := cli.Require("--vmid", vmidRaw); err != nil {
+				return err
+			}
+			vmid, err := guid.FromString(vmidRaw)
+			if err != nil {
+				return cli.Usagef("--vmid is not a GUID: %v", err)
+			}
+			if err := cli.Require("--cmd", cmdline); err != nil {
+				return err
+			}
+			var timeout time.Duration
+			if timeoutRaw != "" {
+				d, perr := time.ParseDuration(timeoutRaw)
+				if perr != nil || d < time.Second {
+					return cli.Usagef("--timeout must be a duration of at least one second, e.g. 30s")
+				}
+				timeout = d
+			}
+			return execVerb(vmid, cmdline, cwd, env, timeout, e)
+		},
+	}
+	cli.StringOnce(cmd.Flags(), &vmidRaw, "vmid", "the VM's id, a GUID -- also its hvsocket address")
+	cli.StringOnce(cmd.Flags(), &cmdline, "cmd", "command line to run in the guest")
+	cli.StringOnce(cmd.Flags(), &cwd, "cwd", "working directory in the guest")
+	cli.StringArray(cmd.Flags(), &env, "env", "NAME=value for the guest process, repeatable")
+	cli.StringOnce(cmd.Flags(), &timeoutRaw, "timeout", "bound on the command, at least one second, e.g. 30s")
+	return cmd
+}
+
+func forwardCmd(e cli.Emit) *cobra.Command {
+	var vmidRaw, portRaw, listenAddr, timeoutRaw string
+	cmd := &cobra.Command{
+		Use:   "forward --vmid <guid> --port <n> [--listen 127.0.0.1:2222] [--timeout <dur>]",
+		Short: "publish a guest TCP port on the host",
+		Long: `Publish a guest TCP port on the host. The agent dials it on the guest's
+loopback, which the guest firewall does not filter.`,
+		Args: cli.NoExtraArgs,
+		RunE: func(*cobra.Command, []string) error {
+			if err := cli.Require("--vmid", vmidRaw); err != nil {
+				return err
+			}
+			vmid, err := guid.FromString(vmidRaw)
+			if err != nil {
+				return cli.Usagef("--vmid is not a GUID: %v", err)
+			}
+			if err := cli.Require("--port", portRaw); err != nil {
+				return err
+			}
+			port, err := strconv.Atoi(portRaw)
+			if err != nil || port < 1 || port > 65535 {
+				return cli.Usagef("--port must be a TCP port between 1 and 65535")
+			}
+			dialTimeout := 35 * time.Second
+			if timeoutRaw != "" {
+				d, perr := time.ParseDuration(timeoutRaw)
+				if perr != nil || d <= 0 {
+					return cli.Usagef("--timeout must be a positive duration, e.g. 10s")
+				}
+				dialTimeout = d
+			}
+			return forward(vmid, port, listenAddr, dialTimeout, e)
+		},
+	}
+	cli.StringOnce(cmd.Flags(), &vmidRaw, "vmid", "the VM's id, a GUID -- also its hvsocket address")
+	cli.StringOnce(cmd.Flags(), &portRaw, "port", "guest TCP port, 1 to 65535")
+	cli.StringOnce(cmd.Flags(), &listenAddr, "listen", "host listen address; a bare port means 127.0.0.1")
+	cli.StringOnce(cmd.Flags(), &timeoutRaw, "timeout", "dial budget per connection, a positive duration, e.g. 10s")
+	return cmd
 }
 
 type infoResult struct {
@@ -52,27 +157,7 @@ type infoResult struct {
 	Guest     *guestproto.Info `json:"guest,omitempty"`
 }
 
-func info(a *cli.Args, e cli.Emit) (int, error) {
-	if err := a.RejectUnknown("--vmid", "--timeout"); err != nil {
-		return cli.Usage, err
-	}
-	raw, err := a.Require("--vmid")
-	if err != nil {
-		return cli.Usage, err
-	}
-	vmid, err := guid.FromString(raw)
-	if err != nil {
-		return cli.Usage, cli.Usagef("--vmid is not a GUID: %v", err)
-	}
-	timeout := 35 * time.Second
-	if s := a.Option("--timeout"); s != "" {
-		d, perr := time.ParseDuration(s)
-		if perr != nil || d <= 0 {
-			return cli.Usage, cli.Usagef("--timeout must be a positive duration, e.g. 10s")
-		}
-		timeout = d
-	}
-
+func info(vmid guid.GUID, timeout time.Duration, e cli.Emit) error {
 	e.Progress("dialling %s", vmid)
 	start := time.Now()
 	doc, state, detail, derr := dialAny(vmid, timeout)
@@ -90,14 +175,15 @@ func info(a *cli.Args, e cli.Emit) (int, error) {
 	}
 	if derr != nil {
 		// Not reachable is a result, not a crash: a caller polling for readiness gets the
-		// document either way. The exit code still reports failure.
+		// document either way. ErrReported makes the exit code report failure without a
+		// second document.
 		e.Result(res, func() {
 			fmt.Printf("guest %s: %s\n", vmid, state)
 			if detail != "" {
 				fmt.Printf("  %s\n", detail)
 			}
 		})
-		return cli.Failed, nil
+		return cli.ErrReported
 	}
 
 	e.Result(res, func() {
@@ -109,7 +195,7 @@ func info(a *cli.Args, e cli.Emit) (int, error) {
 			fmt.Printf("  address  %s %s\n", ad.Interface, ad.Address)
 		}
 	})
-	return cli.OK, nil
+	return nil
 }
 
 // ReadInfo waits for a guest agent response.

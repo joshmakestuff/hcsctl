@@ -12,7 +12,6 @@ package vm
 // holds, so the result attests the guest's state rather than restating the request.
 
 import (
-	"errors"
 	"fmt"
 	"net/netip"
 	"strings"
@@ -23,6 +22,8 @@ import (
 	"github.com/joshmakestuff/hcsctl/internal/cli"
 	"github.com/joshmakestuff/hcsctl/internal/guest"
 	"github.com/joshmakestuff/hcsctl/internal/guestproto"
+	"github.com/joshmakestuff/hcsctl/internal/store"
+	"github.com/spf13/cobra"
 )
 
 type netconfigResult struct {
@@ -80,60 +81,75 @@ func newNetConfig(addrs []string, netw *hcn.HostComputeNetwork, iface string, dn
 	}, nil
 }
 
-func netconfig(a *cli.Args, e cli.Emit) (int, error) {
-	if err := a.RejectUnknown("--id", "--store", "--dns", "--interface", "--timeout"); err != nil {
-		return cli.Usage, err
+func netconfigCmd(e cli.Emit) *cobra.Command {
+	var id, dnsCSV, iface, timeoutStr, storeDir string
+	cmd := &cobra.Command{
+		Use:   "netconfig --id <guid> [--dns <ip,ip>] [--interface eth0] [--timeout 45s] [--store <dir>]",
+		Short: "program the guest's interface with the endpoint's HNS allocation",
+		Long: `Program the guest's interface with the endpoint's HNS allocation, through the
+agent and the guest's own NetworkManager. For hcsctl-owned networks (NAT),
+which have no DHCP server. The result reports what the interface holds
+afterwards, not what was asked.`,
+		Args: cli.NoExtraArgs,
+		RunE: func(*cobra.Command, []string) error {
+			vmID, err := requireID(id)
+			if err != nil {
+				return err
+			}
+			timeout := 45 * time.Second
+			if timeoutStr != "" {
+				d, perr := time.ParseDuration(timeoutStr)
+				if perr != nil || d <= 0 {
+					return cli.Usagef("--timeout must be a positive duration, e.g. 45s")
+				}
+				timeout = d
+			}
+			dns, err := parseDNS(dnsCSV)
+			if err != nil {
+				return err
+			}
+			return netconfig(vmID, dns, iface, timeout, storeDir, e)
+		},
 	}
-	id, err := requireID(a)
-	if err != nil {
-		return cli.Usage, err
-	}
-	timeout := 45 * time.Second
-	if s := a.Option("--timeout"); s != "" {
-		d, perr := time.ParseDuration(s)
-		if perr != nil || d <= 0 {
-			return cli.Usage, cli.Usagef("--timeout must be a positive duration, e.g. 45s")
-		}
-		timeout = d
-	}
+	cli.StringOnce(cmd.Flags(), &id, "id", "VM id, a GUID")
+	cli.StringOnce(cmd.Flags(), &dnsCSV, "dns", "comma-separated IPv4 DNS servers to program")
+	cli.StringOnce(cmd.Flags(), &iface, "interface", "guest interface to program (default: the guest's own default)")
+	cli.StringOnce(cmd.Flags(), &timeoutStr, "timeout", "agent call deadline (default 45s)")
+	cli.StringOnce(cmd.Flags(), &storeDir, "store", "store directory")
+	return cmd
+}
 
-	s, err := openStore(a)
+func netconfig(id string, dns []string, iface string, timeout time.Duration, storeDir string, e cli.Emit) error {
+	s, err := store.New(storeDir)
 	if err != nil {
-		return cli.Failed, err
+		return err
 	}
 	st, err := readState(s, id)
 	if err != nil {
-		return cli.Failed, fmt.Errorf("no vm %s in this store: %w", id, err)
+		return fmt.Errorf("no vm %s in this store: %w", id, err)
 	}
 	if st.EndpointID == "" {
-		return cli.Failed, fmt.Errorf("vm %s has no endpoint -- it was created without --network", id)
+		return fmt.Errorf("vm %s has no endpoint -- it was created without --network", id)
 	}
 
 	addrs, err := addressesOf(st.EndpointID)
 	if err != nil {
-		return cli.Failed, fmt.Errorf("reading endpoint %s: %w", st.EndpointID, err)
+		return fmt.Errorf("reading endpoint %s: %w", st.EndpointID, err)
 	}
 	netw, err := hcn.GetNetworkByID(st.NetworkID)
 	if err != nil {
-		return cli.Failed, fmt.Errorf("the network %s this vm's endpoint is on: %w", st.NetworkID, err)
+		return fmt.Errorf("the network %s this vm's endpoint is on: %w", st.NetworkID, err)
 	}
 
-	dns, derr := parseDNS(a.Option("--dns"))
-	if derr != nil {
-		return cli.Usage, derr
-	}
-	nc, err := newNetConfig(addrs, netw, a.Option("--interface"), dns)
+	nc, err := newNetConfig(addrs, netw, iface, dns)
 	if err != nil {
-		var usage *cli.UsageError
-		if errors.As(err, &usage) {
-			return cli.Usage, err
-		}
-		return cli.Failed, err
+		// A *cli.UsageError from here still means exit 64; the type carries the code.
+		return err
 	}
 
 	vmid, err := guid.FromString(id)
 	if err != nil {
-		return cli.Usage, cli.Usagef("--id is not a GUID: %v", err)
+		return cli.Usagef("--id is not a GUID: %v", err)
 	}
 	ifaceLabel := nc.Interface
 	if ifaceLabel == "" {
@@ -142,7 +158,7 @@ func netconfig(a *cli.Args, e cli.Emit) (int, error) {
 	e.Progress("programming %s on %s via the agent", strings.Join(nc.Addresses, ","), ifaceLabel)
 	res, err := guest.ApplyNetConfig(vmid, nc, timeout)
 	if err != nil {
-		return cli.Failed, err
+		return err
 	}
 
 	out := netconfigResult{
@@ -163,5 +179,5 @@ func netconfig(a *cli.Args, e cli.Emit) (int, error) {
 			fmt.Printf("  %s %s\n", ad.Interface, ad.Address)
 		}
 	})
-	return cli.OK, nil
+	return nil
 }

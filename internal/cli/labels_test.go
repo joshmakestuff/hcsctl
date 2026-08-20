@@ -2,19 +2,9 @@ package cli
 
 import "testing"
 
-func parse(t *testing.T, argv ...string) *Args {
-	t.Helper()
-	a, err := Parse(argv)
-	if err != nil {
-		t.Fatalf("Parse(%v): %v", argv, err)
-	}
-	return a
-}
-
 // Labels are opaque. hcsctl stores what it is given, including an empty value.
 func TestLabelsAreStoredVerbatim(t *testing.T) {
-	a := parse(t, "--label", "owner-pid=8123", "--label", "empty=", "--label", "url=a=b=c")
-	got, err := ParseLabels(a, nil)
+	got, err := ParseLabels([]string{"owner-pid=8123", "empty=", "url=a=b=c"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -31,7 +21,7 @@ func TestLabelsAreStoredVerbatim(t *testing.T) {
 
 // No labels is nil rather than an empty map, so the state document omits the key entirely.
 func TestNoLabelsIsNil(t *testing.T) {
-	got, err := ParseLabels(parse(t), nil)
+	got, err := ParseLabels(nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -43,7 +33,7 @@ func TestNoLabelsIsNil(t *testing.T) {
 // A label that shadows a state-document field would win when a consumer flattens the
 // document, so it is refused.
 func TestReservedKeyIsRefused(t *testing.T) {
-	_, err := ParseLabels(parse(t, "--label", "id=nope"), map[string]bool{"id": true})
+	_, err := ParseLabels([]string{"id=nope"}, map[string]bool{"id": true})
 	if err == nil {
 		t.Fatal("a reserved key was accepted")
 	}
@@ -54,15 +44,14 @@ func TestReservedKeyIsRefused(t *testing.T) {
 
 func TestMalformedLabelsAreUsageErrors(t *testing.T) {
 	for _, bad := range []string{"novalue", "=novalue", "bad key=x", "bad/key=x"} {
-		if _, err := ParseLabels(parse(t, "--label", bad), nil); err == nil {
+		if _, err := ParseLabels([]string{bad}, nil); err == nil {
 			t.Errorf("--label %q was accepted", bad)
 		}
 	}
 }
 
 func TestRepeatedKeyIsRefused(t *testing.T) {
-	a := parse(t, "--label", "dup=1", "--label", "dup=2")
-	if _, err := ParseLabels(a, nil); err == nil {
+	if _, err := ParseLabels([]string{"dup=1", "dup=2"}, nil); err == nil {
 		t.Error("a repeated key was accepted; the last one would silently win")
 	}
 }
