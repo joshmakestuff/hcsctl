@@ -27,33 +27,14 @@ import (
 	"github.com/joshmakestuff/hcsctl/internal/guest"
 	"github.com/joshmakestuff/hcsctl/internal/store"
 	"github.com/joshmakestuff/hcsctl/internal/vmcompute"
+	"github.com/spf13/cobra"
 )
 
-func Dispatch(a *cli.Args, e cli.Emit) (int, error) {
-	switch a.Word(1) {
-	case "create":
-		return create(a, e)
-	case "start":
-		return start(a, e)
-	case "stop":
-		return stop(a, e)
-	case "rm":
-		return remove(a, e)
-	case "ls":
-		return list(a, e)
-	case "inspect":
-		return inspect(a, e)
-	case "console":
-		return console(a, e)
-	case "ip":
-		return ip(a, e)
-	case "netconfig":
-		return netconfig(a, e)
-	case "":
-		return cli.Usage, cli.Usagef("vm needs a subcommand: create, start, stop, rm, ls, inspect, ip, netconfig, console")
-	default:
-		return cli.Usage, cli.Usagef("unknown vm subcommand %q (expected create, start, stop, rm, ls, inspect, ip, netconfig, console)", a.Word(1))
-	}
+// Command is `hcsctl vm`.
+func Command(e cli.Emit) *cobra.Command {
+	return cli.Group("vm", "create and drive full Hyper-V virtual machines",
+		createCmd(e), startCmd(e), stopCmd(e), rmCmd(e), lsCmd(e), inspectCmd(e),
+		ipCmd(e), netconfigCmd(e), consoleCmd(e))
 }
 
 // spec is what buildDocument turns into a v2 document.
@@ -119,8 +100,6 @@ const (
 func vmsDir(s *store.Store) string           { return filepath.Join(s.Root, "vms") }
 func vmDir(s *store.Store, id string) string { return filepath.Join(vmsDir(s), id) }
 
-func openStore(a *cli.Args) (*store.Store, error) { return store.New(a.Option("--store")) }
-
 func readState(s *store.Store, id string) (state, error) {
 	var st state
 	b, err := os.ReadFile(filepath.Join(vmDir(s, id), "state.json"))
@@ -150,19 +129,16 @@ func writeState(s *store.Store, st state) error {
 	return os.WriteFile(filepath.Join(vmDir(s, st.ID), "state.json"), b, 0o644)
 }
 
-// requireID takes --id and insists it is a GUID. A friendly name would not be usable as an
-// hvsocket address, and silently accepting one would produce a VM that `guest info` cannot
-// reach with the id this tool printed.
-func requireID(a *cli.Args) (string, error) {
-	raw, err := a.Require("--id")
-	if err != nil {
-		return "", err
-	}
-	g, err := guid.FromString(raw)
-	if err != nil {
-		return "", cli.Usagef("--id is not a GUID: %v", err)
-	}
-	return g.String(), nil
+// idStoreFlags declares the --id/--store pair every vm verb that acts on an existing VM
+// takes -- one producer, in the style of container's addTargetFlags, so the verbs cannot
+// disagree on wording or required-ness. stop is the exception: it drives HCS by id alone
+// and takes no --store.
+func idStoreFlags(cmd *cobra.Command) (id *cli.GUIDFlag, storeDir *string) {
+	id = cli.GUID(cmd.Flags(), "id", "VM id, a GUID")
+	cli.Required(cmd, "id")
+	storeDir = new(string)
+	cli.StringOnce(cmd.Flags(), storeDir, "store", "store directory")
+	return id, storeDir
 }
 
 // -- create ------------------------------------------------------------------------------
@@ -187,129 +163,186 @@ type createResult struct {
 	Addresses []string `json:"addresses"`
 }
 
-func create(a *cli.Args, e cli.Emit) (int, error) {
-	if err := a.RejectUnknown("--id", "--vhdx", "--cpus", "--memory-mb", "--serial-pipe", "--store", "--no-copy-on-write", "--network", "--dns", "--label"); err != nil {
-		return cli.Usage, err
-	}
-	labels, err := cli.ParseLabels(a, reservedLabelKeys)
-	if err != nil {
-		return cli.Usage, err
-	}
+// createOptions is create's validated intake: everything argument-shaped has already been
+// checked, parsed and resolved, so the body starts acquiring resources knowing exit 64 is
+// behind it.
+type createOptions struct {
+	ID          string
+	Base        string // absolute, and it exists
+	CPUs        uint64
+	MemoryMB    uint64
+	SerialPipe  string // empty means the default console pipe
+	CopyOnWrite bool
+	Network     *hcn.HostComputeNetwork // nil without --network
+	DNS         []string
+	Labels      map[string]string
+	StoreDir    string
+}
 
-	base, err := a.Require("--vhdx")
-	if err != nil {
-		return cli.Usage, err
-	}
-	base, err = filepath.Abs(base)
-	if err != nil {
-		return cli.Usage, cli.Usagef("--vhdx %v", err)
-	}
-	if _, err := os.Stat(base); err != nil {
-		return cli.Usage, cli.Usagef("--vhdx %s: %v", base, err)
-	}
+func createCmd(e cli.Emit) *cobra.Command {
+	var vhdx, cpusStr, memoryStr, network, dnsCSV, serialPipe, storeDir string
+	var id *cli.GUIDFlag
+	var noCopyOnWrite bool
+	var labelVals []string
+	cmd := &cobra.Command{
+		Use:   `create --vhdx <path> [--id <guid>] [--cpus N] [--memory-mb N] [--network <name|id|default>] [--dns <IPv4,...>] [--serial-pipe \\.\pipe\name] [--no-copy-on-write] [--label key=value]... [--store <dir>]`,
+		Short: "make a Hyper-V VM that boots a Gen 2 VHDX; does not start it",
+		Long: `Make a Hyper-V VM that boots a Gen 2 VHDX. By default the disk is a
+differencing child, so the image is never written to; --no-copy-on-write boots
+the image itself and MUTATES it. The id is a GUID because it is also the VM's
+hvsocket address -- guest info --vmid takes it unchanged. Unelevated;
+Hyper-V Administrators is enough. Does not start it.
 
-	id := ""
-	if a.Option("--id") != "" {
-		if id, err = requireID(a); err != nil {
-			return cli.Usage, err
-		}
-	} else {
-		g, gerr := guid.NewV4()
-		if gerr != nil {
-			return cli.Failed, gerr
-		}
-		id = g.String()
-	}
+--network default picks the Hyper-V Default Switch, whose DHCP configures an
+arbitrary guest image. NAT and non-Default-Switch ICS networks require --dns and
+are the only networks that accept it; vm start programs their HCN allocation in
+the guest and succeeds only after its agent attests the address. The endpoint is
+deleted by vm rm and nothing else.
 
-	cpus := uint64(2)
-	if s := a.Option("--cpus"); s != "" {
-		if cpus, err = cli.ParseUint(s, 256); err != nil {
-			return cli.Usage, cli.Usagef("--cpus %v", err)
-		}
-	}
-	memoryMB := uint64(2048)
-	if s := a.Option("--memory-mb"); s != "" {
-		if memoryMB, err = cli.ParseUint(s, 1<<20); err != nil {
-			return cli.Usage, cli.Usagef("--memory-mb %v", err)
-		}
-	}
+--label stores opaque key=value pairs in state.json, reported by ls and inspect
+and never interpreted -- record an owner pid; scavenge only on proof it is dead.`,
+		Args: cli.NoExtraArgs,
+		RunE: func(*cobra.Command, []string) error {
+			labels, err := cli.ParseLabels(labelVals, reservedLabelKeys)
+			if err != nil {
+				return err
+			}
 
-	// Resolved before anything is made. This is argument validation -- a name that matches no
-	// network is exit 64, and 64 means nothing was attempted, so it cannot happen after a
-	// differencing disk has been written and rolled back.
-	var netw *hcn.HostComputeNetwork
-	if want := a.Option("--network"); want != "" {
-		if netw, err = resolveVMNetwork(want); err != nil {
-			return cli.Usage, err
-		}
+			base, err := filepath.Abs(vhdx)
+			if err != nil {
+				return cli.Usagef("--vhdx %v", err)
+			}
+			if _, err := os.Stat(base); err != nil {
+				return cli.Usagef("--vhdx %s: %v", base, err)
+			}
+
+			vmID := ""
+			if id.WasSet() {
+				vmID = id.Value().String()
+			} else {
+				g, gerr := guid.NewV4()
+				if gerr != nil {
+					return gerr
+				}
+				vmID = g.String()
+			}
+
+			cpus := uint64(2)
+			if cpusStr != "" {
+				if cpus, err = cli.ParseUint(cpusStr, 256); err != nil {
+					return cli.Usagef("--cpus %v", err)
+				}
+			}
+			memoryMB := uint64(2048)
+			if memoryStr != "" {
+				if memoryMB, err = cli.ParseUint(memoryStr, 1<<20); err != nil {
+					return cli.Usagef("--memory-mb %v", err)
+				}
+			}
+
+			// Resolved before anything is made. This is argument validation -- a name that
+			// matches no network is exit 64, and 64 means nothing was attempted, so it cannot
+			// happen after a differencing disk has been written and rolled back. A failure
+			// listing the networks has always been 64 here too, so it is kept that way.
+			var netw *hcn.HostComputeNetwork
+			if network != "" {
+				if netw, err = resolveVMNetwork(network); err != nil {
+					var ue *cli.UsageError
+					if errors.As(err, &ue) {
+						return err
+					}
+					return cli.Usagef("%v", err)
+				}
+			}
+			dns, err := parseDNS(dnsCSV)
+			if err != nil {
+				return err
+			}
+			if err := validateDNSForNetwork(dns, netw); err != nil {
+				return err
+			}
+
+			return create(createOptions{
+				ID: vmID, Base: base, CPUs: cpus, MemoryMB: memoryMB,
+				SerialPipe: serialPipe, CopyOnWrite: !noCopyOnWrite,
+				Network: netw, DNS: dns, Labels: labels, StoreDir: storeDir,
+			}, e)
+		},
 	}
-	dns, err := parseDNS(a.Option("--dns"))
+	cli.StringOnce(cmd.Flags(), &vhdx, "vhdx", "Gen 2 VHDX the VM boots")
+	cli.Required(cmd, "vhdx")
+	id = cli.GUID(cmd.Flags(), "id", "VM id, a GUID; also its hvsocket address (default: generated)")
+	cli.StringOnce(cmd.Flags(), &cpusStr, "cpus", "virtual processor count (default 2)")
+	cli.StringOnce(cmd.Flags(), &memoryStr, "memory-mb", "memory in MB (default 2048)")
+	cli.StringOnce(cmd.Flags(), &network, "network", "attach an endpoint on this network; 'default' picks the Hyper-V Default Switch")
+	cli.StringOnce(cmd.Flags(), &dnsCSV, "dns", "comma-separated IPv4 DNS servers; required for NAT and non-Default-Switch ICS networks")
+	cli.StringOnce(cmd.Flags(), &serialPipe, "serial-pipe", `named pipe for the COM port (default: \\.\pipe\hcsctl-<id>)`)
+	cmd.Flags().BoolVar(&noCopyOnWrite, "no-copy-on-write", false, "boot the image itself and MUTATE it, instead of a differencing child")
+	cli.StringArray(cmd.Flags(), &labelVals, "label", "opaque key=value stored in state.json, repeatable; never interpreted")
+	cli.StringOnce(cmd.Flags(), &storeDir, "store", "store directory")
+	return cmd
+}
+
+func create(opt createOptions, e cli.Emit) error {
+	id := opt.ID
+	st, err := store.New(opt.StoreDir)
 	if err != nil {
-		return cli.Usage, err
-	}
-	if err := validateDNSForNetwork(dns, netw); err != nil {
-		return cli.Usage, err
-	}
-
-	st, err := openStore(a)
-	if err != nil {
-		return cli.Failed, err
+		return err
 	}
 	if _, err := readState(st, id); err == nil {
-		return cli.Failed, fmt.Errorf("vm %s already exists -- rm it first", id)
+		return fmt.Errorf("vm %s already exists -- rm it first", id)
 	}
 	dir := vmDir(st, id)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return cli.Failed, err
+		return err
 	}
 
-	copyOnWrite := !a.Flag("--no-copy-on-write")
-	disk := base
-	if copyOnWrite {
+	disk := opt.Base
+	if opt.CopyOnWrite {
 		disk = filepath.Join(dir, "disk.vhdx")
-		e.Progress("creating a differencing disk over %s", base)
-		if err := createDifferencing(base, disk); err != nil {
+		e.Progress("creating a differencing disk over %s", opt.Base)
+		if err := createDifferencing(opt.Base, disk); err != nil {
 			_ = os.RemoveAll(dir)
-			return cli.Failed, err
+			return err
 		}
 	} else {
-		if children, cerr := childrenOf(st, base, id); cerr != nil {
+		if children, cerr := childrenOf(st, opt.Base, id); cerr != nil {
 			_ = os.RemoveAll(dir)
-			return cli.Failed, cerr
+			return cerr
 		} else if len(children) > 0 {
 			_ = os.RemoveAll(dir)
-			return cli.Failed, fmt.Errorf(
+			return fmt.Errorf(
 				"%s is the parent of %d differencing disk(s) -- booting it directly writes to it "+
-					"and corrupts every child: %s", base, len(children), strings.Join(children, ", "))
+					"and corrupts every child: %s", opt.Base, len(children), strings.Join(children, ", "))
 		}
-		e.Progress("booting %s directly -- this MUTATES it", base)
+		e.Progress("booting %s directly -- this MUTATES it", opt.Base)
 	}
 
 	// Both the child and the parent need the grant. The VM worker opens the whole chain, and
 	// a missing grant on the parent fails at start with the child's path in the message.
 	revokeAccess, err := grantPathsWithRollback(
-		grantPaths(disk, base, copyOnWrite),
+		grantPaths(disk, opt.Base, opt.CopyOnWrite),
 		func(path string) error { return vmcompute.GrantVmAccess(id, path) },
 		func(path string) error { return vmcompute.RevokeVmAccess(id, path) },
 	)
 	if err != nil {
 		_ = os.RemoveAll(dir)
-		return cli.Failed, err
+		return err
 	}
 
 	// Every VM gets a COM port. It costs nothing to boot: a guest whose pipe nobody reads
 	// boots in the same time as one with no COM port at all. It is the only way into a guest
 	// whose agent is broken.
-	pipe := a.Option("--serial-pipe")
+	pipe := opt.SerialPipe
 	if pipe == "" {
 		pipe = consolePipe(id)
 	}
 
 	record := state{
-		ID: id, BaseVHDX: base, DiskPath: disk, CopyOnWrite: copyOnWrite,
-		CPUs: cpus, MemoryMB: memoryMB, SerialPipe: pipe,
+		ID: id, BaseVHDX: opt.Base, DiskPath: disk, CopyOnWrite: opt.CopyOnWrite,
+		CPUs: opt.CPUs, MemoryMB: opt.MemoryMB, SerialPipe: pipe,
 		CreatedUTC: time.Now().UTC().Format(time.RFC3339),
-		Labels:     labels, DNS: dns,
+		Labels:     opt.Labels, DNS: opt.DNS,
 	}
 	var sys *vmcompute.System
 
@@ -337,32 +370,32 @@ func create(a *cli.Args, e cli.Emit) (int, error) {
 	// The endpoint is made before the compute system, because the document names it. From here
 	// on every failure uses undo: the endpoint and access grants are host-global, and no store
 	// record points at them until writeState succeeds.
-	if netw != nil {
+	if opt.Network != nil {
 		mac, merr := generateMAC()
 		if merr != nil {
 			undo()
-			return cli.Failed, merr
+			return merr
 		}
-		ep, eerr := createVMEndpoint(netw, "", endpointName(id), mac)
+		ep, eerr := createVMEndpoint(opt.Network, "", endpointName(id), mac)
 		if eerr != nil {
 			undo()
-			return cli.Failed, eerr
+			return eerr
 		}
-		record.NetworkID, record.NetworkName = netw.Id, netw.Name
+		record.NetworkID, record.NetworkName = opt.Network.Id, opt.Network.Name
 		record.EndpointID, record.MacAddress = ep.Id, mac
-		e.Progress("endpoint:  %s on %s (mac %s)", ep.Id, netw.Name, mac)
+		e.Progress("endpoint:  %s on %s (mac %s)", ep.Id, opt.Network.Name, mac)
 	}
 
 	e.Progress("creating compute system %s", id)
 	sys, err = createSystem(record)
 	if err != nil {
 		undo()
-		return cli.Failed, err
+		return err
 	}
 
 	if err := writeState(st, record); err != nil {
 		undo()
-		return cli.Failed, err
+		return err
 	}
 	// Closing the handle does not stop the VM: the document sets
 	// ShouldTerminateOnLastHandleClosed false so it survives this process exiting.
@@ -382,8 +415,8 @@ func create(a *cli.Args, e cli.Emit) (int, error) {
 	}
 
 	e.Result(createResult{
-		OK: true, Command: "vm create", ID: id, DiskPath: disk, CopyOnWrite: copyOnWrite,
-		CPUs: cpus, MemoryMB: memoryMB, SerialPipe: record.SerialPipe,
+		OK: true, Command: "vm create", ID: id, DiskPath: disk, CopyOnWrite: opt.CopyOnWrite,
+		CPUs: opt.CPUs, MemoryMB: opt.MemoryMB, SerialPipe: record.SerialPipe,
 		Network: record.NetworkName, NetworkID: record.NetworkID,
 		EndpointID: record.EndpointID, MacAddress: record.MacAddress,
 		DNS:       record.DNS,
@@ -391,7 +424,7 @@ func create(a *cli.Args, e cli.Emit) (int, error) {
 	}, func() {
 		fmt.Printf("created %s\n", id)
 		fmt.Printf("  disk    %s\n", disk)
-		fmt.Printf("  cpus    %d\n  memory  %d MB\n", cpus, memoryMB)
+		fmt.Printf("  cpus    %d\n  memory  %d MB\n", opt.CPUs, opt.MemoryMB)
 		if record.EndpointID != "" {
 			fmt.Printf("  network %s\n", record.NetworkName)
 			fmt.Printf("  mac     %s\n", record.MacAddress)
@@ -403,7 +436,7 @@ func create(a *cli.Args, e cli.Emit) (int, error) {
 		}
 		fmt.Printf("start it with: hcsctl vm start --id %s\n", id)
 	})
-	return cli.OK, nil
+	return nil
 }
 
 // childrenOf lists the ids of VMs whose differencing disk has base as its parent, ignoring
@@ -516,25 +549,34 @@ type startResult struct {
 	Network   *startNetworkResult `json:"network,omitempty"`
 }
 
-func start(a *cli.Args, e cli.Emit) (int, error) {
-	if err := a.RejectUnknown("--id", "--store"); err != nil {
-		return cli.Usage, err
+func startCmd(e cli.Emit) *cobra.Command {
+	var id *cli.GUIDFlag
+	var storeDir *string
+	cmd := &cobra.Command{
+		Use:   "start --id <guid> [--store <dir>]",
+		Short: "start a VM; recreates the compute system if it exited",
+		Long: `On NAT and non-Default-Switch ICS networks, success means the guest agent has
+applied and attested static IPv4 networking. Other starts mean firmware running.`,
+		Args: cli.NoExtraArgs,
+		RunE: func(*cobra.Command, []string) error {
+			return start(id.Value().String(), *storeDir, e)
+		},
 	}
-	id, err := requireID(a)
-	if err != nil {
-		return cli.Usage, err
-	}
+	id, storeDir = idStoreFlags(cmd)
+	return cmd
+}
 
-	st, err := openStore(a)
+func start(id, storeDir string, e cli.Emit) error {
+	st, err := store.New(storeDir)
 	if err != nil {
-		return cli.Failed, err
+		return err
 	}
 	record, err := readState(st, id)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return cli.Failed, fmt.Errorf("no vm %s in this store", id)
+			return fmt.Errorf("no vm %s in this store", id)
 		}
-		return cli.Failed, err
+		return err
 	}
 
 	recreated := false
@@ -552,33 +594,33 @@ func start(a *cli.Args, e cli.Emit) (int, error) {
 			e.Progress("remaking endpoint %s so it can be attached again", record.EndpointID)
 			if rerr := remakeVMEndpoint(record.NetworkID, record.EndpointID,
 				endpointName(record.ID), record.MacAddress); rerr != nil {
-				return cli.Failed, rerr
+				return rerr
 			}
 		}
 		if sys, err = createSystem(record); err != nil {
-			return cli.Failed, err
+			return err
 		}
 		recreated = true
 	} else if err != nil {
-		return cli.Failed, err
+		return err
 	}
 	defer sys.Close()
 
 	e.Progress("starting %s", id)
 	began := time.Now()
 	if err := sys.Start(startTimeout); err != nil {
-		return cli.Failed, err
+		return err
 	}
 	var network *startNetworkResult
 	if record.EndpointID != "" {
 		netw, nerr := hcn.GetNetworkByID(record.NetworkID)
 		if nerr != nil {
-			return cli.Failed, fmt.Errorf("the network %s this vm's endpoint is on: %w", record.NetworkID, nerr)
+			return fmt.Errorf("the network %s this vm's endpoint is on: %w", record.NetworkID, nerr)
 		}
 		if modeOf(netw) == networkStatic {
 			configured, cerr := configureStartNetwork(id, record, netw, startTimeout)
 			if cerr != nil {
-				return cli.Failed, cerr
+				return cerr
 			}
 			network = &configured
 		}
@@ -591,7 +633,7 @@ func start(a *cli.Args, e cli.Emit) (int, error) {
 		fmt.Printf("the firmware is running; the guest OS is not necessarily up yet\n")
 		fmt.Printf("wait for it with: hcsctl guest info --vmid %s\n", id)
 	})
-	return cli.OK, nil
+	return nil
 }
 
 // -- stop --------------------------------------------------------------------------------
@@ -603,15 +645,28 @@ type stopResult struct {
 	Method  string `json:"method"`
 }
 
-func stop(a *cli.Args, e cli.Emit) (int, error) {
-	if err := a.RejectUnknown("--id", "--force", "--store"); err != nil {
-		return cli.Usage, err
+func stopCmd(e cli.Emit) *cobra.Command {
+	var id *cli.GUIDFlag
+	var force bool
+	cmd := &cobra.Command{
+		// No --store: stop drives HCS by id alone. The flag it used to advertise was
+		// silently swallowed.
+		Use:   "stop --id <guid> [--force]",
+		Short: "shut down through the guest, or power off with --force",
+		Long: `Without --force, asks the guest through the shutdown integration service; a
+guest that lacks one cannot be asked. --force powers it off.`,
+		Args: cli.NoExtraArgs,
+		RunE: func(*cobra.Command, []string) error {
+			return stop(id.Value().String(), force, e)
+		},
 	}
-	id, err := requireID(a)
-	if err != nil {
-		return cli.Usage, err
-	}
+	id = cli.GUID(cmd.Flags(), "id", "VM id, a GUID")
+	cli.Required(cmd, "id")
+	cmd.Flags().BoolVar(&force, "force", false, "power off instead of asking the guest")
+	return cmd
+}
 
+func stop(id string, force bool, e cli.Emit) error {
 	sys, err := vmcompute.Open(id)
 	if vmcompute.IsNotFound(err) {
 		// Already stopped: stop asks for a state, and the VM is in it. Success, so a teardown
@@ -619,24 +674,24 @@ func stop(a *cli.Args, e cli.Emit) (int, error) {
 		e.Result(stopResult{OK: true, Command: "vm stop", ID: id, Method: "already stopped"}, func() {
 			fmt.Printf("%s is already stopped\n", id)
 		})
-		return cli.OK, nil
+		return nil
 	}
 	if err != nil {
-		return cli.Failed, err
+		return err
 	}
 	defer sys.Close()
 
 	method := "shutdown"
-	if a.Flag("--force") {
+	if force {
 		method = "terminate"
 		e.Progress("terminating %s", id)
 		if err := sys.Terminate(terminateTimeout); err != nil {
-			return cli.Failed, err
+			return err
 		}
 	} else {
 		e.Progress("shutting down %s through the guest integration service", id)
 		if err := sys.Shutdown(shutdownTimeout); err != nil {
-			return cli.Failed, fmt.Errorf("%w -- a guest without the shutdown integration service "+
+			return fmt.Errorf("%w -- a guest without the shutdown integration service "+
 				"cannot be asked; use --force to power it off", err)
 		}
 	}
@@ -644,7 +699,7 @@ func stop(a *cli.Args, e cli.Emit) (int, error) {
 	e.Result(stopResult{OK: true, Command: "vm stop", ID: id, Method: method}, func() {
 		fmt.Printf("stopped %s (%s)\n", id, method)
 	})
-	return cli.OK, nil
+	return nil
 }
 
 // -- rm ----------------------------------------------------------------------------------
@@ -658,21 +713,33 @@ type removeResult struct {
 	Warnings   []string `json:"warnings,omitempty"`
 }
 
-func remove(a *cli.Args, e cli.Emit) (int, error) {
-	if err := a.RejectUnknown("--id", "--force", "--store"); err != nil {
-		return cli.Usage, err
+func rmCmd(e cli.Emit) *cobra.Command {
+	var id *cli.GUIDFlag
+	var storeDir *string
+	var force bool
+	cmd := &cobra.Command{
+		Use:   "rm --id <guid> [--force] [--store <dir>]",
+		Short: "terminate, then remove only what this tool made",
+		Long: `Terminates, then removes only what this tool made. A --no-copy-on-write VM's
+base image is never removed.`,
+		Args: cli.NoExtraArgs,
+		RunE: func(*cobra.Command, []string) error {
+			return remove(id.Value().String(), force, *storeDir, e)
+		},
 	}
-	id, err := requireID(a)
+	id, storeDir = idStoreFlags(cmd)
+	cmd.Flags().BoolVar(&force, "force", false, "remove even when terminate, endpoint delete or the directory removal fails")
+	return cmd
+}
+
+func remove(id string, force bool, storeDir string, e cli.Emit) error {
+	st, err := store.New(storeDir)
 	if err != nil {
-		return cli.Usage, err
-	}
-	st, err := openStore(a)
-	if err != nil {
-		return cli.Failed, err
+		return err
 	}
 	record, staterr := readState(st, id)
 	if staterr != nil && !os.IsNotExist(staterr) {
-		return cli.Failed, staterr
+		return staterr
 	}
 
 	res := removeResult{OK: true, Command: "vm rm", ID: id}
@@ -685,10 +752,10 @@ func remove(a *cli.Args, e cli.Emit) (int, error) {
 		switch {
 		case terr == nil:
 			res.Terminated = true
-		case a.Flag("--force"):
+		case force:
 			res.Warnings = append(res.Warnings, "terminate: "+terr.Error())
 		default:
-			return cli.Failed, terr
+			return terr
 		}
 	} else if !vmcompute.IsNotFound(oerr) {
 		// A VM that is simply not running is the ordinary case for rm and says nothing.
@@ -717,8 +784,8 @@ func remove(a *cli.Args, e cli.Emit) (int, error) {
 	// nothing left pointing at it.
 	if record.EndpointID != "" {
 		if derr := deleteVMEndpoint(record.EndpointID); derr != nil {
-			if !a.Flag("--force") {
-				return cli.Failed, fmt.Errorf("%w -- the store record is kept so the endpoint can "+
+			if !force {
+				return fmt.Errorf("%w -- the store record is kept so the endpoint can "+
 					"still be found; --force removes the vm anyway and leaks it", derr)
 			}
 			res.Warnings = append(res.Warnings, "endpoint "+record.EndpointID+": "+derr.Error())
@@ -732,16 +799,16 @@ func remove(a *cli.Args, e cli.Emit) (int, error) {
 	dir := vmDir(st, id)
 	if record.CopyOnWrite || staterr != nil {
 		if err := os.RemoveAll(dir); err != nil {
-			if !a.Flag("--force") {
-				return cli.Failed, err
+			if !force {
+				return err
 			}
 			res.Warnings = append(res.Warnings, "remove "+dir+": "+err.Error())
 		} else {
 			res.Removed = append(res.Removed, dir)
 		}
 	} else {
-		if err := os.RemoveAll(dir); err != nil && !a.Flag("--force") {
-			return cli.Failed, err
+		if err := os.RemoveAll(dir); err != nil && !force {
+			return err
 		}
 		res.Removed = append(res.Removed, dir)
 		res.Warnings = append(res.Warnings, "the base image "+record.BaseVHDX+
@@ -754,7 +821,7 @@ func remove(a *cli.Args, e cli.Emit) (int, error) {
 			fmt.Printf("  warning: %s\n", w)
 		}
 	})
-	return cli.OK, nil
+	return nil
 }
 
 // -- ip ----------------------------------------------------------------------------------
@@ -772,6 +839,25 @@ type ipResult struct {
 // a tighter loop to find the answer sooner, and each read is an HNS call.
 const ipPollInterval = 2 * time.Second
 
+func ipCmd(e cli.Emit) *cobra.Command {
+	var id *cli.GUIDFlag
+	var storeDir *string
+	var timeout time.Duration
+	cmd := &cobra.Command{
+		Use:   "ip --id <guid> [--timeout 60s] [--store <dir>]",
+		Short: "wait for guest-reported IPv4 addresses and print them",
+		Long: `Wait for guest-reported IPv4 addresses and print them. Endpoint allocations are
+used only to identify the guest address, never returned without guest evidence.`,
+		Args: cli.NoExtraArgs,
+		RunE: func(*cobra.Command, []string) error {
+			return ip(id.Value(), timeout, *storeDir, e)
+		},
+	}
+	id, storeDir = idStoreFlags(cmd)
+	cli.Duration(cmd.Flags(), &timeout, "timeout", 60*time.Second, 0, "how long to wait for an address")
+	return cmd
+}
+
 // ip waits for the address the guest leases.
 //
 // An endpoint carries no address when it is created, none when it is attached to a NIC, and
@@ -780,37 +866,21 @@ const ipPollInterval = 2 * time.Second
 //
 // It waits rather than answering once. `vm start` returning means the firmware is running --
 // the guest has not booted, let alone leased -- so a single-shot read would answer "none".
-func ip(a *cli.Args, e cli.Emit) (int, error) {
-	if err := a.RejectUnknown("--id", "--timeout", "--store"); err != nil {
-		return cli.Usage, err
-	}
-	id, err := requireID(a)
+func ip(vmid guid.GUID, timeout time.Duration, storeDir string, e cli.Emit) error {
+	id := vmid.String()
+	st, err := store.New(storeDir)
 	if err != nil {
-		return cli.Usage, err
-	}
-
-	timeout := 60 * time.Second
-	if s := a.Option("--timeout"); s != "" {
-		d, perr := time.ParseDuration(s)
-		if perr != nil || d <= 0 {
-			return cli.Usage, cli.Usagef("--timeout must be a positive duration, e.g. 60s")
-		}
-		timeout = d
-	}
-
-	st, err := openStore(a)
-	if err != nil {
-		return cli.Failed, err
+		return err
 	}
 	record, err := readState(st, id)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return cli.Failed, fmt.Errorf("no vm %s in the store", id)
+			return fmt.Errorf("no vm %s in the store", id)
 		}
-		return cli.Failed, err
+		return err
 	}
 	if record.EndpointID == "" {
-		return cli.Failed, fmt.Errorf("vm %s has no network endpoint -- it was created without --network", id)
+		return fmt.Errorf("vm %s has no network endpoint -- it was created without --network", id)
 	}
 
 	began := time.Now()
@@ -818,9 +888,8 @@ func ip(a *cli.Args, e cli.Emit) (int, error) {
 	for {
 		expected, aerr := addressesOf(record.EndpointID)
 		if aerr != nil {
-			return cli.Failed, fmt.Errorf("reading endpoint %s: %w", record.EndpointID, aerr)
+			return fmt.Errorf("reading endpoint %s: %w", record.EndpointID, aerr)
 		}
-		vmid, _ := guid.FromString(id)
 		info, ierr := guest.ReadInfo(vmid, ipPollInterval)
 		if ierr == nil {
 			addrs := guestIPv4Addresses(info.Addresses, expected)
@@ -830,13 +899,13 @@ func ip(a *cli.Args, e cli.Emit) (int, error) {
 					Addresses: addrs, WaitedMS: waited}, func() {
 					fmt.Printf("%s\n", strings.Join(addrs, "\n"))
 				})
-				return cli.OK, nil
+				return nil
 			}
 		}
 		if time.Now().After(deadline) {
 			// Named as the guest's failure: the endpoint and HNS are fine, and nothing on the
 			// host can produce an address on its own.
-			return cli.Failed, fmt.Errorf(
+			return fmt.Errorf(
 				"vm %s has no address after %s -- the guest has not taken a DHCP lease. Check that "+
 					"it booted (hcsctl vm console --id %s) and that its NIC is configured for DHCP",
 				id, timeout, id)
@@ -881,17 +950,34 @@ type listResult struct {
 	Systems []systemEntry `json:"systems,omitempty"`
 }
 
-func list(a *cli.Args, e cli.Emit) (int, error) {
-	if err := a.RejectUnknown("--store", "--all"); err != nil {
-		return cli.Usage, err
+func lsCmd(e cli.Emit) *cobra.Command {
+	var storeDir string
+	var all bool
+	cmd := &cobra.Command{
+		Use:   "ls [--all] [--store <dir>]",
+		Short: "VMs and the state HCS reports for each",
+		Long: `VMs and the state HCS reports for each. --all also lists every compute system
+on the host with its owner, state and runtime id -- other tools' VMs included.
+hcsctl does not scavenge. A consumer that does joins three facts: its own
+--label on a vm, the vm id carried in the endpoint's name, and this list.`,
+		Args: cli.NoExtraArgs,
+		RunE: func(*cobra.Command, []string) error {
+			return list(all, storeDir, e)
+		},
 	}
-	st, err := openStore(a)
+	cmd.Flags().BoolVar(&all, "all", false, "also list every compute system on the host")
+	cli.StringOnce(cmd.Flags(), &storeDir, "store", "store directory")
+	return cmd
+}
+
+func list(all bool, storeDir string, e cli.Emit) error {
+	st, err := store.New(storeDir)
 	if err != nil {
-		return cli.Failed, err
+		return err
 	}
 	entries, err := os.ReadDir(vmsDir(st))
 	if err != nil && !os.IsNotExist(err) {
-		return cli.Failed, err
+		return err
 	}
 
 	res := listResult{OK: true, Command: "vm ls", VMs: []listEntry{}}
@@ -912,10 +998,10 @@ func list(a *cli.Args, e cli.Emit) (int, error) {
 	}
 	sort.Slice(res.VMs, func(i, j int) bool { return res.VMs[i].Created < res.VMs[j].Created })
 
-	if a.Flag("--all") {
+	if all {
 		systems, serr := hostSystems()
 		if serr != nil {
-			return cli.Failed, serr
+			return serr
 		}
 		res.Systems = systems
 	}
@@ -938,7 +1024,7 @@ func list(a *cli.Args, e cli.Emit) (int, error) {
 			fmt.Printf("%-38s %-24s %-16s %s\n", s.ID, orDash(s.Owner), orDash(s.State), s.RuntimeID)
 		}
 	})
-	return cli.OK, nil
+	return nil
 }
 
 // hostSystems asks HCS what compute systems exist, host-wide. The Owner is whatever each
@@ -1018,24 +1104,32 @@ type inspectResult struct {
 	EndpointError string   `json:"endpointError,omitempty"`
 }
 
-func inspect(a *cli.Args, e cli.Emit) (int, error) {
-	if err := a.RejectUnknown("--id", "--store"); err != nil {
-		return cli.Usage, err
+func inspectCmd(e cli.Emit) *cobra.Command {
+	var id *cli.GUIDFlag
+	var storeDir *string
+	cmd := &cobra.Command{
+		Use:   "inspect --id <guid> [--store <dir>]",
+		Short: "the store's record plus the HCS properties",
+		Args:  cli.NoExtraArgs,
+		RunE: func(*cobra.Command, []string) error {
+			return inspect(id.Value().String(), *storeDir, e)
+		},
 	}
-	id, err := requireID(a)
+	id, storeDir = idStoreFlags(cmd)
+	return cmd
+}
+
+func inspect(id, storeDir string, e cli.Emit) error {
+	st, err := store.New(storeDir)
 	if err != nil {
-		return cli.Usage, err
-	}
-	st, err := openStore(a)
-	if err != nil {
-		return cli.Failed, err
+		return err
 	}
 	record, err := readState(st, id)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return cli.Failed, fmt.Errorf("no vm %s in the store", id)
+			return fmt.Errorf("no vm %s in the store", id)
 		}
-		return cli.Failed, err
+		return err
 	}
 
 	res := inspectResult{OK: true, Command: "vm inspect", ID: id, Store: record, Addresses: []string{}}
@@ -1084,7 +1178,7 @@ func inspect(a *cli.Args, e cli.Emit) (int, error) {
 			fmt.Printf("  hcs      %s\n", res.HCSError)
 		}
 	})
-	return cli.OK, nil
+	return nil
 }
 
 // sortedKeys gives label output a stable order. A map's iteration order is randomised, and a

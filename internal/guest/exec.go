@@ -32,38 +32,13 @@ type execResult struct {
 	ElapsedMS int64  `json:"elapsedMs"`
 }
 
-func execVerb(a *cli.Args, e cli.Emit) (int, error) {
-	if err := a.RejectUnknown("--vmid", "--cmd", "--cwd", "--env", "--timeout"); err != nil {
-		return cli.Usage, err
-	}
-	raw, err := a.Require("--vmid")
-	if err != nil {
-		return cli.Usage, err
-	}
-	vmid, err := guid.FromString(raw)
-	if err != nil {
-		return cli.Usage, cli.Usagef("--vmid is not a GUID: %v", err)
-	}
-	cmdline, err := a.Require("--cmd")
-	if err != nil {
-		return cli.Usage, err
-	}
-
-	var timeout time.Duration
-	if s := a.Option("--timeout"); s != "" {
-		d, perr := time.ParseDuration(s)
-		if perr != nil || d < time.Second {
-			return cli.Usage, cli.Usagef("--timeout must be a duration of at least one second, e.g. 30s")
-		}
-		timeout = d
-	}
-
+func execVerb(vmid guid.GUID, cmdline, cwd string, env []string, timeout time.Duration, e cli.Emit) error {
 	req := guestproto.Request{
 		Protocol:       guestproto.Protocol,
 		Verb:           "exec",
 		Command:        cmdline,
-		Cwd:            a.Option("--cwd"),
-		Env:            a.Options("--env"),
+		Cwd:            cwd,
+		Env:            env,
 		TimeoutSeconds: int(timeout.Seconds()),
 	}
 
@@ -71,7 +46,7 @@ func execVerb(a *cli.Args, e cli.Emit) (int, error) {
 	// regardless of --timeout.
 	svc, err := serviceFor(vmid, 35*time.Second)
 	if err != nil {
-		return cli.Failed, err
+		return err
 	}
 
 	start := time.Now()
@@ -81,7 +56,7 @@ func execVerb(a *cli.Args, e cli.Emit) (int, error) {
 	res.Command = "guest exec"
 	res.ElapsedMS = time.Since(start).Milliseconds()
 	if err != nil {
-		return cli.Failed, err
+		return err
 	}
 
 	e.Result(res, func() {
@@ -91,7 +66,7 @@ func execVerb(a *cli.Args, e cli.Emit) (int, error) {
 		}
 	})
 	// Exit 0 means "the command ran". Whether it succeeded is exitCode in the document.
-	return cli.OK, nil
+	return nil
 }
 
 // writeExecRequest sends the request followed by stdin EOF. Guest exec has no interactive

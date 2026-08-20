@@ -102,15 +102,7 @@ func TestChainFor(t *testing.T) {
 func TestParseMounts(t *testing.T) {
 	host := t.TempDir() // drive-letter absolute, exists
 	parse := func(t *testing.T, specs ...string) ([]string, error) {
-		var argv []string
-		for _, s := range specs {
-			argv = append(argv, "--mount", s)
-		}
-		a, err := cli.Parse(argv)
-		if err != nil {
-			t.Fatal(err)
-		}
-		m, err := parseMounts(a)
+		m, err := parseMounts(specs)
 		if err != nil {
 			return nil, err
 		}
@@ -144,15 +136,7 @@ func TestParseMounts(t *testing.T) {
 func TestParsePublishedPorts(t *testing.T) {
 	parse := func(t *testing.T, specs ...string) ([]publishedPort, error) {
 		t.Helper()
-		var argv []string
-		for _, s := range specs {
-			argv = append(argv, "--publish", s)
-		}
-		a, err := cli.Parse(argv)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return parsePublishedPorts(a)
+		return parsePublishedPorts(specs)
 	}
 
 	t.Run("multiple protocols and ports", func(t *testing.T) {
@@ -205,15 +189,7 @@ func TestValidatePublishNetwork(t *testing.T) {
 func TestParseACL(t *testing.T) {
 	parse := func(t *testing.T, specs ...string) ([]aclRule, error) {
 		t.Helper()
-		var argv []string
-		for _, s := range specs {
-			argv = append(argv, "--acl", s)
-		}
-		a, err := cli.Parse(argv)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return parseACLs(a)
+		return parseACLs(specs)
 	}
 
 	t.Run("direction action and protocol", func(t *testing.T) {
@@ -291,11 +267,7 @@ func TestValidateACLNetwork(t *testing.T) {
 }
 
 func TestParseEnvKeepsValueAfterFirstEquals(t *testing.T) {
-	a, err := cli.Parse([]string{"--env", "CONN=Server=x;Db=y"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	env, err := parseEnv(a)
+	env, err := parseEnv([]string{"CONN=Server=x;Db=y"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -320,11 +292,7 @@ func TestReservedLabelKeysCoverStateFields(t *testing.T) {
 
 func TestParseLabelsReservesNewStateFields(t *testing.T) {
 	for _, key := range []string{"isolation", "published", "acls"} {
-		a, err := cli.Parse([]string{"--label", key + "=x"})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err := parseLabels(a); err == nil {
+		if _, err := parseLabels([]string{key + "=x"}); err == nil {
 			t.Errorf("--label %s=... must be rejected as a state-field collision", key)
 		}
 	}

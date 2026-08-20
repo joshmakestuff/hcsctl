@@ -25,25 +25,18 @@ type importResult struct {
 	Bytes   int64    `json:"bytes"`
 }
 
-func importImage(a *cli.Args, e cli.Emit) (int, error) {
-	if err := a.RejectUnknown("--ref", "--store"); err != nil {
-		return cli.Usage, err
-	}
-	ref, err := a.Require("--ref")
+func importImage(ref, storeDir string, e cli.Emit) error {
+	st, err := store.New(storeDir)
 	if err != nil {
-		return cli.Usage, err
-	}
-	st, err := store.New(a.Option("--store"))
-	if err != nil {
-		return cli.Failed, err
+		return err
 	}
 
 	rec, err := st.ReadRecord(ref)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return cli.Usage, cli.Usagef("no record for %s in %s -- pull it first", ref, st.Root)
+			return cli.Usagef("no record for %s in %s -- pull it first", ref, st.Root)
 		}
-		return cli.Failed, err
+		return err
 	}
 
 	// hcsshim's ImportLayerFromTar documents that the caller must hold backup and restore
@@ -51,7 +44,7 @@ func importImage(a *cli.Args, e cli.Emit) (int, error) {
 	// around elevation: import needs an enabled BUILTIN\Administrators SID at
 	// ProcessBaseLayer, which is a group check no user-rights grant satisfies.
 	if err := winio.EnableProcessPrivileges([]string{winio.SeBackupPrivilege, winio.SeRestorePrivilege}); err != nil {
-		return cli.Failed, fmt.Errorf("enable backup/restore privileges (rerun elevated): %w", err)
+		return fmt.Errorf("enable backup/restore privileges (rerun elevated): %w", err)
 	}
 	e.Progress("privileges: SeBackupPrivilege + SeRestorePrivilege enabled")
 
@@ -71,12 +64,12 @@ func importImage(a *cli.Args, e cli.Emit) (int, error) {
 		blob := st.BlobPath(trimSha(rec.LayerDigests[i]))
 		f, err := os.Open(blob)
 		if err != nil {
-			return cli.Failed, fmt.Errorf("open blob for layer %d: %w", i, err)
+			return fmt.Errorf("open blob for layer %d: %w", i, err)
 		}
 		gz, err := gzip.NewReader(f)
 		if err != nil {
 			f.Close()
-			return cli.Failed, fmt.Errorf("gunzip layer %d: %w", i, err)
+			return fmt.Errorf("gunzip layer %d: %w", i, err)
 		}
 
 		e.Progress("  layer %d/%d -> %s", i+1, len(rec.DiffIDs), entry)
@@ -90,7 +83,7 @@ func importImage(a *cli.Args, e cli.Emit) (int, error) {
 		gz.Close()
 		f.Close()
 		if err != nil {
-			return cli.Failed, fmt.Errorf("import layer %d: %w", i, err)
+			return fmt.Errorf("import layer %d: %w", i, err)
 		}
 		e.Progress("     %d MB in %s", n/(1024*1024), time.Since(start).Round(time.Millisecond))
 		total += n
@@ -104,7 +97,7 @@ func importImage(a *cli.Args, e cli.Emit) (int, error) {
 	for i, entry := range chain {
 		parents := chain[i+1:]
 		if err := writeLayerChain(entry, parents); err != nil {
-			return cli.Failed, fmt.Errorf("write layerchain.json: %w", err)
+			return fmt.Errorf("write layerchain.json: %w", err)
 		}
 	}
 
@@ -115,7 +108,7 @@ func importImage(a *cli.Args, e cli.Emit) (int, error) {
 			fmt.Printf("  %s\n", p)
 		}
 	})
-	return cli.OK, nil
+	return nil
 }
 
 func writeLayerChain(entry string, parents []string) error {

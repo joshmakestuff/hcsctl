@@ -11,6 +11,8 @@ import (
 
 	"github.com/Microsoft/go-winio"
 	"github.com/joshmakestuff/hcsctl/internal/cli"
+	"github.com/joshmakestuff/hcsctl/internal/store"
+	"github.com/spf13/cobra"
 )
 
 // The serial console needs no agent, no network adapter, no lease and no firewall rule: it is
@@ -32,44 +34,53 @@ type consoleResult struct {
 	Reason  string `json:"reason"`
 }
 
-func console(a *cli.Args, e cli.Emit) (int, error) {
-	if err := a.RejectUnknown("--id", "--store", "--no-input", "--timeout"); err != nil {
-		return cli.Usage, err
+func consoleCmd(e cli.Emit) *cobra.Command {
+	var id *cli.GUIDFlag
+	var storeDir *string
+	var noInput bool
+	var timeout time.Duration
+	cmd := &cobra.Command{
+		Use:   "console --id <guid> [--no-input] [--timeout 15s] [--store <dir>]",
+		Short: "attach to the VM's serial console over its COM1 named pipe",
+		Long: `Attach to the VM's serial console over its COM1 named pipe. This is the
+break-glass path: no agent, no network adapter, no lease, no firewall rule --
+it works when the agent is what is broken. Input is on by default, so a Linux
+guest with a getty on ttyS0 gives a login prompt; --no-input only watches.
+Nothing is buffered, so a console attached after boot has missed the boot.
+Every VM gets a COM port; --serial-pipe at create time overrides the name.`,
+		Args: cli.NoExtraArgs,
+		RunE: func(*cobra.Command, []string) error {
+			return console(id.Value().String(), noInput, timeout, *storeDir, e)
+		},
 	}
-	id, err := requireID(a)
-	if err != nil {
-		return cli.Usage, err
-	}
-	timeout := 15 * time.Second
-	if s := a.Option("--timeout"); s != "" {
-		d, perr := time.ParseDuration(s)
-		if perr != nil || d <= 0 {
-			return cli.Usage, cli.Usagef("--timeout must be a positive duration, e.g. 10s")
-		}
-		timeout = d
-	}
+	id, storeDir = idStoreFlags(cmd)
+	cmd.Flags().BoolVar(&noInput, "no-input", false, "watch only; do not forward stdin to the guest")
+	cli.Duration(cmd.Flags(), &timeout, "timeout", 15*time.Second, 0, "how long to wait for the pipe to accept a connection")
+	return cmd
+}
 
-	st, err := openStore(a)
+func console(id string, noInput bool, timeout time.Duration, storeDir string, e cli.Emit) error {
+	st, err := store.New(storeDir)
 	if err != nil {
-		return cli.Failed, err
+		return err
 	}
 	record, err := readState(st, id)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return cli.Failed, fmt.Errorf("no vm %s in the store", id)
+			return fmt.Errorf("no vm %s in the store", id)
 		}
-		return cli.Failed, err
+		return err
 	}
 	pipe := record.SerialPipe
 	if pipe == "" {
-		return cli.Failed, fmt.Errorf("vm %s has no COM port -- it was created before hcsctl "+
+		return fmt.Errorf("vm %s has no COM port -- it was created before hcsctl "+
 			"allocated one by default; recreate it to get a console", id)
 	}
 
 	e.Progress("connecting to %s", pipe)
 	conn, err := dialConsole(pipe, timeout)
 	if err != nil {
-		return cli.Failed, err
+		return err
 	}
 	defer conn.Close()
 
@@ -77,7 +88,7 @@ func console(a *cli.Args, e cli.Emit) (int, error) {
 		"was written before now was kept. Ctrl-C to detach.")
 
 	// stdin -> guest unless the caller only wants to watch. Input is the default.
-	if !a.Flag("--no-input") {
+	if !noInput {
 		go func() { _, _ = io.Copy(conn, os.Stdin) }()
 	}
 
@@ -94,7 +105,7 @@ func console(a *cli.Args, e cli.Emit) (int, error) {
 		Bytes: n, Reason: reason}, func() {
 		fmt.Fprintf(os.Stderr, "\ndetached from %s: %s\n", id, reason)
 	})
-	return cli.OK, nil
+	return nil
 }
 
 // consoleSink picks where the guest's serial bytes go, per output mode. Default: stdout,

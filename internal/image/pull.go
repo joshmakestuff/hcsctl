@@ -30,22 +30,15 @@ type pullResult struct {
 	Bytes     int64    `json:"bytes"`
 }
 
-func pull(a *cli.Args, e cli.Emit) (int, error) {
-	if err := a.RejectUnknown("--ref", "--store"); err != nil {
-		return cli.Usage, err
-	}
-	ref, err := a.Require("--ref")
+func pull(ref, storeDir string, e cli.Emit) error {
+	st, err := store.New(storeDir)
 	if err != nil {
-		return cli.Usage, err
-	}
-	st, err := store.New(a.Option("--store"))
-	if err != nil {
-		return cli.Failed, err
+		return err
 	}
 
 	parsed, err := name.ParseReference(ref)
 	if err != nil {
-		return cli.Usage, cli.Usagef("%v", err)
+		return cli.Usagef("%v", err)
 	}
 
 	e.Progress("ref:   %s", parsed)
@@ -53,25 +46,25 @@ func pull(a *cli.Args, e cli.Emit) (int, error) {
 
 	img, err := remote.Image(parsed, remote.WithPlatform(v1.Platform{OS: "windows", Architecture: "amd64"}))
 	if err != nil {
-		return cli.Failed, fmt.Errorf("fetch manifest: %w", err)
+		return fmt.Errorf("fetch manifest: %w", err)
 	}
 
 	cfg, err := img.ConfigFile()
 	if err != nil {
-		return cli.Failed, fmt.Errorf("fetch config: %w", err)
+		return fmt.Errorf("fetch config: %w", err)
 	}
 
 	// Checked against the image's OWN config, not the manifest-list entry that advertised it.
 	// A pull by digest never passes through platform selection at all, so the index entry
 	// cannot be relied on to have gated anything.
 	if cfg.OS != "windows" || cfg.Architecture != "amd64" {
-		return cli.Failed, fmt.Errorf("image declares %s/%s, not windows/amd64", cfg.OS, cfg.Architecture)
+		return fmt.Errorf("image declares %s/%s, not windows/amd64", cfg.OS, cfg.Architecture)
 	}
 	e.Progress("config: windows/amd64 os.version=%s", cfg.OSVersion)
 
 	layers, err := img.Layers()
 	if err != nil {
-		return cli.Failed, fmt.Errorf("read layers: %w", err)
+		return fmt.Errorf("read layers: %w", err)
 	}
 
 	rec := store.Record{
@@ -84,21 +77,21 @@ func pull(a *cli.Args, e cli.Emit) (int, error) {
 	for i, l := range layers {
 		dig, err := l.Digest()
 		if err != nil {
-			return cli.Failed, fmt.Errorf("layer %d digest: %w", i, err)
+			return fmt.Errorf("layer %d digest: %w", i, err)
 		}
 		diffID, err := l.DiffID()
 		if err != nil {
-			return cli.Failed, fmt.Errorf("layer %d diffID: %w", i, err)
+			return fmt.Errorf("layer %d diffID: %w", i, err)
 		}
 
 		blob := st.BlobPath(dig.Hex)
 		if err := os.MkdirAll(filepath.Dir(blob), 0o755); err != nil {
-			return cli.Failed, err
+			return err
 		}
 
 		n, downloaded, err := ensureBlob(blob, dig.Hex, l.Compressed)
 		if err != nil {
-			return cli.Failed, fmt.Errorf("layer %d download: %w", i, err)
+			return fmt.Errorf("layer %d download: %w", i, err)
 		}
 		if downloaded {
 			e.Progress("  layer %d/%d %s %d MB", i+1, len(layers), dig, n/(1024*1024))
@@ -112,7 +105,7 @@ func pull(a *cli.Args, e cli.Emit) (int, error) {
 	}
 
 	if err := st.WriteRecord(ref, rec); err != nil {
-		return cli.Failed, fmt.Errorf("write record: %w", err)
+		return fmt.Errorf("write record: %w", err)
 	}
 
 	res := pullResult{
@@ -122,7 +115,7 @@ func pull(a *cli.Args, e cli.Emit) (int, error) {
 	e.Result(res, func() {
 		fmt.Printf("pulled %d layer(s), %d MB\nrecord: %s\n", res.Layers, res.Bytes/(1024*1024), st.RecordPath(ref))
 	})
-	return cli.OK, nil
+	return nil
 }
 
 // writeVerified streams to a unique temp file, refuses to keep bytes whose digest does not

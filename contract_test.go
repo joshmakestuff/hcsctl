@@ -98,11 +98,25 @@ var usageCases = []struct {
 }{
 	{"bare invocation", nil},
 	{"unknown verb group", []string{"frobnicate"}},
+	{"version with stray argument", []string{"version", "extra"}},
+	{"version flag with stray argument", []string{"--version", "extra"}},
+	{"completion command", []string{"completion", "bash"}},
+	{"hidden completion command", []string{"__complete", "image", ""}},
+	{"hidden no-desc completion command", []string{"__completeNoDesc", "image", ""}},
 	{"missing subcommand", []string{"container"}},
 	{"unknown subcommand", []string{"container", "frobnicate"}},
+	{"unknown subcommand with trailing flag", []string{"vm", "frobnicate", "--id", "eb95e0a7-ee3e-4c7b-ba10-4089b4771083"}},
+	{"unknown verb group with trailing flag", []string{"frobnicate", "--id", "x"}},
+	{"bool flag before the verb", []string{"container", "--follow", "logs", "--id", "x"}},
+	// A -- terminator before the verb is exercised in TestUnknownSubcommandIsNamed: this
+	// harness appends --json, which a -- would correctly demote to a positional.
+	{"mixed spellings keep the option-shaped guard", []string{"container", "run", "--ref", "r", "--mount=--keep", "--mount", "--keep"}},
+	{"exec without cmd", []string{"container", "exec", "--id", "a"}},
+	{"storage mount missing scratch-dir", []string{"storage", "mount", "--ref", "r"}},
 	{"unknown option", []string{"image", "ls", "--bogus", "x"}},
 	{"duplicate option", []string{"container", "exec", "--id", "a", "--id", "b", "--cmd", "c"}},
 	{"missing required option", []string{"image", "pull"}},
+	{"required option given empty", []string{"image", "pull", "--ref", ""}},
 	{"option missing value", []string{"image", "pull", "--ref"}},
 	{"unparseable ref", []string{"image", "pull", "--ref", "!!!"}},
 	{"env without equals", []string{"container", "exec", "--id", "a", "--cmd", "c", "--env", "BAD"}},
@@ -374,22 +388,43 @@ func TestContainerLogs(t *testing.T) {
 	})
 }
 
-// Requested help and version are exit 0 with output on stdout -- unlike the usage text that
-// accompanies an error, which stays on stderr.
+// Requested help is exit 64 with the help text on stderr: nothing ran, and exit 0 must never
+// be emitted without the verb having run -- a forwarded --help inside a real invocation would
+// otherwise record a destructive verb as succeeded. Version is a real verb: exit 0.
 func TestHelpAndVersion(t *testing.T) {
-	for _, args := range [][]string{{"--help"}, {"-h"}, {"help"}} {
-		t.Run(strings.Join(args, ""), func(t *testing.T) {
+	for _, args := range [][]string{
+		{"--help"}, {"-h"}, {"help"}, {"help", "vm"}, {"container", "--help"},
+		// The review scenario: --help riding a complete destructive invocation.
+		{"vm", "stop", "--id", "eb95e0a7-ee3e-4c7b-ba10-4089b4771083", "--help"},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
 			r := invoke(t, args...)
-			if r.code != 0 {
-				t.Fatalf("exit %d, want 0\nstderr: %s", r.code, r.stderr)
+			if r.code != 64 {
+				t.Fatalf("exit %d, want 64\nstderr: %s", r.code, r.stderr)
 			}
-			if !strings.Contains(r.stdout, "usage: hcsctl") {
-				t.Fatalf("help did not render usage on stdout: %q", r.stdout[:min(len(r.stdout), 80)])
+			if r.stdout != "" {
+				t.Fatalf("help wrote to stdout without --json: %q", r.stdout)
+			}
+			if !strings.Contains(r.stderr, "usage: hcsctl") {
+				t.Fatalf("help did not render usage on stderr: %q", r.stderr[:min(len(r.stderr), 80)])
 			}
 		})
 	}
+	t.Run("help with --json emits one failure document", func(t *testing.T) {
+		r := invoke(t, "vm", "stop", "--id", "eb95e0a7-ee3e-4c7b-ba10-4089b4771083", "--help", "--json")
+		if r.code != 64 {
+			t.Fatalf("exit %d, want 64\nstderr: %s", r.code, r.stderr)
+		}
+		oneDoc(t, r.stdout, false)
+	})
+	t.Run("unknown help topic", func(t *testing.T) {
+		r := invoke(t, "help", "bogus")
+		if r.code != 64 || !strings.Contains(r.stderr, "bogus") {
+			t.Fatalf("exit %d, stderr %q", r.code, r.stderr)
+		}
+	})
 	for _, args := range [][]string{{"--version"}, {"version"}} {
-		t.Run(strings.Join(args, ""), func(t *testing.T) {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
 			r := invoke(t, args...)
 			if r.code != 0 {
 				t.Fatalf("exit %d, want 0\nstderr: %s", r.code, r.stderr)
@@ -400,22 +435,118 @@ func TestHelpAndVersion(t *testing.T) {
 		})
 	}
 	t.Run("json keeps the one-document contract", func(t *testing.T) {
-		for _, args := range [][]string{{"help", "--json"}, {"version", "--json"}} {
+		r := invoke(t, "help", "--json")
+		if r.code != 64 {
+			t.Fatalf("help --json: exit %d, want 64", r.code)
+		}
+		oneDoc(t, r.stdout, false)
+		r = invoke(t, "version", "--json")
+		if r.code != 0 {
+			t.Fatalf("version --json: exit %d, want 0", r.code)
+		}
+		oneDoc(t, r.stdout, true)
+	})
+	t.Run("version flag is order-independent", func(t *testing.T) {
+		for _, args := range [][]string{{"--json", "--version"}, {"--version", "--json"}} {
 			r := invoke(t, args...)
 			if r.code != 0 {
-				t.Fatalf("%v: exit %d, want 0", args, r.code)
+				t.Fatalf("%v: exit %d, want 0\nstderr: %s", args, r.code, r.stderr)
 			}
 			oneDoc(t, r.stdout, true)
 		}
 	})
-	t.Run("an option value spelled --help is not hijacked", func(t *testing.T) {
-		// Leading position only: exec's --cmd may legitimately be the string --help. This
-		// must reach normal dispatch (and fail on the missing container), not print usage.
-		r := invoke(t, "container", "exec", "--id", "zz-no-such", "--cmd", "--help")
+	t.Run("an option value spelled --help passes through the = spelling", func(t *testing.T) {
+		// exec's --cmd may legitimately be the string --help. The = spelling is
+		// unambiguous, so it must reach normal dispatch (and fail on the missing
+		// container), not be rejected as a forgotten value or hijacked as help.
+		r := invoke(t, "container", "exec", "--id", "zz-no-such", "--cmd=--help")
 		if r.code == 0 || strings.Contains(r.stdout, "usage: hcsctl") {
 			t.Fatalf("option value --help hijacked the invocation: exit %d", r.code)
 		}
+		if !strings.Contains(r.stderr, "zz-no-such") {
+			t.Fatalf("=-spelled value did not reach dispatch: %q", r.stderr)
+		}
 	})
+	t.Run("space form with an option-shaped value is a forgotten value", func(t *testing.T) {
+		// Without the = the value would have been swallowed silently by pflag; the guard
+		// rejects it and names the escape hatch.
+		r := invoke(t, "container", "exec", "--id", "zz-no-such", "--cmd", "--help")
+		if r.code != 64 || !strings.Contains(r.stderr, "requires a value") {
+			t.Fatalf("exit %d, stderr %q", r.code, r.stderr)
+		}
+	})
+}
+
+// TestUnknownSubcommandIsNamed discriminates the diagnostic from the exit code: a mistyped
+// verb followed by a flag must be reported as the unknown verb, not as the unknown flag the
+// verb's absence made unparseable.
+func TestUnknownSubcommandIsNamed(t *testing.T) {
+	for _, tc := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"vm", "frobnicate", "--id", "eb95e0a7-ee3e-4c7b-ba10-4089b4771083"}, `unknown vm subcommand "frobnicate"`},
+		{[]string{"frobnicate", "--id", "x"}, `unknown verb group "frobnicate"`},
+		// A real verb behind a flag or -- is diagnosed as misplacement, not misspelling:
+		// pflag must not swallow the verb as the unknown flag's value, and the message must
+		// not call a listed verb unknown.
+		{[]string{"container", "--follow", "logs", "--id", "x"}, "the verb must come before"},
+		{[]string{"vm", "--", "start"}, "the verb must come before"},
+	} {
+		t.Run(strings.Join(tc.args[:2], " "), func(t *testing.T) {
+			r := invoke(t, tc.args...)
+			if r.code != 64 {
+				t.Fatalf("exit %d, want 64\nstderr: %s", r.code, r.stderr)
+			}
+			if !strings.Contains(r.stderr, tc.want) {
+				t.Fatalf("stderr does not name the mistake %q: %q", tc.want, r.stderr)
+			}
+		})
+	}
+}
+
+// TestCompletionMachineryRejected: cobra's hidden __complete command resolves even behind
+// leading flags, and its output is completion text on stdout with exit 0 -- both contract
+// breaks. The guard must hold wherever the word can reach cobra.
+func TestCompletionMachineryRejected(t *testing.T) {
+	r := invoke(t, "--json", "__complete", "network", "")
+	if r.code != 64 {
+		t.Fatalf("exit %d, want 64\nstdout: %q", r.code, r.stdout)
+	}
+	oneDoc(t, r.stdout, false)
+}
+
+// TestResolveStoreFailureIsUsage: with no --store and no LOCALAPPDATA the default store
+// cannot resolve; the command line (with its environment) is bad and nothing was attempted,
+// so this is exit 64 -- the classification the pre-cobra dispatch gave every resolve failure.
+func TestResolveStoreFailureIsUsage(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	cmd := exec.Command(bin, "container", "logs", "--id", "p", "--json")
+	for _, kv := range os.Environ() {
+		if !strings.HasPrefix(strings.ToUpper(kv), "LOCALAPPDATA=") {
+			cmd.Env = append(cmd.Env, kv)
+		}
+	}
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	_ = cmd.Run()
+	if code := cmd.ProcessState.ExitCode(); code != 64 {
+		t.Fatalf("exit %d, want 64\nstderr: %s", code, stderr.String())
+	}
+	oneDoc(t, stdout.String(), false)
+}
+
+// TestJSONFlagGrammarMatchesCobra: the pre-parse that seeds the output mode uses pflag's own
+// grammar, so a --json placed after the -- terminator is a positional to both parses -- the
+// error must arrive as plain text, not as a document the caller never asked for.
+func TestJSONFlagGrammarMatchesCobra(t *testing.T) {
+	r := invoke(t, "network", "ls", "--", "--json")
+	if r.code != 64 {
+		t.Fatalf("exit %d, want 64\nstderr: %s", r.code, r.stderr)
+	}
+	if r.stdout != "" {
+		t.Fatalf("terminated --json still selected JSON mode: %q", r.stdout)
+	}
 }
 
 // TestIDValidationIsWired plants a real target at the traversal destination and asserts the

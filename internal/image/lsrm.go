@@ -19,17 +19,14 @@ type lsEntry struct {
 	PulledUTC    string `json:"pulledUtc"`
 }
 
-func list(a *cli.Args, e cli.Emit) (int, error) {
-	if err := a.RejectUnknown("--store"); err != nil {
-		return cli.Usage, err
-	}
-	st, err := store.New(a.Option("--store"))
+func list(storeDir string, e cli.Emit) error {
+	st, err := store.New(storeDir)
 	if err != nil {
-		return cli.Failed, err
+		return err
 	}
 	recs, err := st.Records()
 	if err != nil {
-		return cli.Failed, err
+		return err
 	}
 
 	out := make([]lsEntry, 0, len(recs))
@@ -57,27 +54,20 @@ func list(a *cli.Args, e cli.Emit) (int, error) {
 			fmt.Printf("%-52s %-18s %6d  %v\n", i.Ref, i.OSVersion, i.Layers, i.Materialized)
 		}
 	})
-	return cli.OK, nil
+	return nil
 }
 
-func remove(a *cli.Args, e cli.Emit) (int, error) {
-	if err := a.RejectUnknown("--ref", "--store", "--blobs"); err != nil {
-		return cli.Usage, err
-	}
-	ref, err := a.Require("--ref")
+func remove(ref, storeDir string, blobs bool, e cli.Emit) error {
+	st, err := store.New(storeDir)
 	if err != nil {
-		return cli.Usage, err
-	}
-	st, err := store.New(a.Option("--store"))
-	if err != nil {
-		return cli.Failed, err
+		return err
 	}
 	rec, err := st.ReadRecord(ref)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return cli.Usage, cli.Usagef("no record for %s in %s", ref, st.Root)
+			return cli.Usagef("no record for %s in %s", ref, st.Root)
 		}
-		return cli.Failed, err
+		return err
 	}
 
 	// A materialized layer carries restored security descriptors that ordinary file I/O cannot
@@ -90,29 +80,29 @@ func remove(a *cli.Args, e cli.Emit) (int, error) {
 			continue
 		}
 		if err := hcsshim.DestroyLayer(hcsshim.DriverInfo{}, entry); err != nil {
-			return cli.Failed, fmt.Errorf("destroy layer %s (rerun elevated?): %w", entry, err)
+			return fmt.Errorf("destroy layer %s (rerun elevated?): %w", entry, err)
 		}
 		// The post-condition, not the return value: DestroyLayer can report success and leave
 		// the tree behind.
 		if _, err := os.Stat(entry); err == nil {
-			return cli.Failed, fmt.Errorf("layer still present after DestroyLayer: %s", entry)
+			return fmt.Errorf("layer still present after DestroyLayer: %s", entry)
 		}
 		removed = append(removed, entry)
 		e.Progress("removed %s", entry)
 	}
 
-	if a.Flag("--blobs") {
+	if blobs {
 		for _, d := range rec.LayerDigests {
 			blob := st.BlobPath(trimSha(d))
 			if err := os.Remove(blob); err != nil && !os.IsNotExist(err) {
-				return cli.Failed, fmt.Errorf("remove blob %s: %w", blob, err)
+				return fmt.Errorf("remove blob %s: %w", blob, err)
 			}
 			e.Progress("removed %s", blob)
 		}
 	}
 
 	if err := st.RemoveRecord(ref); err != nil {
-		return cli.Failed, err
+		return err
 	}
 
 	e.Result(map[string]any{
@@ -120,5 +110,5 @@ func remove(a *cli.Args, e cli.Emit) (int, error) {
 	}, func() {
 		fmt.Printf("removed %d layer(s) and the record for %s\n", len(removed), rec.Ref)
 	})
-	return cli.OK, nil
+	return nil
 }

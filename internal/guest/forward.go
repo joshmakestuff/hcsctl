@@ -11,7 +11,6 @@ import (
 	"net"
 	"os"
 	"os/signal"
-	"strconv"
 	"strings"
 	"time"
 
@@ -29,31 +28,10 @@ type forwardResult struct {
 	GuestPort int    `json:"guestPort"`
 }
 
-func forward(a *cli.Args, e cli.Emit) (int, error) {
-	if err := a.RejectUnknown("--vmid", "--listen", "--port", "--timeout"); err != nil {
-		return cli.Usage, err
-	}
-	raw, err := a.Require("--vmid")
-	if err != nil {
-		return cli.Usage, err
-	}
-	vmid, err := guid.FromString(raw)
-	if err != nil {
-		return cli.Usage, cli.Usagef("--vmid is not a GUID: %v", err)
-	}
-	portRaw, err := a.Require("--port")
-	if err != nil {
-		return cli.Usage, err
-	}
-	port, err := strconv.Atoi(portRaw)
-	if err != nil || port < 1 || port > 65535 {
-		return cli.Usage, cli.Usagef("--port must be a TCP port between 1 and 65535")
-	}
-
+func forward(vmid guid.GUID, port int, listenAddr string, dialTimeout time.Duration, e cli.Emit) error {
 	// Loopback by default. A forward gives whoever reaches it the guest's service with no
 	// credential of its own; a caller who wants another interface must write the address
 	// out in full.
-	listenAddr := a.Option("--listen")
 	if listenAddr == "" {
 		listenAddr = "127.0.0.1:0"
 	}
@@ -61,23 +39,14 @@ func forward(a *cli.Args, e cli.Emit) (int, error) {
 		listenAddr = "127.0.0.1:" + listenAddr
 	}
 
-	dialTimeout := 35 * time.Second
-	if s := a.Option("--timeout"); s != "" {
-		d, perr := time.ParseDuration(s)
-		if perr != nil || d <= 0 {
-			return cli.Usage, cli.Usagef("--timeout must be a positive duration, e.g. 10s")
-		}
-		dialTimeout = d
-	}
-
 	svc, err := serviceFor(vmid, dialTimeout)
 	if err != nil {
-		return cli.Failed, err
+		return err
 	}
 
 	l, err := net.Listen("tcp", listenAddr)
 	if err != nil {
-		return cli.Failed, fmt.Errorf("listen %s: %w", listenAddr, err)
+		return fmt.Errorf("listen %s: %w", listenAddr, err)
 	}
 	defer l.Close()
 
@@ -107,9 +76,9 @@ func forward(a *cli.Args, e cli.Emit) (int, error) {
 		c, err := l.Accept()
 		if err != nil {
 			if ctx.Err() != nil {
-				return cli.OK, nil
+				return nil
 			}
-			return cli.Failed, err
+			return err
 		}
 		go func() {
 			defer c.Close()

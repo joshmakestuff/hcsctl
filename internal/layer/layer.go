@@ -29,21 +29,71 @@ import (
 	"github.com/Microsoft/hcsshim"
 	"github.com/joshmakestuff/hcsctl/internal/cli"
 	"github.com/joshmakestuff/hcsctl/internal/store"
+	"github.com/spf13/cobra"
 )
 
-func Dispatch(a *cli.Args, e cli.Emit) (int, error) {
-	switch a.Word(1) {
-	case "mount":
-		return mount(a, e)
-	case "unmount":
-		return unmount(a, e)
-	case "ls":
-		return list(a, e)
-	case "":
-		return cli.Usage, cli.Usagef("layer needs a subcommand: mount, unmount, ls")
-	default:
-		return cli.Usage, cli.Usagef("unknown layer subcommand %q (expected mount, unmount, ls)", a.Word(1))
+// Command is `hcsctl layer`.
+func Command(e cli.Emit) *cobra.Command {
+	return cli.Group("layer", "turn a materialized image chain into a mounted volume",
+		mountCmd(e), unmountCmd(e), lsCmd(e))
+}
+
+func mountCmd(e cli.Emit) *cobra.Command {
+	var ref, id, storeDir, scratchSize string
+	cmd := &cobra.Command{
+		Use:   "mount --ref <ref> [--id <id>] [--scratch-size 40GB] [--store <dir>]",
+		Short: "put a writable scratch layer over a chain and print the volume path. ELEVATED",
+		Long: `Put a writable scratch layer over a materialized chain, activate and prepare
+it, then print the volume path. --scratch-size grows the scratch beyond the
+default via ExpandScratchSize. ELEVATED.`,
+		Args: cli.NoExtraArgs,
+		RunE: func(*cobra.Command, []string) error {
+			var size uint64
+			if scratchSize != "" {
+				var err error
+				if size, err = cli.ParseSize(scratchSize); err != nil {
+					return err
+				}
+			}
+			return mount(ref, id, storeDir, size, e)
+		},
 	}
+	cli.StringOnce(cmd.Flags(), &ref, "ref", "image reference, registry/repo:tag")
+	cli.Required(cmd, "ref")
+	cli.StringOnce(cmd.Flags(), &id, "id", "mount name; defaults to a name derived from --ref")
+	cli.StringOnce(cmd.Flags(), &scratchSize, "scratch-size", "grow the scratch beyond the default, e.g. 40GB")
+	cli.StringOnce(cmd.Flags(), &storeDir, "store", "store directory")
+	return cmd
+}
+
+func unmountCmd(e cli.Emit) *cobra.Command {
+	var ref, id, storeDir string
+	cmd := &cobra.Command{
+		Use:   "unmount --id <id> | --ref <ref> [--store <dir>]",
+		Short: "unprepare, deactivate and destroy the scratch. ELEVATED",
+		Args:  cli.NoExtraArgs,
+		RunE: func(*cobra.Command, []string) error {
+			return unmount(id, ref, storeDir, e)
+		},
+	}
+	cli.StringOnce(cmd.Flags(), &id, "id", "mount name")
+	cli.StringOnce(cmd.Flags(), &ref, "ref", "image reference; names the mount when --id is absent")
+	cli.StringOnce(cmd.Flags(), &storeDir, "store", "store directory")
+	return cmd
+}
+
+func lsCmd(e cli.Emit) *cobra.Command {
+	var storeDir string
+	cmd := &cobra.Command{
+		Use:   "ls [--store <dir>]",
+		Short: "mounts and their volume paths",
+		Args:  cli.NoExtraArgs,
+		RunE: func(*cobra.Command, []string) error {
+			return list(storeDir, e)
+		},
+	}
+	cli.StringOnce(cmd.Flags(), &storeDir, "store", "store directory")
+	return cmd
 }
 
 // scratchRoot holds one directory per mount, named by its id.
@@ -58,14 +108,12 @@ func idFor(ref string) string {
 
 // resolveID is the only way mount and unmount obtain an id, and it validates the id. An
 // unvalidated id reaches DestroyLayer on the elevated path (`--id ..` would name the store root).
-func resolveID(a *cli.Args) (string, error) {
-	id := a.Option("--id")
+func resolveID(id, ref string) (string, error) {
 	if id == "" {
-		if ref := a.Option("--ref"); ref != "" {
-			id = idFor(ref)
-		} else {
+		if ref == "" {
 			return "", cli.Usagef("--id or --ref is required")
 		}
+		id = idFor(ref)
 	}
 	if err := cli.ValidateID(id); err != nil {
 		return "", err
@@ -144,39 +192,26 @@ type mountResult struct {
 	Chain   []string `json:"chain"`
 }
 
-func mount(a *cli.Args, e cli.Emit) (int, error) {
-	if err := a.RejectUnknown("--ref", "--id", "--store", "--scratch-size"); err != nil {
-		return cli.Usage, err
-	}
-	ref, err := a.Require("--ref")
+func mount(ref, rawID, storeDir string, scratchSize uint64, e cli.Emit) error {
+	st, err := store.New(storeDir)
 	if err != nil {
-		return cli.Usage, err
+		return err
 	}
-	var scratchSize uint64
-	if v := a.Option("--scratch-size"); v != "" {
-		if scratchSize, err = cli.ParseSize(v); err != nil {
-			return cli.Usage, err
-		}
-	}
-	st, err := store.New(a.Option("--store"))
+	id, err := resolveID(rawID, ref)
 	if err != nil {
-		return cli.Failed, err
-	}
-	id, err := resolveID(a)
-	if err != nil {
-		return cli.Usage, err
+		return err
 	}
 
 	chain, err := chainFor(st, ref)
 	if err != nil {
-		return exitFor(err), err
+		return err
 	}
 	sp := scratchPath(st, id)
 	if _, err := os.Stat(sp); err == nil {
-		return cli.Usage, cli.Usagef("a mount named %q already exists at %s -- unmount it first", id, sp)
+		return cli.Usagef("a mount named %q already exists at %s -- unmount it first", id, sp)
 	}
 	if err := os.MkdirAll(scratchRoot(st), 0o755); err != nil {
-		return cli.Failed, err
+		return err
 	}
 
 	e.Progress("chain:   %d layer(s), topmost %s", len(chain), filepath.Base(chain[0]))
@@ -186,7 +221,7 @@ func mount(a *cli.Args, e cli.Emit) (int, error) {
 
 	// Each step is undone in reverse on failure, so a half-built mount does not survive.
 	if err := hcsshim.CreateScratchLayer(info, sp, "", chain); err != nil {
-		return cli.Failed, fmt.Errorf("CreateScratchLayer (rerun elevated?): %w", err)
+		return fmt.Errorf("CreateScratchLayer (rerun elevated?): %w", err)
 	}
 	e.Progress("CreateScratchLayer ok")
 
@@ -194,7 +229,7 @@ func mount(a *cli.Args, e cli.Emit) (int, error) {
 	if scratchSize != 0 {
 		if err := hcsshim.ExpandScratchSize(info, sp, scratchSize); err != nil {
 			_ = hcsshim.DestroyLayer(info, sp)
-			return cli.Failed, fmt.Errorf("ExpandScratchSize: %w", err)
+			return fmt.Errorf("ExpandScratchSize: %w", err)
 		}
 		e.Progress("ExpandScratchSize to %d bytes ok", scratchSize)
 	}
@@ -202,7 +237,7 @@ func mount(a *cli.Args, e cli.Emit) (int, error) {
 	vol, err := Stack(sp, chain)
 	if err != nil {
 		_ = hcsshim.DestroyLayer(info, sp)
-		return cli.Failed, err
+		return err
 	}
 	e.Progress("stacked layers ok")
 
@@ -213,24 +248,21 @@ func mount(a *cli.Args, e cli.Emit) (int, error) {
 	e.Result(res, func() {
 		fmt.Printf("mounted %s\n  id:     %s\n  volume: %s\n", ref, id, vol)
 	})
-	return cli.OK, nil
+	return nil
 }
 
-func unmount(a *cli.Args, e cli.Emit) (int, error) {
-	if err := a.RejectUnknown("--id", "--ref", "--store"); err != nil {
-		return cli.Usage, err
-	}
-	st, err := store.New(a.Option("--store"))
+func unmount(rawID, ref, storeDir string, e cli.Emit) error {
+	st, err := store.New(storeDir)
 	if err != nil {
-		return cli.Failed, err
+		return err
 	}
-	id, err := resolveID(a)
+	id, err := resolveID(rawID, ref)
 	if err != nil {
-		return cli.Usage, err
+		return err
 	}
 	sp := scratchPath(st, id)
 	if _, err := os.Stat(sp); err != nil {
-		return cli.Usage, cli.Usagef("no mount named %q at %s", id, sp)
+		return cli.Usagef("no mount named %q at %s", id, sp)
 	}
 
 	info := hcsshim.DriverInfo{}
@@ -253,29 +285,26 @@ func unmount(a *cli.Args, e cli.Emit) (int, error) {
 	// The post-condition, not the return value: DestroyLayer can report success and leave the
 	// tree behind.
 	if _, err := os.Stat(sp); err == nil {
-		return cli.Failed, fmt.Errorf("scratch still present after DestroyLayer: %s", sp)
+		return fmt.Errorf("scratch still present after DestroyLayer: %s", sp)
 	}
 	if firstErr != nil {
-		return cli.Failed, firstErr
+		return firstErr
 	}
 
 	e.Result(map[string]any{"ok": true, "command": "layer unmount", "id": id}, func() {
 		fmt.Printf("unmounted %s\n", id)
 	})
-	return cli.OK, nil
+	return nil
 }
 
-func list(a *cli.Args, e cli.Emit) (int, error) {
-	if err := a.RejectUnknown("--store"); err != nil {
-		return cli.Usage, err
-	}
-	st, err := store.New(a.Option("--store"))
+func list(storeDir string, e cli.Emit) error {
+	st, err := store.New(storeDir)
 	if err != nil {
-		return cli.Failed, err
+		return err
 	}
 	entries, err := os.ReadDir(scratchRoot(st))
 	if err != nil && !os.IsNotExist(err) {
-		return cli.Failed, err
+		return err
 	}
 
 	type row struct {
@@ -305,12 +334,5 @@ func list(a *cli.Args, e cli.Emit) (int, error) {
 			fmt.Printf("%-56s %s\n", r.ID, r.Volume)
 		}
 	})
-	return cli.OK, nil
-}
-
-func exitFor(err error) int {
-	if _, ok := err.(*cli.UsageError); ok {
-		return cli.Usage
-	}
-	return cli.Failed
+	return nil
 }

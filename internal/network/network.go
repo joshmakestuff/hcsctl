@@ -14,32 +14,116 @@ package network
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
-	"github.com/Microsoft/hcsshim/hcn"
-	"github.com/joshmakestuff/hcsctl/internal/cli"
 	"net/netip"
 	"sort"
 	"strings"
+
+	"github.com/Microsoft/hcsshim/hcn"
+	"github.com/joshmakestuff/hcsctl/internal/cli"
+	"github.com/spf13/cobra"
 )
 
-func Dispatch(a *cli.Args, e cli.Emit) (int, error) {
-	switch a.Word(1) {
-	case "ls":
-		return list(a, e)
-	case "endpoints":
-		return endpoints(a, e)
-	case "inspect":
-		return inspect(a, e)
-	case "create":
-		return create(a, e)
-	case "rm":
-		return remove(a, e)
-	case "":
-		return cli.Usage, cli.Usagef("network needs a subcommand: ls, endpoints, inspect, create, rm")
-	default:
-		return cli.Usage, cli.Usagef("unknown network subcommand %q (expected ls, endpoints, inspect, create, rm)", a.Word(1))
+// Command is `hcsctl network`.
+func Command(e cli.Emit) *cobra.Command {
+	return cli.Group("network", "host compute networks: list, inspect, create, remove",
+		lsCmd(e), endpointsCmd(e), inspectCmd(e), createCmd(e), rmCmd(e))
+}
+
+func lsCmd(e cli.Emit) *cobra.Command {
+	return &cobra.Command{
+		Use:   "ls",
+		Short: "host compute networks, their subnets and endpoint counts. Unelevated",
+		Args:  cli.NoExtraArgs,
+		RunE: func(*cobra.Command, []string) error {
+			return list(e)
+		},
 	}
+}
+
+func endpointsCmd(e cli.Emit) *cobra.Command {
+	var network string
+	cmd := &cobra.Command{
+		Use:   "endpoints [--network <name|id>]",
+		Short: "endpoints and their addresses. Unelevated",
+		Args:  cli.NoExtraArgs,
+		RunE: func(*cobra.Command, []string) error {
+			return endpoints(network, e)
+		},
+	}
+	cli.StringOnce(cmd.Flags(), &network, "network", "filter to one network, by name or id")
+	return cmd
+}
+
+func inspectCmd(e cli.Emit) *cobra.Command {
+	var id, name string
+	cmd := &cobra.Command{
+		Use:   "inspect (--id <guid> | --name <name>)",
+		Short: "the effective HCN document. Unelevated",
+		Long: `The effective HCN document: subnets, routes, MAC pool, DNS, policies,
+flags, schema version, attached endpoint IDs. Unelevated.`,
+		Args: cli.NoExtraArgs,
+		RunE: func(*cobra.Command, []string) error {
+			if (id == "") == (name == "") {
+				return cli.Usagef("network inspect requires exactly one of --id or --name")
+			}
+			return inspect(id, name, e)
+		},
+	}
+	cli.StringOnce(cmd.Flags(), &id, "id", "network id (GUID)")
+	cli.StringOnce(cmd.Flags(), &name, "name", "network name")
+	return cmd
+}
+
+func createCmd(e cli.Emit) *cobra.Command {
+	var name, kind, subnet, gateway string
+	cmd := &cobra.Command{
+		Use:   "create --name <name> --type nat --subnet <IPv4/CIDR> --gateway <IPv4>",
+		Short: "create an explicit NAT or isolated private network",
+		Long: `Create a host compute network. Two forms:
+
+  create --name <name> --type nat --subnet <IPv4/CIDR> --gateway <IPv4>
+      Create an explicit NAT network. Does not alter existing networks.
+
+  create --name <name> --type private
+      Create an isolated private network.
+
+Windows permits one NAT network per host; hosts that run Docker already have
+it, and a second one can break Docker and WSL. Do not create a NAT network on
+a development host that runs Docker or WSL.`,
+		Args: cli.NoExtraArgs,
+		RunE: func(*cobra.Command, []string) error {
+			network, err := newNetwork(name, kind, subnet, gateway)
+			if err != nil {
+				return err
+			}
+			return create(network, name, e)
+		},
+	}
+	cli.StringOnce(cmd.Flags(), &name, "name", "network name")
+	cli.StringOnce(cmd.Flags(), &kind, "type", "nat or private")
+	cli.Required(cmd, "name", "type")
+	cli.StringOnce(cmd.Flags(), &subnet, "subnet", "IPv4 CIDR naming the network address (nat only)")
+	cli.StringOnce(cmd.Flags(), &gateway, "gateway", "IPv4 gateway address inside --subnet (nat only)")
+	return cmd
+}
+
+func rmCmd(e cli.Emit) *cobra.Command {
+	var id, name string
+	cmd := &cobra.Command{
+		Use:   "rm (--id <guid> | --name <name>)",
+		Short: "remove an empty network. Refuses to remove its endpoints",
+		Args:  cli.NoExtraArgs,
+		RunE: func(*cobra.Command, []string) error {
+			if (id == "") == (name == "") {
+				return cli.Usagef("network rm requires exactly one of --id or --name")
+			}
+			return remove(id, name, e)
+		},
+	}
+	cli.StringOnce(cmd.Flags(), &id, "id", "network id (GUID)")
+	cli.StringOnce(cmd.Flags(), &name, "name", "network name")
+	return cmd
 }
 
 type networkRow struct {
@@ -51,13 +135,10 @@ type networkRow struct {
 	Endpoints int `json:"endpoints"`
 }
 
-func list(a *cli.Args, e cli.Emit) (int, error) {
-	if err := a.RejectUnknown(); err != nil {
-		return cli.Usage, err
-	}
+func list(e cli.Emit) error {
 	nets, err := hcn.ListNetworks()
 	if err != nil {
-		return cli.Failed, fmt.Errorf("ListNetworks: %w", err)
+		return fmt.Errorf("ListNetworks: %w", err)
 	}
 
 	// One enumeration of every endpoint, bucketed by network.
@@ -99,7 +180,7 @@ func list(a *cli.Args, e cli.Emit) (int, error) {
 				trunc(r.Name, 26), r.Type, strings.Join(r.Subnets, ","), r.Endpoints, r.ID)
 		}
 	})
-	return cli.OK, nil
+	return nil
 }
 
 type endpointRow struct {
@@ -111,13 +192,10 @@ type endpointRow struct {
 	MAC       string   `json:"mac"`
 }
 
-func endpoints(a *cli.Args, e cli.Emit) (int, error) {
-	if err := a.RejectUnknown("--network"); err != nil {
-		return cli.Usage, err
-	}
+func endpoints(want string, e cli.Emit) error {
 	nets, err := hcn.ListNetworks()
 	if err != nil {
-		return cli.Failed, fmt.Errorf("ListNetworks: %w", err)
+		return fmt.Errorf("ListNetworks: %w", err)
 	}
 	// Names, so the output is readable without a second lookup, and so --network can accept
 	// either a name or an ID.
@@ -127,7 +205,7 @@ func endpoints(a *cli.Args, e cli.Emit) (int, error) {
 	}
 
 	var filterID string
-	if want := a.Option("--network"); want != "" {
+	if want != "" {
 		for _, n := range nets {
 			if strings.EqualFold(n.Name, want) || strings.EqualFold(n.Id, want) {
 				filterID = strings.ToLower(n.Id)
@@ -135,13 +213,13 @@ func endpoints(a *cli.Args, e cli.Emit) (int, error) {
 			}
 		}
 		if filterID == "" {
-			return cli.Usage, cli.Usagef("no network named or with id %q -- try `hcsctl network ls`", want)
+			return cli.Usagef("no network named or with id %q -- try `hcsctl network ls`", want)
 		}
 	}
 
 	eps, err := hcn.ListEndpoints()
 	if err != nil {
-		return cli.Failed, fmt.Errorf("ListEndpoints: %w", err)
+		return fmt.Errorf("ListEndpoints: %w", err)
 	}
 
 	rows := make([]endpointRow, 0, len(eps))
@@ -173,7 +251,7 @@ func endpoints(a *cli.Args, e cli.Emit) (int, error) {
 				strings.Join(r.Addresses, ","), r.MAC, r.ID)
 		}
 	})
-	return cli.OK, nil
+	return nil
 }
 
 // resolveNetwork turns the (--id | --name) pair into one network. Exactly one of the two must
@@ -267,7 +345,7 @@ func flagNames(flags uint32) []string {
 }
 
 // newNetworkInspectResult shapes an HCN network document into the inspect result. Pure: every
-// HCN call happens in the caller, so this is the unit-testable seam.
+// HCN call happens in the caller, so this is unit-testable.
 func newNetworkInspectResult(n *hcn.HostComputeNetwork, eps []hcn.HostComputeEndpoint, epErr error) networkInspectResult {
 	res := networkInspectResult{
 		OK: true, Command: "network inspect",
@@ -319,17 +397,10 @@ func emptyNotNil(s []string) []string {
 	return s
 }
 
-func inspect(a *cli.Args, e cli.Emit) (int, error) {
-	if err := a.RejectUnknown("--id", "--name"); err != nil {
-		return cli.Usage, err
-	}
-	network, err := resolveNetwork("inspect", a.Option("--id"), a.Option("--name"))
+func inspect(id, name string, e cli.Emit) error {
+	network, err := resolveNetwork("inspect", id, name)
 	if err != nil {
-		var usage *cli.UsageError
-		if errors.As(err, &usage) {
-			return cli.Usage, err
-		}
-		return cli.Failed, err
+		return err
 	}
 
 	eps, epErr := hcn.ListEndpoints()
@@ -365,7 +436,7 @@ func inspect(a *cli.Args, e cli.Emit) (int, error) {
 			}
 		}
 	})
-	return cli.OK, nil
+	return nil
 }
 
 func trunc(s string, n int) string {
@@ -386,34 +457,18 @@ type networkMutationResult struct {
 	Subnets []string `json:"subnets"`
 }
 
-func create(a *cli.Args, e cli.Emit) (int, error) {
-	if err := a.RejectUnknown("--name", "--type", "--subnet", "--gateway"); err != nil {
-		return cli.Usage, err
-	}
-	name, err := a.Require("--name")
-	if err != nil {
-		return cli.Usage, err
-	}
-	kind, err := a.Require("--type")
-	if err != nil {
-		return cli.Usage, err
-	}
-	network, err := newNetwork(name, kind, a.Option("--subnet"), a.Option("--gateway"))
-	if err != nil {
-		return cli.Usage, err
-	}
-
+func create(network *hcn.HostComputeNetwork, name string, e cli.Emit) error {
 	existing, err := hcn.GetNetworkByName(name)
 	switch {
 	case err == nil:
-		return cli.Failed, fmt.Errorf("network named %q already exists (id %s)", name, existing.Id)
+		return fmt.Errorf("network named %q already exists (id %s)", name, existing.Id)
 	case !hcn.IsNotFoundError(err):
-		return cli.Failed, fmt.Errorf("GetNetworkByName(%q): %w", name, err)
+		return fmt.Errorf("GetNetworkByName(%q): %w", name, err)
 	}
 
 	created, err := network.Create()
 	if err != nil {
-		return cli.Failed, fmt.Errorf("Create network %q: %w", name, err)
+		return fmt.Errorf("Create network %q: %w", name, err)
 	}
 	res := networkMutationResult{
 		OK: true, Command: "network create", ID: created.Id, Name: created.Name,
@@ -422,7 +477,7 @@ func create(a *cli.Args, e cli.Emit) (int, error) {
 	e.Result(res, func() {
 		fmt.Printf("created %s network %s (%s)\n", res.Type, res.Name, res.ID)
 	})
-	return cli.OK, nil
+	return nil
 }
 
 func newNetwork(name, kind, subnet, gateway string) (*hcn.HostComputeNetwork, error) {
@@ -512,41 +567,34 @@ func networkSubnets(network *hcn.HostComputeNetwork) []string {
 
 // -- rm -----------------------------------------------------------------------------------
 
-func remove(a *cli.Args, e cli.Emit) (int, error) {
-	if err := a.RejectUnknown("--id", "--name"); err != nil {
-		return cli.Usage, err
-	}
-	network, err := resolveNetwork("rm", a.Option("--id"), a.Option("--name"))
+func remove(id, name string, e cli.Emit) error {
+	network, err := resolveNetwork("rm", id, name)
 	if err != nil {
-		var usage *cli.UsageError
-		if errors.As(err, &usage) {
-			return cli.Usage, err
-		}
-		return cli.Failed, err
+		return err
 	}
 
-	endpoints, err := hcn.ListEndpoints()
+	eps, err := hcn.ListEndpoints()
 	if err != nil {
-		return cli.Failed, fmt.Errorf("ListEndpoints before deleting network %s: %w", network.Id, err)
+		return fmt.Errorf("ListEndpoints before deleting network %s: %w", network.Id, err)
 	}
 	count := 0
-	for _, endpoint := range endpoints {
+	for _, endpoint := range eps {
 		if strings.EqualFold(endpoint.HostComputeNetwork, network.Id) {
 			count++
 		}
 	}
 	if count != 0 {
-		return cli.Failed, fmt.Errorf("network %q (%s) has %d endpoint(s); remove them before deleting it",
+		return fmt.Errorf("network %q (%s) has %d endpoint(s); remove them before deleting it",
 			network.Name, network.Id, count)
 	}
 
 	if err := network.Delete(); err != nil {
-		return cli.Failed, fmt.Errorf("Delete network %q (%s): %w", network.Name, network.Id, err)
+		return fmt.Errorf("Delete network %q (%s): %w", network.Name, network.Id, err)
 	}
 	if _, err := hcn.GetNetworkByID(network.Id); err == nil {
-		return cli.Failed, fmt.Errorf("network %q (%s) still exists after Delete returned success", network.Name, network.Id)
+		return fmt.Errorf("network %q (%s) still exists after Delete returned success", network.Name, network.Id)
 	} else if !hcn.IsNotFoundError(err) {
-		return cli.Failed, fmt.Errorf("GetNetworkByID(%s) after Delete: %w", network.Id, err)
+		return fmt.Errorf("GetNetworkByID(%s) after Delete: %w", network.Id, err)
 	}
 
 	res := networkMutationResult{
@@ -556,5 +604,5 @@ func remove(a *cli.Args, e cli.Emit) (int, error) {
 	e.Result(res, func() {
 		fmt.Printf("removed %s network %s (%s)\n", res.Type, res.Name, res.ID)
 	})
-	return cli.OK, nil
+	return nil
 }
