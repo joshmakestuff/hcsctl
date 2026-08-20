@@ -74,6 +74,7 @@ Layout are regenerated -- so point it at a copy, not a store layer. ELEVATED.`,
 		},
 	}
 	cli.StringOnce(cmd.Flags(), &layer, "layer", "layer directory to prepare")
+	cli.Required(cmd, "layer")
 	cli.StringOnce(cmd.Flags(), &sizeGB, "size-gb", "base VHD size in GB (default 10)")
 	return cmd
 }
@@ -124,13 +125,11 @@ func unmountCmd(e cli.Emit) *cobra.Command {
 		Long:  `Detach the storage filter and the scratch VHD. ELEVATED.`,
 		Args:  cli.NoExtraArgs,
 		RunE: func(*cobra.Command, []string) error {
-			if err := cli.Require("--scratch-dir", scratchDir); err != nil {
-				return err
-			}
 			return unmount(scratchDir, e)
 		},
 	}
 	cli.StringOnce(cmd.Flags(), &scratchDir, "scratch-dir", "directory holding sandbox.vhdx")
+	cli.Required(cmd, "scratch-dir")
 	return cmd
 }
 
@@ -147,9 +146,6 @@ ELEVATED.`,
 			if err := requireDir("--source", src); err != nil {
 				return err
 			}
-			if err := cli.Require("--layer", layer); err != nil {
-				return err
-			}
 			if err := checkParents(parents); err != nil {
 				return err
 			}
@@ -158,6 +154,7 @@ ELEVATED.`,
 	}
 	cli.StringOnce(cmd.Flags(), &src, "source", "source layer directory")
 	cli.StringOnce(cmd.Flags(), &layer, "layer", "destination layer directory")
+	cli.Required(cmd, "source", "layer")
 	cli.StringArray(cmd.Flags(), &parents, "parent", "parent layer directory, topmost first, repeatable")
 	return cmd
 }
@@ -190,6 +187,7 @@ layer fails partway; the legacy variants are not public hcsshim.`,
 	}
 	cli.StringOnce(cmd.Flags(), &layer, "layer", "layer to export: a mounted writable layer's volume path")
 	cli.StringOnce(cmd.Flags(), &dest, "dest", "existing destination directory")
+	cli.Required(cmd, "layer", "dest")
 	cli.StringArray(cmd.Flags(), &parents, "parent", "parent layer directory, topmost first, repeatable")
 	cmd.Flags().BoolVar(&writable, "writable", false, "export as a writable layer")
 	return cmd
@@ -212,6 +210,7 @@ removes them. ELEVATED.`,
 		},
 	}
 	cli.StringOnce(cmd.Flags(), &layer, "layer", "layer directory to destroy")
+	cli.Required(cmd, "layer")
 	return cmd
 }
 

@@ -110,6 +110,7 @@ var usageCases = []struct {
 	{"unknown option", []string{"image", "ls", "--bogus", "x"}},
 	{"duplicate option", []string{"container", "exec", "--id", "a", "--id", "b", "--cmd", "c"}},
 	{"missing required option", []string{"image", "pull"}},
+	{"required option given empty", []string{"image", "pull", "--ref", ""}},
 	{"option missing value", []string{"image", "pull", "--ref"}},
 	{"unparseable ref", []string{"image", "pull", "--ref", "!!!"}},
 	{"env without equals", []string{"container", "exec", "--id", "a", "--cmd", "c", "--env", "BAD"}},

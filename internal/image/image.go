@@ -28,13 +28,11 @@ func pullCmd(e cli.Emit) *cobra.Command {
 streaming. Unelevated.`,
 		Args: cli.NoExtraArgs,
 		RunE: func(*cobra.Command, []string) error {
-			if err := cli.Require("--ref", ref); err != nil {
-				return err
-			}
 			return pull(ref, storeDir, e)
 		},
 	}
 	cli.StringOnce(cmd.Flags(), &ref, "ref", "image reference, registry/repo:tag")
+	cli.Required(cmd, "ref")
 	cli.StringOnce(cmd.Flags(), &storeDir, "store", "store directory")
 	return cmd
 }
@@ -50,13 +48,11 @@ ProcessBaseLayer needs an enabled BUILTIN\Administrators SID, which is a
 group check no user-rights grant satisfies.`,
 		Args: cli.NoExtraArgs,
 		RunE: func(*cobra.Command, []string) error {
-			if err := cli.Require("--ref", ref); err != nil {
-				return err
-			}
 			return importImage(ref, storeDir, e)
 		},
 	}
 	cli.StringOnce(cmd.Flags(), &ref, "ref", "image reference, registry/repo:tag")
+	cli.Required(cmd, "ref")
 	cli.StringOnce(cmd.Flags(), &storeDir, "store", "store directory")
 	return cmd
 }
@@ -83,13 +79,11 @@ func rmCmd(e cli.Emit) *cobra.Command {
 		Short: "remove materialized layers via DestroyLayer. ELEVATED",
 		Args:  cli.NoExtraArgs,
 		RunE: func(*cobra.Command, []string) error {
-			if err := cli.Require("--ref", ref); err != nil {
-				return err
-			}
 			return remove(ref, storeDir, blobs, e)
 		},
 	}
 	cli.StringOnce(cmd.Flags(), &ref, "ref", "image reference, registry/repo:tag")
+	cli.Required(cmd, "ref")
 	cli.StringOnce(cmd.Flags(), &storeDir, "store", "store directory")
 	cmd.Flags().BoolVar(&blobs, "blobs", false, "also remove the downloaded blobs")
 	return cmd

@@ -93,12 +93,6 @@ it, and a second one can break Docker and WSL. Do not create a NAT network on
 a development host that runs Docker or WSL.`,
 		Args: cli.NoExtraArgs,
 		RunE: func(*cobra.Command, []string) error {
-			if err := cli.Require("--name", name); err != nil {
-				return err
-			}
-			if err := cli.Require("--type", kind); err != nil {
-				return err
-			}
 			network, err := newNetwork(name, kind, subnet, gateway)
 			if err != nil {
 				return err
@@ -108,6 +102,7 @@ a development host that runs Docker or WSL.`,
 	}
 	cli.StringOnce(cmd.Flags(), &name, "name", "network name")
 	cli.StringOnce(cmd.Flags(), &kind, "type", "nat or private")
+	cli.Required(cmd, "name", "type")
 	cli.StringOnce(cmd.Flags(), &subnet, "subnet", "IPv4 CIDR naming the network address (nat only)")
 	cli.StringOnce(cmd.Flags(), &gateway, "gateway", "IPv4 gateway address inside --subnet (nat only)")
 	return cmd

@@ -152,13 +152,11 @@ including Hyper-V + NAT where it would be stored without effect. No runtime
 mutation. --timeout bounds the primary command; absent means wait forever.`,
 		Args: cli.NoExtraArgs,
 		RunE: func(*cobra.Command, []string) error {
-			if err := cli.Require("--ref", o.ref); err != nil {
-				return err
-			}
 			return run(&o, e)
 		},
 	}
 	addCreateFlags(cmd.Flags(), &o.createOptions)
+	cli.Required(cmd, "ref")
 	cli.StringOnce(cmd.Flags(), &o.cmd, "cmd", `command to run; defaults to "cmd /c ver"`)
 	cli.StringOnce(cmd.Flags(), &o.cwd, "cwd", "guest working directory")
 	cli.StringOnce(cmd.Flags(), &o.user, "user", "guest user")
@@ -187,13 +185,11 @@ repeatable. Create-time endpoint ACL; enforced on process isolation + NAT and
 Hyper-V + L2Bridge, refused elsewhere. Recorded in state.json.`,
 		Args: cli.NoExtraArgs,
 		RunE: func(*cobra.Command, []string) error {
-			if err := cli.Require("--ref", o.ref); err != nil {
-				return err
-			}
 			return create(&o, e)
 		},
 	}
 	addCreateFlags(cmd.Flags(), &o)
+	cli.Required(cmd, "ref")
 	cli.StringOnce(cmd.Flags(), &o.cmd, "cmd", "record the primary process; start launches it. Exec the target directly, not via cmd /c -- a kill terminates one process, not a tree, and a wrapper's children survive")
 	return cmd
 }
@@ -251,9 +247,6 @@ total.`,
 		RunE: func(*cobra.Command, []string) error {
 			// The whole command line is judged before any container lookup, so a bad --pid is
 			// exit 64 even when the container does not exist either.
-			if err := cli.Require("--pid", pid); err != nil {
-				return err
-			}
 			// OpenProcess takes an int and a Windows pid is a DWORD; MaxInt32 satisfies both
 			// sinks, and no real pid approaches it.
 			n, err := cli.ParseUint(pid, math.MaxInt32)
@@ -265,6 +258,7 @@ total.`,
 	}
 	addTargetFlags(cmd.Flags(), &o)
 	cli.StringOnce(cmd.Flags(), &pid, "pid", "guest pid, from container ps or an exec result")
+	cli.Required(cmd, "pid")
 	return cmd
 }
 

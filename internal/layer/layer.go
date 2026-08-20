@@ -48,9 +48,6 @@ it, then print the volume path. --scratch-size grows the scratch beyond the
 default via ExpandScratchSize. ELEVATED.`,
 		Args: cli.NoExtraArgs,
 		RunE: func(*cobra.Command, []string) error {
-			if err := cli.Require("--ref", ref); err != nil {
-				return err
-			}
 			var size uint64
 			if scratchSize != "" {
 				var err error
@@ -62,6 +59,7 @@ default via ExpandScratchSize. ELEVATED.`,
 		},
 	}
 	cli.StringOnce(cmd.Flags(), &ref, "ref", "image reference, registry/repo:tag")
+	cli.Required(cmd, "ref")
 	cli.StringOnce(cmd.Flags(), &id, "id", "mount name; defaults to a name derived from --ref")
 	cli.StringOnce(cmd.Flags(), &scratchSize, "scratch-size", "grow the scratch beyond the default, e.g. 40GB")
 	cli.StringOnce(cmd.Flags(), &storeDir, "store", "store directory")

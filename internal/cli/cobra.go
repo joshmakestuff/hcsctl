@@ -124,6 +124,35 @@ func optionShaped(name, s string) error {
 	return fmt.Errorf("requires a value -- to pass a value beginning with --, write --%s=%s", name, s)
 }
 
+// Required marks the named options as required, checked before the verb's RunE runs with
+// the same "--name is required" voice Require uses -- but declared beside the flags, so a
+// flag the synopsis calls required cannot lack the check. Not cobra's MarkFlagRequired: its
+// validation runs after PreRunE and returns a plain error, which would exit 1 -- nothing was
+// attempted, so this must be 64.
+func Required(cmd *cobra.Command, names ...string) {
+	for _, n := range names {
+		if cmd.Flags().Lookup(n) == nil {
+			// A misspelled name would otherwise report "--x is required" forever; this is
+			// a wiring bug, caught the first time the command is constructed.
+			panic("cli.Required: no --" + n + " on " + cmd.Name())
+		}
+	}
+	prev := cmd.PreRunE
+	cmd.PreRunE = func(c *cobra.Command, args []string) error {
+		for _, n := range names {
+			// An explicitly empty value counts as absent, as cli.Require ruled: no option
+			// here accepts an empty value.
+			if f := c.Flags().Lookup(n); !f.Changed || f.Value.String() == "" {
+				return Usagef("--%s is required", n)
+			}
+		}
+		if prev != nil {
+			return prev(c, args)
+		}
+		return nil
+	}
+}
+
 // NoExtraArgs rejects stray positionals as a usage error. cobra's own NoArgs returns a plain
 // error, which would exit 1 -- but nothing was attempted, so this must be 64.
 func NoExtraArgs(_ *cobra.Command, args []string) error {
