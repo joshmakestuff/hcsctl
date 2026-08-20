@@ -274,29 +274,44 @@ func inBuiltinGroup(rid uint32) bool {
 
 // heldPrivileges reports which of the interesting privileges the process token carries.
 func heldPrivileges() []string {
-	var token windows.Token
-	if err := windows.OpenProcessToken(windows.CurrentProcess(), windows.TOKEN_QUERY, &token); err != nil {
-		return nil
-	}
-	defer token.Close()
-
 	var held []string
 	for _, name := range privilegesOfInterest {
-		n, err := windows.UTF16PtrFromString(name)
-		if err != nil {
-			continue
-		}
-		var luid windows.LUID
-		if err := windows.LookupPrivilegeValue(nil, n, &luid); err != nil {
-			continue
-		}
-		// PrivilegeCheck answers whether the token holds the privilege; the enabled/disabled
-		// state is adjustable and is not reported.
-		if hasPrivilege(token, luid) {
+		if holdsPrivilege(name) {
 			held = append(held, name)
 		}
 	}
 	return held
+}
+
+// holdsPrivilege answers whether the process token carries the named privilege. Held, not
+// enabled: a held privilege can be enabled, an absent one cannot.
+func holdsPrivilege(name string) bool {
+	var token windows.Token
+	if err := windows.OpenProcessToken(windows.CurrentProcess(), windows.TOKEN_QUERY, &token); err != nil {
+		return false
+	}
+	defer token.Close()
+	n, err := windows.UTF16PtrFromString(name)
+	if err != nil {
+		return false
+	}
+	var luid windows.LUID
+	if err := windows.LookupPrivilegeValue(nil, n, &luid); err != nil {
+		return false
+	}
+	return hasPrivilege(token, luid)
+}
+
+// ExpandScratchReady reports whether this token can run the local scratch expand
+// (layer.ExpandScratch). Its one requirement is SeManageVolumePrivilege, spent at
+// AttachVirtualDisk -- 1314 ERROR_PRIVILEGE_NOT_HELD without it, measured on #36. The
+// privilege is grantable ("Perform volume maintenance tasks") and survives UAC filtering,
+// so this is a per-user setup step, not an elevation requirement.
+func ExpandScratchReady() error {
+	if holdsPrivilege("SeManageVolumePrivilege") {
+		return nil
+	}
+	return cli.Usagef("--scratch-size needs SeManageVolumePrivilege -- grant \"Perform volume maintenance tasks\" to this user and log on again")
 }
 
 func hasPrivilege(token windows.Token, luid windows.LUID) bool {

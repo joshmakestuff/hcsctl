@@ -29,6 +29,7 @@ import (
 	"github.com/Microsoft/hcsshim"
 	"github.com/joshmakestuff/hcsctl/internal/cli"
 	"github.com/joshmakestuff/hcsctl/internal/store"
+	"github.com/joshmakestuff/hcsctl/internal/sysinfo"
 	"github.com/spf13/cobra"
 )
 
@@ -45,13 +46,16 @@ func mountCmd(e cli.Emit) *cobra.Command {
 		Short: "put a writable scratch layer over a chain and print the volume path. ELEVATED",
 		Long: `Put a writable scratch layer over a materialized chain, activate and prepare
 it, then print the volume path. --scratch-size grows the scratch beyond the
-default via ExpandScratchSize. ELEVATED.`,
+default; it needs the SeManageVolumePrivilege grant. ELEVATED.`,
 		Args: cli.NoExtraArgs,
 		RunE: func(*cobra.Command, []string) error {
 			var size uint64
 			if scratchSize != "" {
 				var err error
 				if size, err = cli.ParseSize(scratchSize); err != nil {
+					return err
+				}
+				if err := sysinfo.ExpandScratchReady(); err != nil {
 					return err
 				}
 			}
@@ -227,11 +231,11 @@ func mount(ref, rawID, storeDir string, scratchSize uint64, e cli.Emit) error {
 
 	// Expand before Activate/Prepare, while nothing holds the vhd.
 	if scratchSize != 0 {
-		if err := hcsshim.ExpandScratchSize(info, sp, scratchSize); err != nil {
+		if err := ExpandScratch(sp, scratchSize); err != nil {
 			_ = hcsshim.DestroyLayer(info, sp)
-			return fmt.Errorf("ExpandScratchSize: %w", err)
+			return fmt.Errorf("ExpandScratch: %w", err)
 		}
-		e.Progress("ExpandScratchSize to %d bytes ok", scratchSize)
+		e.Progress("ExpandScratch to %d bytes ok", scratchSize)
 	}
 
 	vol, err := Stack(sp, chain)
