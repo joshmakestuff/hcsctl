@@ -29,6 +29,7 @@ import (
 	"syscall"
 
 	winio "github.com/Microsoft/go-winio"
+	"github.com/Microsoft/go-winio/pkg/guid"
 	"github.com/Microsoft/go-winio/vhd"
 	"github.com/Microsoft/hcsshim"
 	"github.com/Microsoft/hcsshim/computestorage"
@@ -41,7 +42,8 @@ import (
 // Command is `hcsctl storage`.
 func Command(e cli.Emit) *cobra.Command {
 	return cli.Group("storage", "VHD-backed layers via computestorage",
-		setupBaseCmd(e), mountCmd(e), unmountCmd(e), importCmd(e), exportCmd(e), destroyCmd(e))
+		setupBaseCmd(e), mountCmd(e), unmountCmd(e), importCmd(e), exportCmd(e), destroyCmd(e),
+		attachOverlayCmd(e), detachOverlayCmd(e))
 }
 
 func setupBaseCmd(e cli.Emit) *cobra.Command {
@@ -138,8 +140,9 @@ func importCmd(e cli.Emit) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "import --source <dir> --layer <dest-dir> [--parent <dir>]...",
 		Short: "HcsImportLayer, folder to folder. ELEVATED",
-		Long: `HcsImportLayer. Not working: fails path-not-found after writing Files.
-ELEVATED.`,
+		Long: `HcsImportLayer. Destination is a plain directory; the source must be a
+complete export (Files, Hives, tombstones.txt) -- a partial or wrapped export
+fails path-not-found after writing Files. ELEVATED.`,
 		Args: cli.NoExtraArgs,
 		RunE: func(*cobra.Command, []string) error {
 			if err := requireDir("--source", src); err != nil {
@@ -211,6 +214,177 @@ removes them. ELEVATED.`,
 	cli.StringOnce(cmd.Flags(), &layer, "layer", "layer directory to destroy")
 	cli.Required(cmd, "layer")
 	return cmd
+}
+
+func attachOverlayCmd(e cli.Emit) *cobra.Command {
+	var volume, filterType string
+	var layers []string
+	cmd := &cobra.Command{
+		Use:   "attach-overlay --volume <writable-volume> --layer <path>... [--filter-type unionfs|wcifs]",
+		Short: "HcsAttachOverlayFilter: overlay read-only layers onto a writable volume. ELEVATED",
+		Long: `HcsAttachOverlayFilter. Overlays read-only layer content onto a writable
+volume: the volume then presents the union, with writes landing in the volume.
+Layers topmost first. A layer under a mounted CIM volume is given by its path
+inside that volume (hcsshim's convention puts container content under Files, so
+that is usually <cim-volume>\Files); the layer id derives from the volume GUID,
+or from the directory name for a plain path. unionfs is what hcsshim uses for
+CIM layers; wcifs is the legacy directory-layer filter.
+
+The writable volume must carry a WcSandboxState directory or the attach fails
+with a bare path-not-found (measured) -- volumes prepared by setup-base or
+InitializeWritableLayer have one; on a fresh volume, create it. ELEVATED.`,
+		Args: cli.NoExtraArgs,
+		RunE: func(*cobra.Command, []string) error {
+			data, err := overlayLayerData(filterType, layers)
+			if err != nil {
+				return err
+			}
+			if err := requireDir("--volume", volume); err != nil {
+				return err
+			}
+			for _, l := range layers {
+				if err := requireDir("--layer", l); err != nil {
+					return err
+				}
+			}
+			// Without this the filter fails with a bare path-not-found (measured on
+			// 26200 and 29641); the check turns it into an error naming the fix.
+			if _, err := os.Stat(volumeJoin(volume, "WcSandboxState")); err != nil {
+				return cli.Usagef("--volume %s has no WcSandboxState directory -- the overlay filter requires one (create it, or use a volume prepared by setup-base or InitializeWritableLayer)", volume)
+			}
+			if err := computestorage.AttachOverlayFilter(context.Background(), volume, data); err != nil {
+				return fmt.Errorf("AttachOverlayFilter: %w", err)
+			}
+			e.Result(map[string]any{
+				"ok": true, "command": "storage attach-overlay", "volume": volume,
+				"filterType": string(data.FilterType), "layers": data.Layers,
+			}, func() {
+				fmt.Printf("overlay attached (%s)\n  volume: %s\n", data.FilterType, volume)
+			})
+			return nil
+		},
+	}
+	cli.StringOnce(cmd.Flags(), &volume, "volume", "writable volume to overlay onto")
+	cli.Required(cmd, "volume")
+	cli.StringArray(cmd.Flags(), &layers, "layer", "read-only layer path, topmost first, repeatable")
+	cli.StringOnce(cmd.Flags(), &filterType, "filter-type", "unionfs or wcifs (default unionfs)")
+	return cmd
+}
+
+func detachOverlayCmd(e cli.Emit) *cobra.Command {
+	var volume, filterType string
+	cmd := &cobra.Command{
+		Use:   "detach-overlay --volume <writable-volume> [--filter-type unionfs|wcifs]",
+		Short: "HcsDetachOverlayFilter. ELEVATED",
+		Long: `HcsDetachOverlayFilter: remove the overlay from a writable volume. The
+filter type must match the one attached. ELEVATED.`,
+		Args: cli.NoExtraArgs,
+		RunE: func(*cobra.Command, []string) error {
+			ft, err := normalizeFilterType(filterType)
+			if err != nil {
+				return err
+			}
+			if err := requireDir("--volume", volume); err != nil {
+				return err
+			}
+			// FileSystemFilterType is a named string type in an hcsshim-internal package;
+			// only an untyped constant converts to it without the import, hence the switch.
+			switch ft {
+			case "unionfs":
+				err = computestorage.DetachOverlayFilter(context.Background(), volume, "UnionFS")
+			case "wcifs":
+				err = computestorage.DetachOverlayFilter(context.Background(), volume, "WCIFS")
+			}
+			if err != nil {
+				return fmt.Errorf("DetachOverlayFilter: %w", err)
+			}
+			e.Result(map[string]any{
+				"ok": true, "command": "storage detach-overlay", "volume": volume, "filterType": filterName(ft),
+			}, func() {
+				fmt.Printf("overlay detached\n  volume: %s\n", volume)
+			})
+			return nil
+		},
+	}
+	cli.StringOnce(cmd.Flags(), &volume, "volume", "writable volume carrying the overlay")
+	cli.Required(cmd, "volume")
+	cli.StringOnce(cmd.Flags(), &filterType, "filter-type", "unionfs or wcifs (default unionfs)")
+	return cmd
+}
+
+func normalizeFilterType(s string) (string, error) {
+	switch strings.ToLower(s) {
+	case "", "unionfs":
+		return "unionfs", nil
+	case "wcifs":
+		return "wcifs", nil
+	default:
+		return "", cli.Usagef("--filter-type must be unionfs or wcifs, got %q", s)
+	}
+}
+
+func filterName(normalized string) string {
+	if normalized == "wcifs" {
+		return "WCIFS"
+	}
+	return "UnionFS"
+}
+
+// overlayLayerData builds the LayerData AttachOverlayFilter wants: FilterType plus layers
+// topmost first, no schema version (matching hcsshim's own overlay attach). A layer id is
+// the mount GUID when the path sits under a \\?\Volume{...} mount, else NameToGuid of the
+// directory name, the same derivation layerDataFor uses.
+func overlayLayerData(filterType string, layers []string) (computestorage.LayerData, error) {
+	var data computestorage.LayerData
+	ft, err := normalizeFilterType(filterType)
+	if err != nil {
+		return data, err
+	}
+	if ft == "wcifs" {
+		data.FilterType = "WCIFS"
+	} else {
+		data.FilterType = "UnionFS"
+	}
+	if len(layers) == 0 {
+		return data, cli.Usagef("--layer is required")
+	}
+	for _, l := range layers {
+		id, err := overlayLayerID(l)
+		if err != nil {
+			return data, err
+		}
+		data.Layers = append(data.Layers, computestorage.Layer{Id: id, Path: l})
+	}
+	return data, nil
+}
+
+// volumeJoin appends a name under a volume or directory path without filepath.Join's
+// cleaning, which mangles the \\?\ prefix.
+func volumeJoin(vol, name string) string {
+	if !strings.HasSuffix(vol, `\`) {
+		vol += `\`
+	}
+	return vol + name
+}
+
+func overlayLayerID(p string) (string, error) {
+	const volPrefix = `\\?\Volume{`
+	if strings.HasPrefix(p, volPrefix) {
+		i := strings.Index(p, "}")
+		if i < 0 {
+			return "", cli.Usagef(`--layer %s is not a \\?\Volume{guid} path`, p)
+		}
+		g, err := guid.FromString(p[len(volPrefix):i])
+		if err != nil {
+			return "", cli.Usagef("--layer %s: %v", p, err)
+		}
+		return g.String(), nil
+	}
+	g, err := hcsshim.NameToGuid(filepath.Base(p))
+	if err != nil {
+		return "", fmt.Errorf("NameToGuid(%s): %w", filepath.Base(p), err)
+	}
+	return g.ToString(), nil
 }
 
 // layerDataFor builds the LayerData every computestorage call wants: parents topmost first,
