@@ -125,9 +125,9 @@ exit codes: 0 ok, 1 ran and failed, 64 bad arguments (nothing attempted)
 					versionCmd(e)
 					return nil
 				}
-				return cli.Usagef("a verb group is required (image, layer, container, vm, guest, network, storage, info)")
+				return cli.Usagef("a verb group is required (%s)", cli.SubcommandNames(c))
 			}
-			return cli.Usagef("unknown verb group %q (expected: image, layer, container, vm, guest, network, storage, info)", args[0])
+			return cli.Usagef("unknown verb group %q (expected: %s)", args[0], cli.SubcommandNames(c))
 		},
 		// The contract owns error reporting: one document on stdout under --json, the
 		// message and usage on stderr. cobra's own printing would break both.

@@ -91,16 +91,24 @@ func NoExtraArgs(_ *cobra.Command, args []string) error {
 	return nil
 }
 
+// SubcommandNames lists cmd's visible subcommands for a diagnostic. Derived from the
+// registered commands, never hand-written, so the list a caller is offered cannot go stale.
+// Hidden commands and help are not part of the surface being offered.
+func SubcommandNames(cmd *cobra.Command) string {
+	var names []string
+	for _, c := range cmd.Commands() {
+		if c.Hidden || c.Name() == "help" {
+			continue
+		}
+		names = append(names, c.Name())
+	}
+	return strings.Join(names, ", ")
+}
+
 // Group builds a verb-group command. cobra routes to the verbs; a bare group or an unknown
 // verb is a usage error naming the verbs that exist. Without the RunE, cobra would print
 // help and exit 0 for a bare group, and exit 1 for an unknown verb.
 func Group(use, short string, verbs ...*cobra.Command) *cobra.Command {
-	name := strings.Fields(use)[0]
-	names := make([]string, len(verbs))
-	for i, v := range verbs {
-		names[i] = v.Name()
-	}
-	list := strings.Join(names, ", ")
 	cmd := &cobra.Command{
 		Use:   use,
 		Short: short,
@@ -110,11 +118,11 @@ func Group(use, short string, verbs ...*cobra.Command) *cobra.Command {
 		// flags lets the RunE name the actual mistake, the verb. Leaf verbs stay strict --
 		// the allowance is per-command, not inherited.
 		FParseErrWhitelist: cobra.FParseErrWhitelist{UnknownFlags: true},
-		RunE: func(_ *cobra.Command, args []string) error {
+		RunE: func(c *cobra.Command, args []string) error {
 			if len(args) == 0 {
-				return Usagef("%s needs a subcommand: %s", name, list)
+				return Usagef("%s needs a subcommand: %s", c.Name(), SubcommandNames(c))
 			}
-			return Usagef("unknown %s subcommand %q (expected %s)", name, args[0], list)
+			return Usagef("unknown %s subcommand %q (expected %s)", c.Name(), args[0], SubcommandNames(c))
 		},
 	}
 	cmd.AddCommand(verbs...)
