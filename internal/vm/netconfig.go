@@ -82,7 +82,8 @@ func newNetConfig(addrs []string, netw *hcn.HostComputeNetwork, iface string, dn
 }
 
 func netconfigCmd(e cli.Emit) *cobra.Command {
-	var id, dnsCSV, iface, storeDir string
+	var id *cli.GUIDFlag
+	var dnsCSV, iface, storeDir string
 	var timeout time.Duration
 	cmd := &cobra.Command{
 		Use:   "netconfig --id <guid> [--dns <ip,ip>] [--interface eth0] [--timeout 45s] [--store <dir>]",
@@ -93,18 +94,15 @@ which have no DHCP server. The result reports what the interface holds
 afterwards, not what was asked.`,
 		Args: cli.NoExtraArgs,
 		RunE: func(*cobra.Command, []string) error {
-			vmID, err := requireID(id)
-			if err != nil {
-				return err
-			}
 			dns, err := parseDNS(dnsCSV)
 			if err != nil {
 				return err
 			}
-			return netconfig(vmID, dns, iface, timeout, storeDir, e)
+			return netconfig(id.Value().String(), dns, iface, timeout, storeDir, e)
 		},
 	}
-	cli.StringOnce(cmd.Flags(), &id, "id", "VM id, a GUID")
+	id = cli.GUID(cmd.Flags(), "id", "VM id, a GUID")
+	cli.Required(cmd, "id")
 	cli.StringOnce(cmd.Flags(), &dnsCSV, "dns", "comma-separated IPv4 DNS servers to program")
 	cli.StringOnce(cmd.Flags(), &iface, "interface", "guest interface to program (default: the guest's own default)")
 	cli.Duration(cmd.Flags(), &timeout, "timeout", 45*time.Second, 0, "agent call deadline")

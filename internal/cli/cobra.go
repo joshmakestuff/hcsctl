@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Microsoft/go-winio/pkg/guid"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 )
@@ -104,6 +105,47 @@ func (d *durationValue) Set(s string) error {
 	*d.p = v
 	return nil
 }
+
+// GUID declares an option whose value must be a GUID, parsed at Set time so a bad one is
+// exit 64 through the flag-error path with one wording. A friendly name is never silently
+// accepted: the GUID doubles as the VM's hvsocket address, so a non-GUID id would make a VM
+// the printed id cannot reach. The handle carries both shapes a caller wants: Value() is the
+// struct guest dials; Value().String() is the canonical rendering, which is what store paths
+// must be built from, not the raw spelling. WasSet distinguishes absent from given for verbs
+// that mint an id when none is offered.
+func GUID(fs *pflag.FlagSet, name, usage string) *GUIDFlag {
+	g := &GUIDFlag{}
+	fs.Var(g, name, usage)
+	return g
+}
+
+type GUIDFlag struct {
+	v   guid.GUID
+	set bool
+}
+
+func (g *GUIDFlag) String() string {
+	if !g.set {
+		return ""
+	}
+	return g.v.String()
+}
+func (g *GUIDFlag) Type() string { return "guid" }
+
+func (g *GUIDFlag) Set(s string) error {
+	if g.set {
+		return errors.New("given more than once")
+	}
+	v, err := guid.FromString(s)
+	if err != nil {
+		return fmt.Errorf("not a GUID: %v", err)
+	}
+	g.v, g.set = v, true
+	return nil
+}
+
+func (g *GUIDFlag) Value() guid.GUID { return g.v }
+func (g *GUIDFlag) WasSet() bool     { return g.set }
 
 // argv is what optionShaped scans for the = spelling; a variable so tests can plant one.
 var argv = func() []string { return os.Args[1:] }

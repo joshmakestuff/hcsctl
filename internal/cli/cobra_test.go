@@ -81,6 +81,34 @@ func TestDurationValue(t *testing.T) {
 	}
 }
 
+func TestGUIDValue(t *testing.T) {
+	parse := func(args ...string) (*GUIDFlag, error) {
+		fs := pflag.NewFlagSet("t", pflag.ContinueOnError)
+		fs.Usage = func() {}
+		g := GUID(fs, "id", "")
+		return g, fs.Parse(args)
+	}
+
+	if g, err := parse(); err != nil || g.WasSet() {
+		t.Fatalf("absent flag: set=%v err=%v", g.WasSet(), err)
+	}
+	// The canonical rendering, not the raw spelling, is what flows on: store paths are
+	// built from it.
+	g, err := parse("--id", "EB95E0A7-EE3E-4C7B-BA10-4089B4771083")
+	if err != nil || !g.WasSet() {
+		t.Fatalf("valid GUID rejected: %v", err)
+	}
+	if s := g.Value().String(); s != "eb95e0a7-ee3e-4c7b-ba10-4089b4771083" {
+		t.Fatalf("canonical rendering = %q", s)
+	}
+	if _, err := parse("--id", "not-a-guid"); err == nil {
+		t.Fatal("non-GUID accepted")
+	}
+	if _, err := parse("--id", "eb95e0a7-ee3e-4c7b-ba10-4089b4771083", "--id", "eb95e0a7-ee3e-4c7b-ba10-4089b4771083"); err == nil {
+		t.Fatal("repeated --id accepted")
+	}
+}
+
 func TestStringArrayEqualsSpelling(t *testing.T) {
 	plantArgv(t, "container", "run", "--env=A=--x", "--env", "B=2")
 	var vals []string

@@ -32,7 +32,7 @@ func Command(e cli.Emit) *cobra.Command {
 }
 
 func infoCmd(e cli.Emit) *cobra.Command {
-	var vmidRaw string
+	var vmid *cli.GUIDFlag
 	var timeout time.Duration
 	cmd := &cobra.Command{
 		Use:   "info --vmid <guid> [--timeout 35s]",
@@ -41,23 +41,18 @@ func infoCmd(e cli.Emit) *cobra.Command {
 no DHCP lease and no elevation; needs hcsguest in the image.`,
 		Args: cli.NoExtraArgs,
 		RunE: func(*cobra.Command, []string) error {
-			if err := cli.Require("--vmid", vmidRaw); err != nil {
-				return err
-			}
-			vmid, err := guid.FromString(vmidRaw)
-			if err != nil {
-				return cli.Usagef("--vmid is not a GUID: %v", err)
-			}
-			return info(vmid, timeout, e)
+			return info(vmid.Value(), timeout, e)
 		},
 	}
-	cli.StringOnce(cmd.Flags(), &vmidRaw, "vmid", "the VM's id, a GUID -- also its hvsocket address")
+	vmid = cli.GUID(cmd.Flags(), "vmid", "the VM's id, a GUID -- also its hvsocket address")
+	cli.Required(cmd, "vmid")
 	cli.Duration(cmd.Flags(), &timeout, "timeout", 35*time.Second, 0, "dial budget, a positive duration, e.g. 10s")
 	return cmd
 }
 
 func execCmd(e cli.Emit) *cobra.Command {
-	var vmidRaw, cmdline, cwd string
+	var vmid *cli.GUIDFlag
+	var cmdline, cwd string
 	var env []string
 	var timeout time.Duration
 	cmd := &cobra.Command{
@@ -67,21 +62,12 @@ func execCmd(e cli.Emit) *cobra.Command {
 guest's exit code is exitCode in the document, never hcsctl's.`,
 		Args: cli.NoExtraArgs,
 		RunE: func(*cobra.Command, []string) error {
-			if err := cli.Require("--vmid", vmidRaw); err != nil {
-				return err
-			}
-			vmid, err := guid.FromString(vmidRaw)
-			if err != nil {
-				return cli.Usagef("--vmid is not a GUID: %v", err)
-			}
-			if err := cli.Require("--cmd", cmdline); err != nil {
-				return err
-			}
-			return execVerb(vmid, cmdline, cwd, env, timeout, e)
+			return execVerb(vmid.Value(), cmdline, cwd, env, timeout, e)
 		},
 	}
-	cli.StringOnce(cmd.Flags(), &vmidRaw, "vmid", "the VM's id, a GUID -- also its hvsocket address")
+	vmid = cli.GUID(cmd.Flags(), "vmid", "the VM's id, a GUID -- also its hvsocket address")
 	cli.StringOnce(cmd.Flags(), &cmdline, "cmd", "command line to run in the guest")
+	cli.Required(cmd, "vmid", "cmd")
 	cli.StringOnce(cmd.Flags(), &cwd, "cwd", "working directory in the guest")
 	cli.StringArray(cmd.Flags(), &env, "env", "NAME=value for the guest process, repeatable")
 	// The one-second floor is the wire's: the request carries whole seconds, so anything
@@ -91,7 +77,8 @@ guest's exit code is exitCode in the document, never hcsctl's.`,
 }
 
 func forwardCmd(e cli.Emit) *cobra.Command {
-	var vmidRaw, portRaw, listenAddr string
+	var vmid *cli.GUIDFlag
+	var portRaw, listenAddr string
 	var dialTimeout time.Duration
 	cmd := &cobra.Command{
 		Use:   "forward --vmid <guid> --port <n> [--listen 127.0.0.1:2222] [--timeout <dur>]",
@@ -100,25 +87,16 @@ func forwardCmd(e cli.Emit) *cobra.Command {
 loopback, which the guest firewall does not filter.`,
 		Args: cli.NoExtraArgs,
 		RunE: func(*cobra.Command, []string) error {
-			if err := cli.Require("--vmid", vmidRaw); err != nil {
-				return err
-			}
-			vmid, err := guid.FromString(vmidRaw)
-			if err != nil {
-				return cli.Usagef("--vmid is not a GUID: %v", err)
-			}
-			if err := cli.Require("--port", portRaw); err != nil {
-				return err
-			}
 			port, err := strconv.Atoi(portRaw)
 			if err != nil || port < 1 || port > 65535 {
 				return cli.Usagef("--port must be a TCP port between 1 and 65535")
 			}
-			return forward(vmid, port, listenAddr, dialTimeout, e)
+			return forward(vmid.Value(), port, listenAddr, dialTimeout, e)
 		},
 	}
-	cli.StringOnce(cmd.Flags(), &vmidRaw, "vmid", "the VM's id, a GUID -- also its hvsocket address")
+	vmid = cli.GUID(cmd.Flags(), "vmid", "the VM's id, a GUID -- also its hvsocket address")
 	cli.StringOnce(cmd.Flags(), &portRaw, "port", "guest TCP port, 1 to 65535")
+	cli.Required(cmd, "vmid", "port")
 	cli.StringOnce(cmd.Flags(), &listenAddr, "listen", "host listen address; a bare port means 127.0.0.1")
 	cli.Duration(cmd.Flags(), &dialTimeout, "timeout", 35*time.Second, 0, "dial budget per connection, a positive duration, e.g. 10s")
 	return cmd

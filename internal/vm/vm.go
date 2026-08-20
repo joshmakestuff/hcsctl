@@ -129,20 +129,6 @@ func writeState(s *store.Store, st state) error {
 	return os.WriteFile(filepath.Join(vmDir(s, st.ID), "state.json"), b, 0o644)
 }
 
-// requireID takes --id's value and insists it is a GUID. A friendly name would not be usable
-// as an hvsocket address, and silently accepting one would produce a VM that `guest info`
-// cannot reach with the id this tool printed.
-func requireID(raw string) (string, error) {
-	if err := cli.Require("--id", raw); err != nil {
-		return "", err
-	}
-	g, err := guid.FromString(raw)
-	if err != nil {
-		return "", cli.Usagef("--id is not a GUID: %v", err)
-	}
-	return g.String(), nil
-}
-
 // -- create ------------------------------------------------------------------------------
 
 type createResult struct {
@@ -182,7 +168,8 @@ type createOptions struct {
 }
 
 func createCmd(e cli.Emit) *cobra.Command {
-	var vhdx, id, cpusStr, memoryStr, network, dnsCSV, serialPipe, storeDir string
+	var vhdx, cpusStr, memoryStr, network, dnsCSV, serialPipe, storeDir string
+	var id *cli.GUIDFlag
 	var noCopyOnWrite bool
 	var labelVals []string
 	cmd := &cobra.Command{
@@ -209,9 +196,6 @@ and never interpreted -- record an owner pid; scavenge only on proof it is dead.
 				return err
 			}
 
-			if err := cli.Require("--vhdx", vhdx); err != nil {
-				return err
-			}
 			base, err := filepath.Abs(vhdx)
 			if err != nil {
 				return cli.Usagef("--vhdx %v", err)
@@ -221,10 +205,8 @@ and never interpreted -- record an owner pid; scavenge only on proof it is dead.
 			}
 
 			vmID := ""
-			if id != "" {
-				if vmID, err = requireID(id); err != nil {
-					return err
-				}
+			if id.WasSet() {
+				vmID = id.Value().String()
 			} else {
 				g, gerr := guid.NewV4()
 				if gerr != nil {
@@ -276,7 +258,8 @@ and never interpreted -- record an owner pid; scavenge only on proof it is dead.
 		},
 	}
 	cli.StringOnce(cmd.Flags(), &vhdx, "vhdx", "Gen 2 VHDX the VM boots")
-	cli.StringOnce(cmd.Flags(), &id, "id", "VM id, a GUID; also its hvsocket address (default: generated)")
+	cli.Required(cmd, "vhdx")
+	id = cli.GUID(cmd.Flags(), "id", "VM id, a GUID; also its hvsocket address (default: generated)")
 	cli.StringOnce(cmd.Flags(), &cpusStr, "cpus", "virtual processor count (default 2)")
 	cli.StringOnce(cmd.Flags(), &memoryStr, "memory-mb", "memory in MB (default 2048)")
 	cli.StringOnce(cmd.Flags(), &network, "network", "attach an endpoint on this network; 'default' picks the Hyper-V Default Switch")
@@ -555,7 +538,8 @@ type startResult struct {
 }
 
 func startCmd(e cli.Emit) *cobra.Command {
-	var id, storeDir string
+	var id *cli.GUIDFlag
+	var storeDir string
 	cmd := &cobra.Command{
 		Use:   "start --id <guid> [--store <dir>]",
 		Short: "start a VM; recreates the compute system if it exited",
@@ -563,14 +547,11 @@ func startCmd(e cli.Emit) *cobra.Command {
 applied and attested static IPv4 networking. Other starts mean firmware running.`,
 		Args: cli.NoExtraArgs,
 		RunE: func(*cobra.Command, []string) error {
-			vmID, err := requireID(id)
-			if err != nil {
-				return err
-			}
-			return start(vmID, storeDir, e)
+			return start(id.Value().String(), storeDir, e)
 		},
 	}
-	cli.StringOnce(cmd.Flags(), &id, "id", "VM id, a GUID")
+	id = cli.GUID(cmd.Flags(), "id", "VM id, a GUID")
+	cli.Required(cmd, "id")
 	cli.StringOnce(cmd.Flags(), &storeDir, "store", "store directory")
 	return cmd
 }
@@ -655,7 +636,8 @@ type stopResult struct {
 }
 
 func stopCmd(e cli.Emit) *cobra.Command {
-	var id, storeDir string
+	var id *cli.GUIDFlag
+	var storeDir string
 	var force bool
 	cmd := &cobra.Command{
 		Use:   "stop --id <guid> [--force] [--store <dir>]",
@@ -664,14 +646,11 @@ func stopCmd(e cli.Emit) *cobra.Command {
 guest that lacks one cannot be asked. --force powers it off.`,
 		Args: cli.NoExtraArgs,
 		RunE: func(*cobra.Command, []string) error {
-			vmID, err := requireID(id)
-			if err != nil {
-				return err
-			}
-			return stop(vmID, force, e)
+			return stop(id.Value().String(), force, e)
 		},
 	}
-	cli.StringOnce(cmd.Flags(), &id, "id", "VM id, a GUID")
+	id = cli.GUID(cmd.Flags(), "id", "VM id, a GUID")
+	cli.Required(cmd, "id")
 	cmd.Flags().BoolVar(&force, "force", false, "power off instead of asking the guest")
 	cli.StringOnce(cmd.Flags(), &storeDir, "store", "store directory")
 	return cmd
@@ -725,7 +704,8 @@ type removeResult struct {
 }
 
 func rmCmd(e cli.Emit) *cobra.Command {
-	var id, storeDir string
+	var id *cli.GUIDFlag
+	var storeDir string
 	var force bool
 	cmd := &cobra.Command{
 		Use:   "rm --id <guid> [--force] [--store <dir>]",
@@ -734,14 +714,11 @@ func rmCmd(e cli.Emit) *cobra.Command {
 base image is never removed.`,
 		Args: cli.NoExtraArgs,
 		RunE: func(*cobra.Command, []string) error {
-			vmID, err := requireID(id)
-			if err != nil {
-				return err
-			}
-			return remove(vmID, force, storeDir, e)
+			return remove(id.Value().String(), force, storeDir, e)
 		},
 	}
-	cli.StringOnce(cmd.Flags(), &id, "id", "VM id, a GUID")
+	id = cli.GUID(cmd.Flags(), "id", "VM id, a GUID")
+	cli.Required(cmd, "id")
 	cmd.Flags().BoolVar(&force, "force", false, "remove even when terminate, endpoint delete or the directory removal fails")
 	cli.StringOnce(cmd.Flags(), &storeDir, "store", "store directory")
 	return cmd
@@ -855,7 +832,8 @@ type ipResult struct {
 const ipPollInterval = 2 * time.Second
 
 func ipCmd(e cli.Emit) *cobra.Command {
-	var id, storeDir string
+	var id *cli.GUIDFlag
+	var storeDir string
 	var timeout time.Duration
 	cmd := &cobra.Command{
 		Use:   "ip --id <guid> [--timeout 60s] [--store <dir>]",
@@ -864,14 +842,11 @@ func ipCmd(e cli.Emit) *cobra.Command {
 used only to identify the guest address, never returned without guest evidence.`,
 		Args: cli.NoExtraArgs,
 		RunE: func(*cobra.Command, []string) error {
-			vmID, err := requireID(id)
-			if err != nil {
-				return err
-			}
-			return ip(vmID, timeout, storeDir, e)
+			return ip(id.Value().String(), timeout, storeDir, e)
 		},
 	}
-	cli.StringOnce(cmd.Flags(), &id, "id", "VM id, a GUID")
+	id = cli.GUID(cmd.Flags(), "id", "VM id, a GUID")
+	cli.Required(cmd, "id")
 	cli.Duration(cmd.Flags(), &timeout, "timeout", 60*time.Second, 0, "how long to wait for an address")
 	cli.StringOnce(cmd.Flags(), &storeDir, "store", "store directory")
 	return cmd
@@ -1124,20 +1099,18 @@ type inspectResult struct {
 }
 
 func inspectCmd(e cli.Emit) *cobra.Command {
-	var id, storeDir string
+	var id *cli.GUIDFlag
+	var storeDir string
 	cmd := &cobra.Command{
 		Use:   "inspect --id <guid> [--store <dir>]",
 		Short: "the store's record plus the HCS properties",
 		Args:  cli.NoExtraArgs,
 		RunE: func(*cobra.Command, []string) error {
-			vmID, err := requireID(id)
-			if err != nil {
-				return err
-			}
-			return inspect(vmID, storeDir, e)
+			return inspect(id.Value().String(), storeDir, e)
 		},
 	}
-	cli.StringOnce(cmd.Flags(), &id, "id", "VM id, a GUID")
+	id = cli.GUID(cmd.Flags(), "id", "VM id, a GUID")
+	cli.Required(cmd, "id")
 	cli.StringOnce(cmd.Flags(), &storeDir, "store", "store directory")
 	return cmd
 }

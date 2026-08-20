@@ -35,7 +35,8 @@ type consoleResult struct {
 }
 
 func consoleCmd(e cli.Emit) *cobra.Command {
-	var id, storeDir string
+	var id *cli.GUIDFlag
+	var storeDir string
 	var noInput bool
 	var timeout time.Duration
 	cmd := &cobra.Command{
@@ -49,14 +50,11 @@ Nothing is buffered, so a console attached after boot has missed the boot.
 Every VM gets a COM port; --serial-pipe at create time overrides the name.`,
 		Args: cli.NoExtraArgs,
 		RunE: func(*cobra.Command, []string) error {
-			vmID, err := requireID(id)
-			if err != nil {
-				return err
-			}
-			return console(vmID, noInput, timeout, storeDir, e)
+			return console(id.Value().String(), noInput, timeout, storeDir, e)
 		},
 	}
-	cli.StringOnce(cmd.Flags(), &id, "id", "VM id, a GUID")
+	id = cli.GUID(cmd.Flags(), "id", "VM id, a GUID")
+	cli.Required(cmd, "id")
 	cmd.Flags().BoolVar(&noInput, "no-input", false, "watch only; do not forward stdin to the guest")
 	cli.Duration(cmd.Flags(), &timeout, "timeout", 15*time.Second, 0, "how long to wait for the pipe to accept a connection")
 	cli.StringOnce(cmd.Flags(), &storeDir, "store", "store directory")
