@@ -31,6 +31,10 @@ that need elevation say so in `hcsctl help`; nothing escalates on its own.
 - `vm` commands are unelevated; membership of Hyper-V Administrators is enough.
 - `image pull`, `image ls`, `network ls|endpoints|inspect`, `guest` commands and `info` are
   unelevated.
+- **`cim create|merge|usage|verify|destroy` are unelevated** -- building and committing a CIM,
+  security descriptors included, needs no privilege (measured). `cim mount|unmount` are
+  elevated; the specific right is unidentified -- `SeManageVolumePrivilege` is not sufficient
+  (measured).
 
 ## Container isolation
 
@@ -93,6 +97,23 @@ hcsctl vm start  --id <guid>
 hcsctl vm ip     --id <guid>
 hcsctl guest exec --vmid <guid> --cmd "uname -a"
 ```
+
+Build a CIM from a directory tree (unelevated), mount it (elevated), and clean up. The mount
+volume GUID derives deterministically from the CIM path, so `unmount` takes the same
+addressing `mount` did -- no need to have kept the volume path:
+
+```
+hcsctl cim create  --dir C:\src --cim E:\cims\base.cim
+hcsctl cim mount   --cim E:\cims\base.cim                  # elevated; prints \\?\Volume{...}\
+hcsctl cim unmount --cim E:\cims\base.cim                  # elevated
+hcsctl cim destroy --cim E:\cims\base.cim
+```
+
+`cim create --block`, `cim merge`, and `cim verify` operate on block CIMs, which the host must
+support (`hcsctl info` reports `blockCimSupported`/`mergedCimSupported`/`verifiedCimSupported`;
+no shipped Windows build does yet). A tree with alternate-data-stream payloads fails
+`cim create` loudly: the payload cannot be written through public hcsshim `pkg/cimfs`, and
+dropping it silently would be worse. Extended attributes are not captured.
 
 Drive it from a program:
 
