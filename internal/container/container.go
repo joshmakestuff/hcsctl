@@ -116,17 +116,19 @@ const envUsage = "NAME=value, repeatable. The value keeps everything after the f
 // runOptions is create's option set plus run's exec-shaped extras.
 type runOptions struct {
 	createOptions
-	cwd, user, timeout string
-	env                []string
-	keep               bool
+	cwd, user string
+	timeout   time.Duration
+	env       []string
+	keep      bool
 }
 
 // execOptions is the target trio plus the process to run and how to attach to it.
 type execOptions struct {
 	targetOptions
-	cmd, cwd, user, timeout string
-	env                     []string
-	interactive, tty        bool
+	cmd, cwd, user   string
+	timeout          time.Duration
+	env              []string
+	interactive, tty bool
 }
 
 func runCmd(e cli.Emit) *cobra.Command {
@@ -161,7 +163,7 @@ mutation. --timeout bounds the primary command; absent means wait forever.`,
 	cli.StringOnce(cmd.Flags(), &o.cwd, "cwd", "guest working directory")
 	cli.StringOnce(cmd.Flags(), &o.user, "user", "guest user")
 	cli.StringArray(cmd.Flags(), &o.env, "env", envUsage)
-	cli.StringOnce(cmd.Flags(), &o.timeout, "timeout", "bound the primary command, e.g. 30s or 2m; absent means wait forever")
+	cli.Duration(cmd.Flags(), &o.timeout, "timeout", 0, 0, "bound the primary command, e.g. 30s or 2m; absent means wait forever")
 	cmd.Flags().BoolVar(&o.keep, "keep", false, "leave the container in place instead of tearing it down")
 	return cmd
 }
@@ -229,7 +231,7 @@ func execCmd(e cli.Emit) *cobra.Command {
 	cli.StringOnce(cmd.Flags(), &o.cwd, "cwd", "guest working directory")
 	cli.StringOnce(cmd.Flags(), &o.user, "user", "guest user")
 	cli.StringArray(cmd.Flags(), &o.env, "env", envUsage)
-	cli.StringOnce(cmd.Flags(), &o.timeout, "timeout", "bound the command, e.g. 30s or 2m; absent means wait forever")
+	cli.Duration(cmd.Flags(), &o.timeout, "timeout", 0, 0, "bound the command, e.g. 30s or 2m; absent means wait forever")
 	cmd.Flags().BoolVar(&o.interactive, "interactive", false, "forward this process's stdin; close the guest side on EOF")
 	cmd.Flags().BoolVar(&o.tty, "tty", false, "with --interactive: an emulated guest console with the host terminal in raw mode")
 	return cmd
@@ -1349,20 +1351,6 @@ func parseEnv(vals []string) (map[string]string, error) {
 	return env, nil
 }
 
-// parseTimeout reads --timeout as a Go duration. Zero means absent, which means wait
-// forever -- the default an integration's log-following exec depends on, so the bound is
-// strictly opt-in.
-func parseTimeout(v string) (time.Duration, error) {
-	if v == "" {
-		return 0, nil
-	}
-	d, err := time.ParseDuration(v)
-	if err != nil || d <= 0 {
-		return 0, cli.Usagef("--timeout wants a positive duration like 30s or 2m, got %q", v)
-	}
-	return d, nil
-}
-
 // killWait bounds the wait for a Kill to take effect. A process that survives its kill this
 // long is a failure to report, not a thing to wait harder on.
 const killWait = 10 * time.Second
@@ -1567,10 +1555,7 @@ func exec(o *execOptions, e cli.Emit) error {
 	if err != nil {
 		return err
 	}
-	timeout, err := parseTimeout(o.timeout)
-	if err != nil {
-		return err
-	}
+	timeout := o.timeout
 	if _, err := readState(st, id); err != nil {
 		return err
 	}
@@ -1702,10 +1687,7 @@ func run(o *runOptions, e cli.Emit) error {
 	if err != nil {
 		return err
 	}
-	timeout, err := parseTimeout(o.timeout)
-	if err != nil {
-		return err
-	}
+	timeout := o.timeout
 	st, err := store.New(o.storeDir)
 	if err != nil {
 		return err

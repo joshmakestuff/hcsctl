@@ -32,7 +32,8 @@ func Command(e cli.Emit) *cobra.Command {
 }
 
 func infoCmd(e cli.Emit) *cobra.Command {
-	var vmidRaw, timeoutRaw string
+	var vmidRaw string
+	var timeout time.Duration
 	cmd := &cobra.Command{
 		Use:   "info --vmid <guid> [--timeout 35s]",
 		Short: "what a guest VM says about itself, over a Hyper-V socket",
@@ -47,25 +48,18 @@ no DHCP lease and no elevation; needs hcsguest in the image.`,
 			if err != nil {
 				return cli.Usagef("--vmid is not a GUID: %v", err)
 			}
-			timeout := 35 * time.Second
-			if timeoutRaw != "" {
-				d, perr := time.ParseDuration(timeoutRaw)
-				if perr != nil || d <= 0 {
-					return cli.Usagef("--timeout must be a positive duration, e.g. 10s")
-				}
-				timeout = d
-			}
 			return info(vmid, timeout, e)
 		},
 	}
 	cli.StringOnce(cmd.Flags(), &vmidRaw, "vmid", "the VM's id, a GUID -- also its hvsocket address")
-	cli.StringOnce(cmd.Flags(), &timeoutRaw, "timeout", "dial budget, a positive duration, e.g. 10s")
+	cli.Duration(cmd.Flags(), &timeout, "timeout", 35*time.Second, 0, "dial budget, a positive duration, e.g. 10s")
 	return cmd
 }
 
 func execCmd(e cli.Emit) *cobra.Command {
-	var vmidRaw, cmdline, cwd, timeoutRaw string
+	var vmidRaw, cmdline, cwd string
 	var env []string
+	var timeout time.Duration
 	cmd := &cobra.Command{
 		Use:   `exec --vmid <guid> --cmd "..." [--cwd D] [--env NAME=value]... [--timeout 30s]`,
 		Short: "run a command in the guest",
@@ -83,14 +77,6 @@ guest's exit code is exitCode in the document, never hcsctl's.`,
 			if err := cli.Require("--cmd", cmdline); err != nil {
 				return err
 			}
-			var timeout time.Duration
-			if timeoutRaw != "" {
-				d, perr := time.ParseDuration(timeoutRaw)
-				if perr != nil || d < time.Second {
-					return cli.Usagef("--timeout must be a duration of at least one second, e.g. 30s")
-				}
-				timeout = d
-			}
 			return execVerb(vmid, cmdline, cwd, env, timeout, e)
 		},
 	}
@@ -98,12 +84,15 @@ guest's exit code is exitCode in the document, never hcsctl's.`,
 	cli.StringOnce(cmd.Flags(), &cmdline, "cmd", "command line to run in the guest")
 	cli.StringOnce(cmd.Flags(), &cwd, "cwd", "working directory in the guest")
 	cli.StringArray(cmd.Flags(), &env, "env", "NAME=value for the guest process, repeatable")
-	cli.StringOnce(cmd.Flags(), &timeoutRaw, "timeout", "bound on the command, at least one second, e.g. 30s")
+	// The one-second floor is the wire's: the request carries whole seconds, so anything
+	// less truncates to unbounded.
+	cli.Duration(cmd.Flags(), &timeout, "timeout", 0, time.Second, "bound on the command, at least one second, e.g. 30s; absent means unbounded")
 	return cmd
 }
 
 func forwardCmd(e cli.Emit) *cobra.Command {
-	var vmidRaw, portRaw, listenAddr, timeoutRaw string
+	var vmidRaw, portRaw, listenAddr string
+	var dialTimeout time.Duration
 	cmd := &cobra.Command{
 		Use:   "forward --vmid <guid> --port <n> [--listen 127.0.0.1:2222] [--timeout <dur>]",
 		Short: "publish a guest TCP port on the host",
@@ -125,21 +114,13 @@ loopback, which the guest firewall does not filter.`,
 			if err != nil || port < 1 || port > 65535 {
 				return cli.Usagef("--port must be a TCP port between 1 and 65535")
 			}
-			dialTimeout := 35 * time.Second
-			if timeoutRaw != "" {
-				d, perr := time.ParseDuration(timeoutRaw)
-				if perr != nil || d <= 0 {
-					return cli.Usagef("--timeout must be a positive duration, e.g. 10s")
-				}
-				dialTimeout = d
-			}
 			return forward(vmid, port, listenAddr, dialTimeout, e)
 		},
 	}
 	cli.StringOnce(cmd.Flags(), &vmidRaw, "vmid", "the VM's id, a GUID -- also its hvsocket address")
 	cli.StringOnce(cmd.Flags(), &portRaw, "port", "guest TCP port, 1 to 65535")
 	cli.StringOnce(cmd.Flags(), &listenAddr, "listen", "host listen address; a bare port means 127.0.0.1")
-	cli.StringOnce(cmd.Flags(), &timeoutRaw, "timeout", "dial budget per connection, a positive duration, e.g. 10s")
+	cli.Duration(cmd.Flags(), &dialTimeout, "timeout", 35*time.Second, 0, "dial budget per connection, a positive duration, e.g. 10s")
 	return cmd
 }
 

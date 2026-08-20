@@ -9,6 +9,7 @@ import (
 	"os"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
@@ -60,6 +61,47 @@ func (a *arrayValue) Set(s string) error {
 		return err
 	}
 	*a.p = append(*a.p, s)
+	return nil
+}
+
+// Duration declares a duration option parsed and bounded at parse time, so a bad value is
+// exit 64 through the flag-error path before any RunE runs, with one wording everywhere.
+// def is the value when the option is absent; zero means the verb treats absence specially
+// (unbounded, wait forever) and suppresses pflag's "(default ...)" in help. min is a floor
+// beyond positive -- guest exec's wire protocol truncates to whole seconds, so it takes 1s;
+// everything else passes 0 and accepts any positive duration.
+func Duration(fs *pflag.FlagSet, p *time.Duration, name string, def, min time.Duration, usage string) {
+	*p = def
+	fs.Var(&durationValue{p: p, min: min}, name, usage)
+}
+
+type durationValue struct {
+	p   *time.Duration
+	min time.Duration
+	set bool
+}
+
+func (d *durationValue) String() string {
+	if *d.p == 0 {
+		return ""
+	}
+	return d.p.String()
+}
+func (d *durationValue) Type() string { return "duration" }
+
+func (d *durationValue) Set(s string) error {
+	if d.set {
+		return errors.New("given more than once")
+	}
+	v, err := time.ParseDuration(s)
+	if err != nil || v <= 0 {
+		return errors.New("must be a positive duration, e.g. 10s")
+	}
+	if v < d.min {
+		return fmt.Errorf("must be a duration of at least %s, e.g. 30s", d.min)
+	}
+	d.set = true
+	*d.p = v
 	return nil
 }
 

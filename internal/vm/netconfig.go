@@ -82,7 +82,8 @@ func newNetConfig(addrs []string, netw *hcn.HostComputeNetwork, iface string, dn
 }
 
 func netconfigCmd(e cli.Emit) *cobra.Command {
-	var id, dnsCSV, iface, timeoutStr, storeDir string
+	var id, dnsCSV, iface, storeDir string
+	var timeout time.Duration
 	cmd := &cobra.Command{
 		Use:   "netconfig --id <guid> [--dns <ip,ip>] [--interface eth0] [--timeout 45s] [--store <dir>]",
 		Short: "program the guest's interface with the endpoint's HNS allocation",
@@ -96,14 +97,6 @@ afterwards, not what was asked.`,
 			if err != nil {
 				return err
 			}
-			timeout := 45 * time.Second
-			if timeoutStr != "" {
-				d, perr := time.ParseDuration(timeoutStr)
-				if perr != nil || d <= 0 {
-					return cli.Usagef("--timeout must be a positive duration, e.g. 45s")
-				}
-				timeout = d
-			}
 			dns, err := parseDNS(dnsCSV)
 			if err != nil {
 				return err
@@ -114,7 +107,7 @@ afterwards, not what was asked.`,
 	cli.StringOnce(cmd.Flags(), &id, "id", "VM id, a GUID")
 	cli.StringOnce(cmd.Flags(), &dnsCSV, "dns", "comma-separated IPv4 DNS servers to program")
 	cli.StringOnce(cmd.Flags(), &iface, "interface", "guest interface to program (default: the guest's own default)")
-	cli.StringOnce(cmd.Flags(), &timeoutStr, "timeout", "agent call deadline (default 45s)")
+	cli.Duration(cmd.Flags(), &timeout, "timeout", 45*time.Second, 0, "agent call deadline")
 	cli.StringOnce(cmd.Flags(), &storeDir, "store", "store directory")
 	return cmd
 }

@@ -855,7 +855,8 @@ type ipResult struct {
 const ipPollInterval = 2 * time.Second
 
 func ipCmd(e cli.Emit) *cobra.Command {
-	var id, timeoutStr, storeDir string
+	var id, storeDir string
+	var timeout time.Duration
 	cmd := &cobra.Command{
 		Use:   "ip --id <guid> [--timeout 60s] [--store <dir>]",
 		Short: "wait for guest-reported IPv4 addresses and print them",
@@ -867,19 +868,11 @@ used only to identify the guest address, never returned without guest evidence.`
 			if err != nil {
 				return err
 			}
-			timeout := 60 * time.Second
-			if timeoutStr != "" {
-				d, perr := time.ParseDuration(timeoutStr)
-				if perr != nil || d <= 0 {
-					return cli.Usagef("--timeout must be a positive duration, e.g. 60s")
-				}
-				timeout = d
-			}
 			return ip(vmID, timeout, storeDir, e)
 		},
 	}
 	cli.StringOnce(cmd.Flags(), &id, "id", "VM id, a GUID")
-	cli.StringOnce(cmd.Flags(), &timeoutStr, "timeout", "how long to wait for an address (default 60s)")
+	cli.Duration(cmd.Flags(), &timeout, "timeout", 60*time.Second, 0, "how long to wait for an address")
 	cli.StringOnce(cmd.Flags(), &storeDir, "store", "store directory")
 	return cmd
 }

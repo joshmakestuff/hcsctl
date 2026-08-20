@@ -3,6 +3,7 @@ package cli
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/spf13/pflag"
 )
@@ -48,6 +49,35 @@ func TestStringOnceRejectsRepeats(t *testing.T) {
 	err := fs.Parse([]string{"--ref", "a", "--ref", "b"})
 	if err == nil || !strings.Contains(err.Error(), "more than once") {
 		t.Fatalf("repeat accepted: %v", err)
+	}
+}
+
+func TestDurationValue(t *testing.T) {
+	parse := func(def, min time.Duration, args ...string) (time.Duration, error) {
+		var d time.Duration
+		fs := pflag.NewFlagSet("t", pflag.ContinueOnError)
+		fs.Usage = func() {}
+		Duration(fs, &d, "timeout", def, min, "")
+		return d, fs.Parse(args)
+	}
+
+	if d, err := parse(35*time.Second, 0); err != nil || d != 35*time.Second {
+		t.Fatalf("absent flag: d=%v err=%v, want the 35s default", d, err)
+	}
+	if d, err := parse(35*time.Second, 0, "--timeout", "10s"); err != nil || d != 10*time.Second {
+		t.Fatalf("given flag: d=%v err=%v, want 10s", d, err)
+	}
+	if _, err := parse(0, 0, "--timeout", "soon"); err == nil {
+		t.Fatal("unparseable duration accepted")
+	}
+	if _, err := parse(0, 0, "--timeout", "-3s"); err == nil {
+		t.Fatal("negative duration accepted")
+	}
+	if _, err := parse(0, time.Second, "--timeout", "500ms"); err == nil {
+		t.Fatal("sub-floor duration accepted")
+	}
+	if _, err := parse(0, 0, "--timeout", "5s", "--timeout", "6s"); err == nil {
+		t.Fatal("repeated --timeout accepted")
 	}
 }
 

@@ -35,8 +35,9 @@ type consoleResult struct {
 }
 
 func consoleCmd(e cli.Emit) *cobra.Command {
-	var id, timeoutStr, storeDir string
+	var id, storeDir string
 	var noInput bool
+	var timeout time.Duration
 	cmd := &cobra.Command{
 		Use:   "console --id <guid> [--no-input] [--timeout 15s] [--store <dir>]",
 		Short: "attach to the VM's serial console over its COM1 named pipe",
@@ -52,20 +53,12 @@ Every VM gets a COM port; --serial-pipe at create time overrides the name.`,
 			if err != nil {
 				return err
 			}
-			timeout := 15 * time.Second
-			if timeoutStr != "" {
-				d, perr := time.ParseDuration(timeoutStr)
-				if perr != nil || d <= 0 {
-					return cli.Usagef("--timeout must be a positive duration, e.g. 10s")
-				}
-				timeout = d
-			}
 			return console(vmID, noInput, timeout, storeDir, e)
 		},
 	}
 	cli.StringOnce(cmd.Flags(), &id, "id", "VM id, a GUID")
 	cmd.Flags().BoolVar(&noInput, "no-input", false, "watch only; do not forward stdin to the guest")
-	cli.StringOnce(cmd.Flags(), &timeoutStr, "timeout", "how long to wait for the pipe to accept a connection (default 15s)")
+	cli.Duration(cmd.Flags(), &timeout, "timeout", 15*time.Second, 0, "how long to wait for the pipe to accept a connection")
 	cli.StringOnce(cmd.Flags(), &storeDir, "store", "store directory")
 	return cmd
 }
