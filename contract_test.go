@@ -98,6 +98,8 @@ var usageCases = []struct {
 }{
 	{"bare invocation", nil},
 	{"unknown verb group", []string{"frobnicate"}},
+	{"version with stray argument", []string{"version", "extra"}},
+	{"version flag with stray argument", []string{"--version", "extra"}},
 	{"completion command", []string{"completion", "bash"}},
 	{"hidden completion command", []string{"__complete", "image", ""}},
 	{"hidden no-desc completion command", []string{"__completeNoDesc", "image", ""}},
@@ -413,7 +415,7 @@ func TestHelpAndVersion(t *testing.T) {
 		}
 	})
 	for _, args := range [][]string{{"--version"}, {"version"}} {
-		t.Run(strings.Join(args, ""), func(t *testing.T) {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
 			r := invoke(t, args...)
 			if r.code != 0 {
 				t.Fatalf("exit %d, want 0\nstderr: %s", r.code, r.stderr)
@@ -434,6 +436,15 @@ func TestHelpAndVersion(t *testing.T) {
 			t.Fatalf("version --json: exit %d, want 0", r.code)
 		}
 		oneDoc(t, r.stdout, true)
+	})
+	t.Run("version flag is order-independent", func(t *testing.T) {
+		for _, args := range [][]string{{"--json", "--version"}, {"--version", "--json"}} {
+			r := invoke(t, args...)
+			if r.code != 0 {
+				t.Fatalf("%v: exit %d, want 0\nstderr: %s", args, r.code, r.stderr)
+			}
+			oneDoc(t, r.stdout, true)
+		}
 	})
 	t.Run("an option value spelled --help passes through the = spelling", func(t *testing.T) {
 		// exec's --cmd may legitimately be the string --help. The = spelling is

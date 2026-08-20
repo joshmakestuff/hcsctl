@@ -67,13 +67,6 @@ func run(argv []string) int {
 		return cli.Usage
 	}
 
-	// version is answered before cobra runs so `hcsctl --version --json` keeps the
-	// one-document contract; cobra's own --version handling prints bare text. Leading
-	// position only: an option's *value* may be the string "--version".
-	if len(argv) > 0 && (argv[0] == "--version" || argv[0] == "version") {
-		return versionCmd(e)
-	}
-
 	helpRequested := false
 	root := newRoot(e, &helpRequested)
 	root.SetArgs(argv)
@@ -116,8 +109,16 @@ exit codes: 0 ok, 1 ran and failed, 64 bad arguments (nothing attempted)
 		// contract cannot admit. The hidden __complete twin is rejected in run().
 		CompletionOptions: cobra.CompletionOptions{DisableDefaultCmd: true},
 		Args:              cobra.ArbitraryArgs,
-		RunE: func(_ *cobra.Command, args []string) error {
+		RunE: func(c *cobra.Command, args []string) error {
 			if len(args) == 0 {
+				// --version is a root-local flag, not cobra's Version field: cobra's own
+				// handling prints bare text, which would break the --json contract. Local,
+				// not persistent, so a verb given --version rejects it instead of silently
+				// ignoring it.
+				if v, _ := c.Flags().GetBool("version"); v {
+					versionCmd(e)
+					return nil
+				}
 				return cli.Usagef("a verb group is required (image, layer, container, vm, guest, network, storage, info)")
 			}
 			return cli.Usagef("unknown verb group %q (expected: image, layer, container, vm, guest, network, storage, info)", args[0])
@@ -134,6 +135,7 @@ exit codes: 0 ok, 1 ran and failed, 64 bad arguments (nothing attempted)
 	// documents them.
 	pf.Bool("json", false, "one JSON document on stdout; progress on stderr")
 	pf.Bool("stream-json", false, "with --json: stderr becomes NDJSON, one object per line, so a consumer following a long exec can attribute every line -- {\"stream\":\"progress\"} is hcsctl, {\"stream\":\"stdout\"|\"stderr\"} is the guest, per line, live. The final document is unchanged")
+	root.Flags().Bool("version", false, "the tool and contract versions")
 
 	root.AddCommand(
 		image.Command(e),
