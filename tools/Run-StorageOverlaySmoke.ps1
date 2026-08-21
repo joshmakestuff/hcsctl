@@ -26,6 +26,10 @@ if (-not (Test-Path $bin)) {
     Write-Error "No hcsctl.exe at $bin"
     exit 64
 }
+if (Test-Path -LiteralPath $Work) {
+    Write-Error "-Work already exists: $Work -- the smoke creates and later deletes this tree; pass a path that does not exist."
+    exit 64
+}
 
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $null = New-Item -ItemType Directory -Force (Join-Path $repo 'smoke')
@@ -68,35 +72,50 @@ Assert "scratch volume presents" ($null -ne $scratchVol -and [System.IO.Director
 $null = [System.IO.Directory]::CreateDirectory($scratchVol + 'WcSandboxState')
 
 # -- attach: the union view --------------------------------------------------------------
-"== storage attach-overlay (unionfs) =="
-& $bin storage attach-overlay --volume $scratchVol --layer "${cimVol}Files" --json 2>$null
-$attachCode = $LASTEXITCODE
-Assert "attach-overlay exits 0" ($attachCode -eq 0)
-if ($attachCode -eq 0) {
-    Assert "CIM content visible through the scratch volume" ([System.IO.File]::ReadAllText("${scratchVol}hello.txt").Trim() -eq 'from-cim')
-    Assert "nested CIM content visible" ([System.IO.File]::ReadAllText("${scratchVol}sub\deep.txt").Trim() -eq 'deep')
-    [System.IO.File]::WriteAllText("${scratchVol}write-probe.txt", $stamp)
-    Assert "a write lands through the union view" ([System.IO.File]::Exists("${scratchVol}write-probe.txt"))
+$attachCode = $null
+try {
+    "== storage attach-overlay (unionfs) =="
+    & $bin storage attach-overlay --volume $scratchVol --layer "${cimVol}Files" --json 2>$null
+    $attachCode = $LASTEXITCODE
+    Assert "attach-overlay exits 0" ($attachCode -eq 0)
+    if ($attachCode -eq 0) {
+        Assert "CIM content visible through the scratch volume" ([System.IO.File]::ReadAllText("${scratchVol}hello.txt").Trim() -eq 'from-cim')
+        Assert "nested CIM content visible" ([System.IO.File]::ReadAllText("${scratchVol}sub\deep.txt").Trim() -eq 'deep')
+        [System.IO.File]::WriteAllText("${scratchVol}write-probe.txt", $stamp)
+        Assert "a write lands through the union view" ([System.IO.File]::Exists("${scratchVol}write-probe.txt"))
 
-    "== storage detach-overlay =="
-    & $bin storage detach-overlay --volume $scratchVol --json 2>$null | Out-Null
-    Assert "detach-overlay exits 0" ($LASTEXITCODE -eq 0)
-    Assert "CIM content gone after detach" (-not [System.IO.File]::Exists("${scratchVol}hello.txt"))
-    Assert "the write survived in the scratch" ([System.IO.File]::Exists("${scratchVol}write-probe.txt"))
-} else {
-    "  [SKIP] union-view assertions: attach failed on this host"
+        "== storage detach-overlay =="
+        & $bin storage detach-overlay --volume $scratchVol --json 2>$null | Out-Null
+        Assert "detach-overlay exits 0" ($LASTEXITCODE -eq 0)
+        Assert "CIM content gone after detach" (-not [System.IO.File]::Exists("${scratchVol}hello.txt"))
+        Assert "the write survived in the scratch" ([System.IO.File]::Exists("${scratchVol}write-probe.txt"))
+    } else {
+        "  [SKIP] union-view assertions: attach failed on this host"
+    }
+} finally {
+    # Unconditional: a terminating error above must not leak the attached VHD, the
+    # overlay, or the mounted CIM. On a normal run the overlay is already detached.
+    "== teardown =="
+    if ($attachCode -eq 0 -and [System.IO.File]::Exists("${scratchVol}hello.txt")) {
+        & $bin storage detach-overlay --volume $scratchVol --json 2>$null | Out-Null
+        "teardown: detach-overlay -> exit $LASTEXITCODE"
+    }
+    "select vdisk file=`"$vhd`"`ndetach vdisk" | Set-Content $dp
+    diskpart /s $dp | Out-Null
+    Assert "scratch vhd detached" ($null -eq (Get-Disk | Where-Object { $_.Location -eq $vhd }))
+    & $bin cim unmount --cim "$Work\cims\layer.cim" --json 2>$null | Out-Null
+    Assert "cim unmount exits 0" ($LASTEXITCODE -eq 0)
 }
-
-# -- teardown -----------------------------------------------------------------------------
-"== teardown =="
-"select vdisk file=`"$vhd`"`ndetach vdisk" | Set-Content $dp
-diskpart /s $dp | Out-Null
-& $bin cim unmount --cim "$Work\cims\layer.cim" --json 2>$null | Out-Null
-Assert "cim unmount exits 0" ($LASTEXITCODE -eq 0)
 
 ""
 "passed: $($script:passed)  failed: $($script:failed)"
-if ($script:failed -eq 0) { Remove-Item -Recurse -Force $Work -ErrorAction SilentlyContinue }
+if ($script:failed -eq 0) {
+    Remove-Item -Recurse -Force $Work -ErrorAction SilentlyContinue
+    if (Test-Path -LiteralPath $Work) {
+        "  [FAIL] work dir survived cleanup: $Work -- remove it before re-running with this path"
+        $script:failed++
+    }
+}
 else { "work dir retained for inspection: $Work" }
 Stop-Transcript
 exit ([int]($script:failed -gt 0))

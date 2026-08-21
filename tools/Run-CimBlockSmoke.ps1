@@ -27,6 +27,10 @@ if (-not (Test-Path $bin)) {
     Write-Error "No hcsctl.exe at $bin"
     exit 64
 }
+if (Test-Path -LiteralPath $Work) {
+    Write-Error "-Work already exists: $Work -- the smoke creates and later deletes this tree; pass a path that does not exist."
+    exit 64
+}
 
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $null = New-Item -ItemType Directory -Force (Join-Path $repo 'smoke')
@@ -83,16 +87,23 @@ Assert "merge exits 0" ($LASTEXITCODE -eq 0)
 $mountJson = (& $bin cim mount --block "$cims\merged.bcim" --source "$cims\l1.bcim" --source "$cims\l2.bcim" --source "$cims\l3.bcim" --json 2>$null) | Out-String
 Assert "merged mount exits 0" ($LASTEXITCODE -eq 0)
 $vol = ($mountJson | ConvertFrom-Json).volume
-Assert "volume presents" ([System.IO.Directory]::Exists($vol))
-Assert "topmost shadows base" ([System.IO.File]::ReadAllText("${vol}shadowed.txt").Trim() -eq 'from-top')
-Assert "tombstone hides the lower-layer file" (-not [System.IO.File]::Exists("${vol}hidden.txt"))
-Assert "unshadowed base content shows through" ([System.IO.File]::ReadAllText("${vol}base-only.txt").Trim() -eq 'base')
-Assert "middle layer shows through" ([System.IO.File]::ReadAllText("${vol}middle.txt").Trim() -eq 'middle')
-$linkContent = ''
-try { $linkContent = [System.IO.File]::ReadAllText("${vol}link.txt").Trim() } catch {}
-Assert "merged link resolves across CIMs" ($linkContent -eq 'linked-content')
-& $bin cim unmount --block "$cims\merged.bcim" --json 2>$null | Out-Null
-Assert "merged unmount by addressing exits 0" ($LASTEXITCODE -eq 0)
+try {
+    Assert "volume presents" ([System.IO.Directory]::Exists($vol))
+    Assert "topmost shadows base" ([System.IO.File]::ReadAllText("${vol}shadowed.txt").Trim() -eq 'from-top')
+    Assert "tombstone hides the lower-layer file" (-not [System.IO.File]::Exists("${vol}hidden.txt"))
+    Assert "unshadowed base content shows through" ([System.IO.File]::ReadAllText("${vol}base-only.txt").Trim() -eq 'base')
+    Assert "middle layer shows through" ([System.IO.File]::ReadAllText("${vol}middle.txt").Trim() -eq 'middle')
+    $linkContent = ''
+    try { $linkContent = [System.IO.File]::ReadAllText("${vol}link.txt").Trim() } catch {}
+    Assert "merged link resolves across CIMs" ($linkContent -eq 'linked-content')
+    & $bin cim unmount --block "$cims\merged.bcim" --json 2>$null | Out-Null
+    Assert "merged unmount by addressing exits 0" ($LASTEXITCODE -eq 0)
+} finally {
+    if ($vol -and [System.IO.Directory]::Exists($vol)) {
+        & $bin cim unmount --block "$cims\merged.bcim" --json 2>$null | Out-Null
+        "teardown: merged unmount -> exit $LASTEXITCODE"
+    }
+}
 
 # -- verified: seal, read the hash back, pinned mount, tamper ----------------------------
 if (-not $caps.verifiedCimSupported) {
@@ -114,9 +125,16 @@ if (-not $caps.verifiedCimSupported) {
     $vmountJson = (& $bin cim mount --block "$cims\sealed.bcim" --verified --root-hash $rootHash --json 2>$null) | Out-String
     Assert "verified mount exits 0" ($LASTEXITCODE -eq 0)
     $vvol = ($vmountJson | ConvertFrom-Json).volume
-    Assert "verified read succeeds" ([System.IO.File]::ReadAllText("${vvol}base-only.txt").Trim() -eq 'base')
-    & $bin cim unmount --block "$cims\sealed.bcim" --json 2>$null | Out-Null
-    Assert "verified unmount exits 0" ($LASTEXITCODE -eq 0)
+    try {
+        Assert "verified read succeeds" ([System.IO.File]::ReadAllText("${vvol}base-only.txt").Trim() -eq 'base')
+        & $bin cim unmount --block "$cims\sealed.bcim" --json 2>$null | Out-Null
+        Assert "verified unmount exits 0" ($LASTEXITCODE -eq 0)
+    } finally {
+        if ($vvol -and [System.IO.Directory]::Exists($vvol)) {
+            & $bin cim unmount --block "$cims\sealed.bcim" --json 2>$null | Out-Null
+            "teardown: verified unmount -> exit $LASTEXITCODE"
+        }
+    }
 
     "== tamper: flip a byte in a copy, verified reads must fail =="
     Copy-Item "$cims\sealed.bcim" "$cims\tampered.bcim"
@@ -128,15 +146,21 @@ if (-not $caps.verifiedCimSupported) {
     $fs.Close()
     $tmountJson = (& $bin cim mount --block "$cims\tampered.bcim" --verified --root-hash $rootHash --json 2>$null) | Out-String
     $tcode = $LASTEXITCODE
-    if ($tcode -eq 0) {
-        # The mount itself may succeed with verification deferred to reads.
-        $tvol = ($tmountJson | ConvertFrom-Json).volume
-        $readFailed = $false
-        try { $null = [System.IO.File]::ReadAllText("${tvol}base-only.txt") } catch { $readFailed = $true }
-        Assert "MEASUREMENT: tampered CIM fails at read" $readFailed
-        & $bin cim unmount --block "$cims\tampered.bcim" 2>$null | Out-Null
-    } else {
-        Assert "MEASUREMENT: tampered CIM fails at mount" ($tcode -eq 1)
+    try {
+        if ($tcode -eq 0) {
+            # The mount itself may succeed with verification deferred to reads.
+            $tvol = ($tmountJson | ConvertFrom-Json).volume
+            $readFailed = $false
+            try { $null = [System.IO.File]::ReadAllText("${tvol}base-only.txt") } catch { $readFailed = $true }
+            Assert "MEASUREMENT: tampered CIM fails at read" $readFailed
+        } else {
+            Assert "MEASUREMENT: tampered CIM fails at mount" ($tcode -eq 1)
+        }
+    } finally {
+        if ($tcode -eq 0) {
+            & $bin cim unmount --block "$cims\tampered.bcim" --json 2>$null | Out-Null
+            Assert "tampered unmount exits 0" ($LASTEXITCODE -eq 0)
+        }
     }
 }
 
@@ -148,27 +172,40 @@ if ($Device) {
     "create vdisk file=`"$vhd`" maximum=256 type=expandable`nattach vdisk" | Set-Content $dp
     diskpart /s $dp | Out-Null
     $disk = Get-Disk | Where-Object { $_.Location -eq $vhd }
-    if ($null -eq $disk) {
-        "  [SKIP] device section: could not attach or find the VHD disk"
-    } else {
+    # -Device requested this scenario: an unattachable VHD is a failed assertion, not a skip.
+    Assert "device VHD attaches and presents" ($null -ne $disk)
+    if ($null -ne $disk) {
         $phys = "\\.\PhysicalDrive$($disk.Number)"
         "  device: $phys"
-        & $bin cim create --dir "$Work\src\l3" --block $phys --name 'dev.cim' --json 2>$null | Out-Null
-        Assert "device create exits 0" ($LASTEXITCODE -eq 0)
-        $dmountJson = (& $bin cim mount --block $phys --name 'dev.cim' --json 2>$null) | Out-String
-        Assert "device mount exits 0" ($LASTEXITCODE -eq 0)
-        $dvol = ($dmountJson | ConvertFrom-Json).volume
-        Assert "device-CIM content reads" ([System.IO.File]::ReadAllText("${dvol}base-only.txt").Trim() -eq 'base')
-        & $bin cim unmount --block $phys --name 'dev.cim' 2>$null | Out-Null
-        Assert "device unmount exits 0" ($LASTEXITCODE -eq 0)
-        "detach vdisk`nselect vdisk file=`"$vhd`"`ndetach vdisk" | Set-Content $dp
-        diskpart /s $dp | Out-Null
+        $dvol = $null
+        try {
+            & $bin cim create --dir "$Work\src\l3" --block $phys --name 'dev.cim' --json 2>$null | Out-Null
+            Assert "device create exits 0" ($LASTEXITCODE -eq 0)
+            $dmountJson = (& $bin cim mount --block $phys --name 'dev.cim' --json 2>$null) | Out-String
+            Assert "device mount exits 0" ($LASTEXITCODE -eq 0)
+            $dvol = ($dmountJson | ConvertFrom-Json).volume
+            Assert "device-CIM content reads" ([System.IO.File]::ReadAllText("${dvol}base-only.txt").Trim() -eq 'base')
+        } finally {
+            if ($dvol -and [System.IO.Directory]::Exists($dvol)) {
+                & $bin cim unmount --block $phys --name 'dev.cim' 2>$null | Out-Null
+                "teardown: device unmount -> exit $LASTEXITCODE"
+            }
+            "select vdisk file=`"$vhd`"`ndetach vdisk" | Set-Content $dp
+            diskpart /s $dp | Out-Null
+            Assert "device vhd detached" ($null -eq (Get-Disk | Where-Object { $_.Location -eq $vhd }))
+        }
     }
 }
 
 ""
 "passed: $($script:passed)  failed: $($script:failed)"
-if ($script:failed -eq 0) { Remove-Item -Recurse -Force $Work -ErrorAction SilentlyContinue }
+if ($script:failed -eq 0) {
+    Remove-Item -Recurse -Force $Work -ErrorAction SilentlyContinue
+    if (Test-Path -LiteralPath $Work) {
+        "  [FAIL] work dir survived cleanup: $Work -- remove it before re-running with this path"
+        $script:failed++
+    }
+}
 else { "work dir retained for inspection: $Work" }
 Stop-Transcript
 exit ([int]($script:failed -gt 0))

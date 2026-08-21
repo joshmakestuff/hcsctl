@@ -32,6 +32,10 @@ if (-not (Test-Path $bin)) {
     Write-Error "No hcsctl.exe at $bin -- go build -o hcsctl.exe . first"
     exit 64
 }
+if (Test-Path -LiteralPath $Work) {
+    Write-Error "-Work already exists: $Work -- the smoke creates and later deletes this tree; pass a path that does not exist."
+    exit 64
+}
 
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $null = New-Item -ItemType Directory -Force (Join-Path $repo 'smoke')
@@ -69,8 +73,15 @@ Set-Content "$src\acl.txt" 'guarded'
 $null = New-Item -ItemType HardLink -Path "$src\link.txt" -Target "$src\a.txt"
 $null = New-Item -ItemType SymbolicLink -Path "$src\sym.txt" -Target 'a.txt'
 Set-Content -Path "$src\a.txt" -Stream 'marker' -Value $null   # empty ADS; payloads are unwritable (measured)
-icacls "$src\acl.txt" /grant 'Guests:(R)' | Out-Null
+$inheritedSddl = (Get-Acl "$src\acl.txt").Sddl
+icacls "$src\acl.txt" /grant '*S-1-5-32-546:(R)' | Out-Null
+if ($LASTEXITCODE -ne 0) {
+    "icacls grant failed (exit $LASTEXITCODE) -- without it the SDDL comparison below would measure the descriptor against itself."
+    Stop-Transcript
+    exit 1
+}
 $srcSddl = (Get-Acl "$src\acl.txt").Sddl
+Assert "the grant changed the descriptor (measurement is not vacuous)" ($srcSddl -ne $inheritedSddl)
 Set-Content "$delta\c.txt" 'charlie'
 
 # PS provider cmdlets (Get-Item, Get-Acl, -Stream) mangle \\?\Volume{...} paths, and a
@@ -98,42 +109,57 @@ Assert "usage is nonzero" (($usageJson | ConvertFrom-Json).usageBytes -gt 0)
 $mountJson = (& $bin cim mount --cim "$cims\base.cim" --json 2>$null) | Out-String
 Assert "mount exits 0" ($LASTEXITCODE -eq 0)
 $vol = ($mountJson | ConvertFrom-Json).volume
-Assert "volume presents" ([System.IO.Directory]::Exists($vol))
-Assert "file content round-trips" ([System.IO.File]::ReadAllText("${vol}a.txt").Trim() -eq 'alpha')
-Assert "nested content round-trips" ([System.IO.File]::ReadAllText("${vol}sub\b.txt").Trim() -eq 'bravo')
-Assert "hardlink shares content" ([System.IO.File]::ReadAllText("${vol}link.txt").Trim() -eq 'alpha')
-mountvol $mnt $vol
-$symItem = Get-Item "$mnt\sym.txt" -ErrorAction SilentlyContinue
-Assert "symlink survives as a reparse point" ($null -ne $symItem -and $symItem.Attributes.HasFlag([IO.FileAttributes]::ReparsePoint))
-Assert "symlink target is a.txt" ($symItem.Target -match 'a\.txt$')
-$streams = (Get-Item "$mnt\a.txt" -Stream * -ErrorAction SilentlyContinue).Stream
-Assert "empty ADS present" ($streams -contains 'marker')
-# The measurement: descriptor fidelity was unconfirmed (2026-08-05 read-back failed).
-$mountedSddl = (Get-Acl "$mnt\acl.txt" -ErrorAction SilentlyContinue).Sddl
-"  measured: source SDDL:  $srcSddl"
-"  measured: mounted SDDL: $mountedSddl"
-Assert "MEASUREMENT: DACL SDDL round-trips through the CIM" ($mountedSddl -eq $srcSddl)
-mountvol $mnt /D
+$childVol = $null
+$mntAssigned = $false
+try {
+    Assert "volume presents" ([System.IO.Directory]::Exists($vol))
+    Assert "file content round-trips" ([System.IO.File]::ReadAllText("${vol}a.txt").Trim() -eq 'alpha')
+    Assert "nested content round-trips" ([System.IO.File]::ReadAllText("${vol}sub\b.txt").Trim() -eq 'bravo')
+    Assert "hardlink shares content" ([System.IO.File]::ReadAllText("${vol}link.txt").Trim() -eq 'alpha')
+    mountvol $mnt $vol
+    $mntAssigned = $true
+    $symItem = Get-Item "$mnt\sym.txt" -ErrorAction SilentlyContinue
+    Assert "symlink survives as a reparse point" ($null -ne $symItem -and $symItem.Attributes.HasFlag([IO.FileAttributes]::ReparsePoint))
+    Assert "symlink target is a.txt" ($symItem.Target -match 'a\.txt$')
+    $streams = (Get-Item "$mnt\a.txt" -Stream * -ErrorAction SilentlyContinue).Stream
+    Assert "empty ADS present" ($streams -contains 'marker')
+    # The measurement: descriptor fidelity was unconfirmed (2026-08-05 read-back failed).
+    $mountedSddl = (Get-Acl "$mnt\acl.txt" -ErrorAction SilentlyContinue).Sddl
+    "  measured: source SDDL:  $srcSddl"
+    "  measured: mounted SDDL: $mountedSddl"
+    Assert "MEASUREMENT: DACL SDDL round-trips through the CIM" ($mountedSddl -eq $srcSddl)
+    mountvol $mnt /D
+    $mntAssigned = $false
 
-# -- fork: delta visible, unlink hides, base shows through --------------------------------
-"== cim create --fork-of with --unlink =="
-& $bin cim create --dir $delta --cim "$cims\child.cim" --fork-of base.cim --unlink 'sub\b.txt' --json 2>$null | Out-Null
-Assert "fork create exits 0" ($LASTEXITCODE -eq 0)
-$childMountJson = (& $bin cim mount --cim "$cims\child.cim" --json 2>$null) | Out-String
-Assert "fork mount exits 0" ($LASTEXITCODE -eq 0)
-$childVol = ($childMountJson | ConvertFrom-Json).volume
-Assert "delta file present in fork" ([System.IO.File]::Exists("${childVol}c.txt"))
-Assert "unlinked path absent in fork" (-not [System.IO.File]::Exists("${childVol}sub\b.txt"))
-Assert "base content visible through fork" ([System.IO.File]::ReadAllText("${childVol}a.txt").Trim() -eq 'alpha')
+    # -- fork: delta visible, unlink hides, base shows through --------------------------------
+    "== cim create --fork-of with --unlink =="
+    & $bin cim create --dir $delta --cim "$cims\child.cim" --fork-of base.cim --unlink 'sub\b.txt' --json 2>$null | Out-Null
+    Assert "fork create exits 0" ($LASTEXITCODE -eq 0)
+    $childMountJson = (& $bin cim mount --cim "$cims\child.cim" --json 2>$null) | Out-String
+    Assert "fork mount exits 0" ($LASTEXITCODE -eq 0)
+    $childVol = ($childMountJson | ConvertFrom-Json).volume
+    Assert "delta file present in fork" ([System.IO.File]::Exists("${childVol}c.txt"))
+    Assert "unlinked path absent in fork" (-not [System.IO.File]::Exists("${childVol}sub\b.txt"))
+    Assert "base content visible through fork" ([System.IO.File]::ReadAllText("${childVol}a.txt").Trim() -eq 'alpha')
 
-# -- unmount by CIM addressing: the deterministic GUID earns its keep ---------------------
-"== cim unmount --cim (derived GUID, no recorded volume) =="
-& $bin cim unmount --cim "$cims\child.cim" --json 2>$null | Out-Null
-Assert "fork unmount by addressing exits 0" ($LASTEXITCODE -eq 0)
-Assert "fork volume gone" (-not [System.IO.Directory]::Exists($childVol))
-& $bin cim unmount --cim "$cims\base.cim" --json 2>$null | Out-Null
-Assert "base unmount by addressing exits 0" ($LASTEXITCODE -eq 0)
-Assert "base volume gone" (-not [System.IO.Directory]::Exists($vol))
+    # -- unmount by CIM addressing: the deterministic GUID earns its keep ---------------------
+    "== cim unmount --cim (derived GUID, no recorded volume) =="
+    & $bin cim unmount --cim "$cims\child.cim" --json 2>$null | Out-Null
+    Assert "fork unmount by addressing exits 0" ($LASTEXITCODE -eq 0)
+    Assert "fork volume gone" (-not [System.IO.Directory]::Exists($childVol))
+    & $bin cim unmount --cim "$cims\base.cim" --json 2>$null | Out-Null
+    Assert "base unmount by addressing exits 0" ($LASTEXITCODE -eq 0)
+    Assert "base volume gone" (-not [System.IO.Directory]::Exists($vol))
+} finally {
+    # Fault path only: on a normal run both volumes are already unmounted above.
+    if ($mntAssigned) { mountvol $mnt /D 2>$null | Out-Null }
+    foreach ($m in @(@('base', "$cims\base.cim", $vol), @('child', "$cims\child.cim", $childVol))) {
+        if ($m[2] -and [System.IO.Directory]::Exists($m[2])) {
+            & $bin cim unmount --cim $m[1] --json 2>$null | Out-Null
+            "teardown: unmount $($m[0]) cim -> exit $LASTEXITCODE"
+        }
+    }
+}
 
 # -- destroy: child first (destroying a parent breaks its forks) --------------------------
 "== cim destroy =="
@@ -154,7 +180,13 @@ Assert "undo removed the partial cim" ($null -eq (Get-ChildItem $cims -ErrorActi
 # -- summary ------------------------------------------------------------------------------
 ""
 "passed: $($script:passed)  failed: $($script:failed)"
-if ($script:failed -eq 0) { Remove-Item -Recurse -Force $Work -ErrorAction SilentlyContinue }
+if ($script:failed -eq 0) {
+    Remove-Item -Recurse -Force $Work -ErrorAction SilentlyContinue
+    if (Test-Path -LiteralPath $Work) {
+        "  [FAIL] work dir survived cleanup: $Work -- remove it before re-running with this path"
+        $script:failed++
+    }
+}
 else { "work dir retained for inspection: $Work" }
 Stop-Transcript
 exit ([int]($script:failed -gt 0))
