@@ -19,11 +19,14 @@ package vmcompute
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"sync"
 	"syscall"
 	"time"
 	"unsafe"
 
+	"github.com/Microsoft/go-winio"
+	"github.com/Microsoft/hcsshim"
 	"golang.org/x/sys/windows"
 )
 
@@ -36,6 +39,8 @@ var (
 	procStart      = dll.NewProc("HcsStartComputeSystem")
 	procShutdown   = dll.NewProc("HcsShutdownComputeSystem")
 	procTerminate  = dll.NewProc("HcsTerminateComputeSystem")
+	procPause      = dll.NewProc("HcsPauseComputeSystem")
+	procResume     = dll.NewProc("HcsResumeComputeSystem")
 	procProperties = dll.NewProc("HcsGetComputeSystemProperties")
 	procModify     = dll.NewProc("HcsModifyComputeSystem")
 	procEnumerate  = dll.NewProc("HcsEnumerateComputeSystems")
@@ -43,6 +48,16 @@ var (
 	procUnregister = dll.NewProc("HcsUnregisterComputeSystemCallback")
 	procGrant      = dll.NewProc("GrantVmAccess")
 	procRevoke     = dll.NewProc("RevokeVmAccess")
+
+	procCreateProcess     = dll.NewProc("HcsCreateProcess")
+	procOpenProcess       = dll.NewProc("HcsOpenProcess")
+	procCloseProcess      = dll.NewProc("HcsCloseProcess")
+	procTerminateProcess  = dll.NewProc("HcsTerminateProcess")
+	procSignalProcess     = dll.NewProc("HcsSignalProcess")
+	procGetProcessProps   = dll.NewProc("HcsGetProcessProperties")
+	procModifyProcess     = dll.NewProc("HcsModifyProcess")
+	procRegisterProcess   = dll.NewProc("HcsRegisterProcessCallback")
+	procUnregisterProcess = dll.NewProc("HcsUnregisterProcessCallback")
 
 	ole32             = windows.NewLazySystemDLL("ole32.dll")
 	procCoTaskMemFree = ole32.NewProc("CoTaskMemFree")
@@ -61,6 +76,9 @@ const (
 	notifyExited            = 0x00000001
 	notifyCreateCompleted   = 0x00000002
 	notifyStartCompleted    = 0x00000003
+	notifyPauseCompleted    = 0x00000004
+	notifyResumeCompleted   = 0x00000005
+	notifyProcessExited     = 0x00010000
 	notifyServiceDisconnect = 0x01000000
 )
 
@@ -125,13 +143,20 @@ func watcher(notification uint32, number uintptr, status uintptr, _ *uint16) uin
 }
 
 func waitedOn() []uint32 {
-	return []uint32{notifyExited, notifyCreateCompleted, notifyStartCompleted, notifyServiceDisconnect}
+	return []uint32{notifyExited, notifyCreateCompleted, notifyStartCompleted,
+		notifyPauseCompleted, notifyResumeCompleted, notifyServiceDisconnect}
 }
 
-func registerChannels() uintptr {
+// registerChannels allocates the next callback number and a channel per
+// notification. With no arguments it registers the system set; a Process
+// passes its own set (process exit + service disconnect).
+func registerChannels(ns ...uint32) uintptr {
 	callbackOnce.Do(func() { callbackPtr = syscall.NewCallback(watcher) })
+	if len(ns) == 0 {
+		ns = waitedOn()
+	}
 	channels := map[uint32]chan error{}
-	for _, n := range waitedOn() {
+	for _, n := range ns {
 		channels[n] = make(chan error, 1)
 	}
 	callbackMu.Lock()
@@ -264,6 +289,20 @@ func (s *System) Shutdown(timeout time.Duration) error {
 // Terminate powers the system off. It needs no guest cooperation.
 func (s *System) Terminate(timeout time.Duration) error {
 	return s.operation(procTerminate, "HcsTerminateComputeSystem", "", notifyExited, timeout)
+}
+
+// Pause suspends the system. For a VM this freezes the virtual processors; for
+// a process-isolated container the platform refuses it (0x80070032,
+// ERROR_NOT_SUPPORTED -- measured 2026-08-21 on the v2 route; the v1 route
+// calls the same HcsPauseComputeSystem, so the outcome is route-independent by
+// construction [v1 not measured]).
+func (s *System) Pause(timeout time.Duration) error {
+	return s.operation(procPause, "HcsPauseComputeSystem", "", notifyPauseCompleted, timeout)
+}
+
+// Resume restarts a paused system.
+func (s *System) Resume(timeout time.Duration) error {
+	return s.operation(procResume, "HcsResumeComputeSystem", "", notifyResumeCompleted, timeout)
 }
 
 func (s *System) operation(proc *windows.LazyProc, name, options string, notification uint32, timeout time.Duration) error {
@@ -423,4 +462,368 @@ func awaitNeeded(hr uintptr, name, doc string) (error, bool) {
 		return nil, true
 	}
 	return nil, false
+}
+
+// -- processes ---------------------------------------------------------------------------
+//
+// The v2 route runs guest processes through HcsCreateProcess / HcsOpenProcess /
+// HcsTerminateProcess / HcsGetProcessProperties with a per-process callback
+// (hcsNotificationProcessExited is delivered on the PROCESS callback, never the
+// system one -- measured 2026-08-21; a system-callback wait hangs to its bound).
+// hcsshim exports no public v2 process API, so these bindings mirror its
+// internal/hcs process.go shapes without copying source. The container package
+// adapts this type to the verb surface (Stdio, WaitTimeout, Kill, ExitCode).
+
+// ProcessInfo is the HCS_PROCESS_INFORMATION returned by HcsCreateProcess: the
+// guest pid and the three stdio handles HCS created for it.
+type ProcessInfo struct {
+	ProcessID uint32
+	_         uint32 // reserved padding, must stay
+	StdInput  syscall.Handle
+	StdOutput syscall.Handle
+	StdError  syscall.Handle
+}
+
+// processStatus is the ProcessStatus property document, subset that matters.
+type processStatus struct {
+	Exited         bool   `json:"Exited,omitempty"`
+	ExitCode       uint32 `json:"ExitCode,omitempty"`
+	LastWaitResult int32  `json:"LastWaitResult,omitempty"`
+}
+
+// Process is an open handle to a process inside a compute system, with its own
+// process callback registered. It exposes the surface the container verbs need,
+// matching hcsshim.Process's method shapes (minus ResizeConsole).
+type Process struct {
+	system   *System
+	handle   syscall.Handle
+	pid      uint32
+	callback uintptr // registered HCS_CALLBACK, freed at Close
+	number   uintptr // this Process's key in callbackMap
+
+	stdioMu sync.Mutex
+	stdin   io.WriteCloser
+	stdout  io.ReadCloser
+	stderr  io.ReadCloser
+
+	exitedOnce sync.Once
+	exited     chan struct{}
+	exitCode   int
+	waitErr    error
+}
+
+// CreateProcess launches a process in the system. params is the v2
+// ProcessParameters document; HCS creates the stdio pipes and returns their
+// handles in ProcessInfo.
+func (s *System) CreateProcess(params any) (*Process, error) {
+	body, err := json.Marshal(params)
+	if err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	handle := s.handle
+	s.mu.Unlock()
+	if handle == 0 {
+		return nil, &Error{Op: "HcsCreateProcess", Code: uint32(windows.ERROR_INVALID_HANDLE)}
+	}
+
+	p := &Process{system: s, number: registerChannels(notifyProcessExited, notifyServiceDisconnect), exited: make(chan struct{})}
+	var info ProcessInfo
+	var ph syscall.Handle
+	var result *uint16
+	hr, _, _ := procCreateProcess.Call(handle, utf16(string(body)),
+		uintptr(unsafe.Pointer(&info)), uintptr(unsafe.Pointer(&ph)), uintptr(unsafe.Pointer(&result)))
+	doc := takeString(result)
+	if !ok(hr) {
+		dropChannels(p.number)
+		return nil, &Error{Op: "HcsCreateProcess", Code: uint32(hr), Result: doc}
+	}
+	p.handle = ph
+	p.pid = info.ProcessID
+
+	if err := p.registerCallback(); err != nil {
+		p.Close()
+		return nil, err
+	}
+	files, err := makeOpenFiles([]syscall.Handle{info.StdInput, info.StdOutput, info.StdError})
+	if err != nil {
+		p.Close()
+		return nil, err
+	}
+	p.stdioMu.Lock()
+	if files[0] != nil {
+		p.stdin = files[0]
+	}
+	if files[1] != nil {
+		p.stdout = files[1]
+	}
+	if files[2] != nil {
+		p.stderr = files[2]
+	}
+	p.stdioMu.Unlock()
+	go p.waitBackground()
+	return p, nil
+}
+
+// OpenProcess gets a handle to an existing process by pid, e.g. for a kill
+// delivered through a fresh system handle (hcsshim's Kill shape).
+func (s *System) OpenProcess(pid int) (*Process, error) {
+	p := &Process{system: s, number: registerChannels(notifyProcessExited, notifyServiceDisconnect), exited: make(chan struct{})}
+	var ph syscall.Handle
+	var result *uint16
+	hr, _, _ := procOpenProcess.Call(s.handle, uintptr(uint32(pid)),
+		uintptr(unsafe.Pointer(&ph)), uintptr(unsafe.Pointer(&result)))
+	doc := takeString(result)
+	if !ok(hr) {
+		dropChannels(p.number)
+		return nil, &Error{Op: "HcsOpenProcess", Code: uint32(hr), Result: doc}
+	}
+	p.handle = ph
+	p.pid = uint32(pid)
+	if err := p.registerCallback(); err != nil {
+		p.Close()
+		return nil, err
+	}
+	go p.waitBackground()
+	return p, nil
+}
+
+func (p *Process) registerCallback() error {
+	var cb uintptr
+	hr, _, _ := procRegisterProcess.Call(uintptr(p.handle), callbackPtr, p.number,
+		uintptr(unsafe.Pointer(&cb)))
+	if !ok(hr) {
+		return &Error{Op: "HcsRegisterProcessCallback", Code: uint32(hr)}
+	}
+	p.callback = cb
+	return nil
+}
+
+func (p *Process) waitForExit() error {
+	ch := channelFor(p.number, notifyProcessExited)
+	if ch == nil {
+		return &Error{Op: "process exit", Code: uint32(windows.ERROR_INVALID_HANDLE)}
+	}
+	disconnect := channelFor(p.number, notifyServiceDisconnect)
+	select {
+	case err := <-ch:
+		if err != nil {
+			if e, isHcs := err.(*Error); isHcs {
+				e.Op = "process exit"
+			}
+			return err
+		}
+		return nil
+	case <-disconnect:
+		return &Error{Op: "process exit", Code: uint32(windows.RPC_S_SERVER_UNAVAILABLE),
+			Result: "the compute service disconnected"}
+	}
+}
+
+// waitBackground waits for the process-exit notification, reads the reaped exit
+// code, and releases Wait/WaitTimeout. Called exactly once per process handle.
+func (p *Process) waitBackground() {
+	err := p.waitForExit()
+	code := -1
+	if err == nil {
+		// The notification means the process is reaped, so the property read is
+		// authoritative. Reading before the notification yields 0xFFFFFFFF (the
+		// measured pre-reap artifact) -- the notification is what makes the
+		// read trustworthy, which is why the surface binds the callback.
+		st, perr := p.properties()
+		if perr != nil {
+			err = perr
+		} else {
+			code = int(st.ExitCode)
+		}
+	}
+	p.exitedOnce.Do(func() {
+		p.exitCode = code
+		p.waitErr = err
+		close(p.exited)
+	})
+}
+
+// Pid returns the process id within the container.
+func (p *Process) Pid() int {
+	return int(p.pid)
+}
+
+// Stdio returns the process's stdin, stdout and stderr pipes.
+func (p *Process) Stdio() (io.WriteCloser, io.ReadCloser, io.ReadCloser, error) {
+	p.stdioMu.Lock()
+	defer p.stdioMu.Unlock()
+	return p.stdin, p.stdout, p.stderr, nil
+}
+
+// CloseStdin closes the write side of the stdin pipe so the guest sees EOF. The
+// modify request is what tells the guest; the local file close follows.
+func (p *Process) CloseStdin() error {
+	if p.stopped() {
+		return nil
+	}
+	const req = `{"Operation":"CloseHandle","CloseHandle":{"Handle":"StdIn"}}`
+	var result *uint16
+	hr, _, _ := procModifyProcess.Call(uintptr(p.handle), utf16(req), uintptr(unsafe.Pointer(&result)))
+	doc := takeString(result)
+	if !ok(hr) {
+		return &Error{Op: "HcsModifyProcess", Code: uint32(hr), Result: doc}
+	}
+	p.stdioMu.Lock()
+	if p.stdin != nil {
+		_ = p.stdin.Close()
+		p.stdin = nil
+	}
+	p.stdioMu.Unlock()
+	return nil
+}
+
+// Wait blocks until the process exits. It returns the exit notification error,
+// if any; the exit code itself comes from ExitCode.
+func (p *Process) Wait() error {
+	<-p.exited
+	return p.waitErr
+}
+
+// WaitTimeout waits for the exit or the duration. The timeout error wraps
+// hcsshim.ErrTimeout so hcsshim.IsTimeout recognizes it, matching the v1 route.
+func (p *Process) WaitTimeout(d time.Duration) error {
+	select {
+	case <-p.exited:
+		return p.waitErr
+	case <-time.After(d):
+		return fmt.Errorf("process wait: %w", hcsshim.ErrTimeout)
+	}
+}
+
+// ExitCode returns the exit code. The process must have exited (Wait/WaitTimeout
+// must have returned first).
+func (p *Process) ExitCode() (int, error) {
+	<-p.exited
+	return p.exitCode, p.waitErr
+}
+
+// Kill terminates the process. It delivers the terminate through a fresh system
+// handle (hcsshim's Kill shape): HCS serializes signals per compute-system
+// handle, so a kill behind a stuck operation on our handle would never deliver.
+// It does not wait; WaitTimeout confirms.
+func (p *Process) Kill() error {
+	if p.stopped() {
+		return &Error{Op: "HcsTerminateProcess", Code: uint32(windows.ERROR_INVALID_HANDLE),
+			Result: "process already exited"}
+	}
+	sys2, err := Open(p.system.ID)
+	if err != nil {
+		return err
+	}
+	defer sys2.Close()
+	ph2, err := sys2.OpenProcess(p.Pid())
+	if err != nil {
+		return err
+	}
+	defer ph2.Close()
+	return ph2.terminate()
+}
+
+func (p *Process) terminate() error {
+	var result *uint16
+	hr, _, _ := procTerminateProcess.Call(uintptr(p.handle), uintptr(unsafe.Pointer(&result)))
+	doc := takeString(result)
+	if !ok(hr) {
+		return &Error{Op: "HcsTerminateProcess", Code: uint32(hr), Result: doc}
+	}
+	return nil
+}
+
+// properties reads the process property document (three native args: process,
+// properties, result -- the two-arg call AV'd in the probe, measured).
+func (p *Process) properties() (processStatus, error) {
+	var props, result *uint16
+	hr, _, _ := procGetProcessProps.Call(uintptr(p.handle),
+		uintptr(unsafe.Pointer(&props)), uintptr(unsafe.Pointer(&result)))
+	doc := takeString(result)
+	out := takeString(props)
+	if !ok(hr) {
+		return processStatus{}, &Error{Op: "HcsGetProcessProperties", Code: uint32(hr), Result: doc}
+	}
+	var st processStatus
+	if err := json.Unmarshal([]byte(out), &st); err != nil {
+		return processStatus{}, err
+	}
+	return st, nil
+}
+
+func (p *Process) stopped() bool {
+	select {
+	case <-p.exited:
+		return true
+	default:
+		return false
+	}
+}
+
+// Close releases the process handle, its callback and its stdio pipes. It does
+// not kill or wait on the process.
+func (p *Process) Close() error {
+	var first error
+	if p.callback != 0 {
+		hr, _, _ := procUnregisterProcess.Call(p.callback)
+		if !ok(hr) {
+			first = &Error{Op: "HcsUnregisterProcessCallback", Code: uint32(hr)}
+		}
+		p.callback = 0
+	}
+	p.stdioMu.Lock()
+	if p.stdin != nil {
+		_ = p.stdin.Close()
+		p.stdin = nil
+	}
+	if p.stdout != nil {
+		_ = p.stdout.Close()
+		p.stdout = nil
+	}
+	if p.stderr != nil {
+		_ = p.stderr.Close()
+		p.stderr = nil
+	}
+	p.stdioMu.Unlock()
+	if p.handle != 0 {
+		hr, _, _ := procCloseProcess.Call(uintptr(p.handle))
+		if !ok(hr) && first == nil {
+			first = &Error{Op: "HcsCloseProcess", Code: uint32(hr)}
+		}
+		p.handle = 0
+	}
+	dropChannels(p.number)
+	p.exitedOnce.Do(func() {
+		p.exitCode = -1
+		p.waitErr = &Error{Op: "process exit", Code: uint32(windows.ERROR_INVALID_HANDLE), Result: "process closed"}
+		close(p.exited)
+	})
+	return first
+}
+
+// makeOpenFiles wraps HCS-created stdio handles in go-winio file objects,
+// closing every handle if any wrap fails.
+func makeOpenFiles(hs []syscall.Handle) (_ []io.ReadWriteCloser, err error) {
+	fs := make([]io.ReadWriteCloser, len(hs))
+	for i, h := range hs {
+		if h != syscall.Handle(0) {
+			if err == nil {
+				fs[i], err = winio.NewOpenFile(windows.Handle(h))
+			}
+			if err != nil {
+				syscall.Close(h)
+			}
+		}
+	}
+	if err != nil {
+		for _, f := range fs {
+			if f != nil {
+				f.Close()
+			}
+		}
+		return nil, err
+	}
+	return fs, nil
 }
