@@ -99,7 +99,7 @@ func addCreateFlags(fs *pflag.FlagSet, o *createOptions) {
 	cli.StringArray(fs, &o.acl, "acl", "DIRECTION:ACTION[:tcp|udp], repeatable. A create-time endpoint ACL, added to the endpoint create document like --publish. Enforced on process isolation + NAT and Hyper-V + L2Bridge; refused on every other combination, including Hyper-V + NAT where it would be stored without effect. No runtime mutation")
 	cli.StringArray(fs, &o.mount, "mount", "HOST:CONTAINER[:ro], repeatable. Maps a host directory into the guest over VSMB -- not a bind mount, and not Docker semantics; both paths drive-letter absolute")
 	cli.StringOnce(fs, &o.scratchSize, "scratch-size", "grow the scratch VHD, e.g. 40GB, so the guest's C: is bigger than the default -- anything writing real data wants this")
-	cli.StringOnce(fs, &o.storage, "storage", "wclayer (default) or vhd. wclayer runs CreateScratchLayer like every other verb. vhd consumes a computestorage scratch: the sandbox.vhdx is produced the storage surface's way (blank.vhdx copy + InitializeWritableLayer), then the wclayer stack (ActivateLayer + PrepareLayer + GetLayerMountPath) runs over it -- the measured working shape for a container whose writable layer is a computestorage VHD. Only meaningful with --isolation process; refused elsewhere")
+	cli.StringOnce(fs, &o.storage, "storage", "wclayer or vhd. For process isolation the default route is v2: the writable layer is a computestorage VHD scratch (blank.vhdx copy + InitializeWritableLayer + the Virtual Machines group ACE) with the wclayer stack (ActivateLayer + PrepareLayer + GetLayerMountPath) over it, driven through the v2 ComputeSystem document -- the measured #86 shape. wclayer keeps the schema-1 route with a CreateScratchLayer scratch. vhd names the computestorage scratch explicitly (the same shape as the default process route); on hyperv isolation it is the only way to use a computestorage scratch")
 	cli.StringArray(fs, &o.label, "label", "key=value, repeatable. Stored in state.json, reported by ls and inspect, never interpreted -- ownership and run identity are the consumer's policy")
 }
 
@@ -390,16 +390,25 @@ func resumeCmd(e cli.Emit) *cobra.Command {
 // itself is host-global and reopenable by id, so this holds only what HCS does not: where the
 // scratch lives and what it was built from.
 type state struct {
-	ID        string   `json:"id"`
-	Ref       string   `json:"ref"`
-	Scratch   string   `json:"scratch"`
-	UVM       string   `json:"utilityVM"`
-	Isolation string   `json:"isolation,omitempty"`
-	Chain     []string `json:"chain"`
+	ID        string `json:"id"`
+	Ref       string `json:"ref"`
+	Scratch   string `json:"scratch"`
+	UVM       string `json:"utilityVM"`
+	Isolation string `json:"isolation,omitempty"`
+	// Route is the container route the system was created with: v2 (the default
+	// argon route, ComputeSystem document) or v1 (schema 1). Absent means v1 --
+	// state files written before the v2 route existed. It decides which binding
+	// every later verb reopens the system with.
+	Route string   `json:"route,omitempty"`
+	Chain []string `json:"chain"`
 	// Endpoint is here because endpoints are host-global and outlive the creating process:
 	// `rm` after a crash must delete an endpoint it did not create.
 	Endpoint  string   `json:"endpoint,omitempty"`
 	Addresses []string `json:"addresses,omitempty"`
+	// Namespace is the v2 route's HNS network namespace (Networking.Namespace in
+	// the document). Like the endpoint it is host-global and must be destroyed
+	// with the container.
+	Namespace string `json:"namespace,omitempty"`
 	// Published records the NAT port mappings supplied when this endpoint was created. HCN
 	// owns their effective lifetime; this is the requested creation contract reported again by
 	// inspect after the creating invocation is gone.
@@ -894,7 +903,8 @@ func parseMounts(vals []string) ([]hcsshim.MappedDir, error) {
 // document) -- a label may not shadow one. Grown alongside the state struct's json tags.
 var reservedLabelKeys = map[string]bool{
 	"id": true, "ref": true, "scratch": true, "utilityVM": true, "isolation": true,
-	"chain": true, "endpoint": true, "addresses": true, "published": true, "acls": true,
+	"route": true, "chain": true, "endpoint": true, "addresses": true, "namespace": true,
+	"published": true, "acls": true,
 	"primary": true, "labels": true,
 	"ok": true, "command": true, "state": true, "hcs": true,
 }
@@ -929,8 +939,9 @@ func parseIsolation(v string) (string, error) {
 // Storage modes for the writable layer. wclayer is every verb's default: CreateScratchLayer
 // produces the scratch. vhd is the computestorage shape: the scratch VHD is produced the
 // storage surface's way (blank.vhdx copy + InitializeWritableLayer, with the Virtual
-// Machines group ACE granted on the VHD -- measured requirement for a xenon, #86 door 2),
-// then the wclayer stack runs over it for an argon. Working shape for both isolations.
+// Machines group ACE granted on the VHD -- measured requirement for a xenon, #86 xenon
+// shape), then the wclayer stack runs over it for an argon. Working shape for both
+// isolations.
 const (
 	storageWclayer = "wclayer"
 	storageVHD     = "vhd"
@@ -949,9 +960,10 @@ func validateStorage(v, isolation string) error {
 
 // -- create ------------------------------------------------------------------------------
 
-// buildConfig assembles the compute system document. Split out from create() because `run`
-// needs the same document and the same failure messages.
-func buildConfig(o *createOptions, e cli.Emit, st *store.Store, id string) (*hcsshim.ContainerConfig, state, error) {
+// buildConfig assembles the compute system document -- schema 1 on the v1
+// route, the v2 ComputeSystem document on the v2 route. Split out from create()
+// because `run` needs the same document and the same failure messages.
+func buildConfig(o *createOptions, e cli.Emit, st *store.Store, id string) (any, state, error) {
 	var s state
 
 	// Every argument is validated before anything touches the disk, because exit 64 promises
@@ -967,6 +979,11 @@ func buildConfig(o *createOptions, e cli.Emit, st *store.Store, id string) (*hcs
 	if err := validateStorage(o.storage, isolation); err != nil {
 		return nil, s, err
 	}
+	// The route is decided here, once: process isolation defaults to the v2
+	// ComputeSystem document (the measured #86 route); --storage wclayer keeps
+	// the schema-1 route; hyperv is always schema-1 (no v2 document exists for
+	// a self-contained xenon).
+	route := routeFor(isolation, o.storage)
 	published, err := parsePublishedPorts(o.publish)
 	if err != nil {
 		return nil, s, err
@@ -1066,11 +1083,12 @@ func buildConfig(o *createOptions, e cli.Emit, st *store.Store, id string) (*hcs
 	}
 	e.Progress("scratch:   %s", sd)
 
-	if o.storage == "vhd" {
-		// The computestorage scratch: sandbox.vhdx produced the storage surface's way
-		// (blank.vhdx copy + InitializeWritableLayer), detached, then the wclayer stack
-		// below runs over it. The base layer's blank.vhdx is the source; the chain is
-		// topmost-first, the base is the bottom.
+	// The computestorage scratch (blank.vhdx copy + InitializeWritableLayer,
+	// detached, then the wclayer stack below runs over it) is the v2 route's
+	// scratch and the hyperv vhd storage; CreateScratchLayer is the schema-1
+	// default. The base layer's blank.vhdx is the source; the chain is
+	// topmost-first, the base is the bottom.
+	if route == routeV2 || (isolation == isolationHyperV && o.storage == "vhd") {
 		base := chain[len(chain)-1]
 		if _, err := storage.PrepareScratchVHD(base, sd, chain, e); err != nil {
 			os.RemoveAll(containerDir(st, id))
@@ -1115,43 +1133,92 @@ func buildConfig(o *createOptions, e cli.Emit, st *store.Store, id string) (*hcs
 			addrs = append(addrs, fmt.Sprintf("%s/%d", ip.IpAddress, ip.PrefixLength))
 		}
 		e.Progress("endpoint:  %s on %s (%s)", ep.Id, netw.Name, strings.Join(addrs, ","))
+		if route == routeV2 {
+			// The v2 argon attach shape: the endpoint lives in an HNS namespace
+			// the document's Networking.Namespace names. Destroyed with the
+			// container, like the endpoint itself.
+			if s.Namespace, err = createNamespace(ep.Id); err != nil {
+				_ = deleteEndpoint(ep.Id)
+				destroyScratchFor(st, id, isolation)
+				return nil, s, err
+			}
+			e.Progress("namespace: %s", s.Namespace)
+		}
 	}
 
-	cfg := &hcsshim.ContainerConfig{
-		SystemType:      "Container",
-		Name:            id,
-		Owner:           "hcsctl",
-		LayerFolderPath: sd,
-		Layers:          layers,
-		HvPartition:     isolation == isolationHyperV,
-		// Without this a terminated container can outlive the process that made it and hold
-		// the scratch open, which turns a failed run into a manual cleanup.
-		TerminateOnLastHandleClosed: false,
-	}
-	if isolation == isolationHyperV {
-		cfg.HvRuntime = &hcsshim.HvRuntime{ImagePath: uvm}
+	var cfg any
+	if route == routeV2 {
+		// The v2 ComputeSystem document, hcsoci's argon shape with the measured
+		// storage cell: Storage.Path = the stacked volume, Storage.Layers = the
+		// chain (Id = NameToGuid of the chain directory). ShouldTerminateOnLastHandleClosed
+		// is false so the container survives the creating process's handle close
+		// and is reopened by id -- the lifecycle the argonprobe v2-route cell
+		// measured end to end (hcsctl#86).
+		doc := &v2ComputeSystem{
+			Owner:         "hcsctl",
+			SchemaVersion: &v2Version{Major: 2, Minor: 1},
+			Container: &v2ContainerDoc{
+				Processor: &v2Processor{Count: int32(cpus)},
+			},
+			ShouldTerminateOnLastHandleClosed: false,
+		}
+		if doc.Container.Storage, err = v2StorageFor(chain, volumePath); err != nil {
+			destroyScratchFor(st, id, isolation)
+			return nil, s, err
+		}
+		if o.hostname != "" {
+			doc.Container.GuestOs = &v2GuestOs{HostName: o.hostname}
+		}
+		if memoryMB != 0 {
+			doc.Container.Memory = &v2Memory{SizeInMB: memoryMB}
+		}
+		doc.Container.MappedDirectories = v2MountsFor(mounts)
+		if ep != nil {
+			doc.Container.Networking = &v2Networking{
+				AllowUnqualifiedDnsQuery: true,
+				DnsSearchList:            o.dnsSearch,
+				Namespace:                s.Namespace,
+			}
+		}
+		cfg = doc
 	} else {
-		cfg.VolumePath = volumePath
-	}
-	if o.hostname != "" {
-		cfg.HostName = o.hostname
-	}
-	if cpus != 0 {
-		cfg.ProcessorCount = uint32(cpus)
-	}
-	if memoryMB != 0 {
-		cfg.MemoryMaximumInMB = int64(memoryMB)
-	}
-	cfg.MappedDirectories = mounts
-	if ep != nil {
-		cfg.EndpointList = []string{ep.Id}
-		// Unqualified lookups are what a developer's `ping example.com` is, so this defaults
-		// on rather than being a switch nobody remembers.
-		cfg.AllowUnqualifiedDNSQuery = true
-		cfg.DNSSearchList = o.dnsSearch
+		c1 := &hcsshim.ContainerConfig{
+			SystemType:      "Container",
+			Name:            id,
+			Owner:           "hcsctl",
+			LayerFolderPath: sd,
+			Layers:          layers,
+			HvPartition:     isolation == isolationHyperV,
+			// Without this a terminated container can outlive the process that made it and hold
+			// the scratch open, which turns a failed run into a manual cleanup.
+			TerminateOnLastHandleClosed: false,
+		}
+		if isolation == isolationHyperV {
+			c1.HvRuntime = &hcsshim.HvRuntime{ImagePath: uvm}
+		} else {
+			c1.VolumePath = volumePath
+		}
+		if o.hostname != "" {
+			c1.HostName = o.hostname
+		}
+		if cpus != 0 {
+			c1.ProcessorCount = uint32(cpus)
+		}
+		if memoryMB != 0 {
+			c1.MemoryMaximumInMB = int64(memoryMB)
+		}
+		c1.MappedDirectories = mounts
+		if ep != nil {
+			c1.EndpointList = []string{ep.Id}
+			// Unqualified lookups are what a developer's `ping example.com` is, so this defaults
+			// on rather than being a switch nobody remembers.
+			c1.AllowUnqualifiedDNSQuery = true
+			c1.DNSSearchList = o.dnsSearch
+		}
+		cfg = c1
 	}
 
-	s = state{ID: id, Ref: o.ref, Scratch: sd, UVM: uvm, Isolation: isolation, Chain: chain, Labels: labels, Published: published, ACLs: acls}
+	s = state{ID: id, Ref: o.ref, Scratch: sd, UVM: uvm, Isolation: isolation, Route: route, Chain: chain, Labels: labels, Published: published, ACLs: acls, Namespace: s.Namespace}
 	if ep != nil {
 		s.Endpoint = ep.Id
 		s.Addresses = addrs
@@ -1180,10 +1247,10 @@ func create(o *createOptions, e cli.Emit) error {
 		s.Primary = &primaryState{Cmd: o.cmd}
 	}
 
-	c, err := hcsshim.CreateContainer(id, cfg)
+	c, err := createContainer(id, s.Route, cfg)
 	if err != nil {
 		destroy(st, s)
-		return fmt.Errorf("CreateContainer: %w", err)
+		return err
 	}
 
 	// State is part of the creation transaction: without state.json, `rm` can never
@@ -1205,7 +1272,8 @@ func create(o *createOptions, e cli.Emit) error {
 	c.Close()
 	e.Result(map[string]any{
 		"ok": true, "command": "container create", "id": id, "ref": o.ref,
-		"utilityVM": s.UVM, "isolation": s.Isolation, "scratch": s.Scratch, "chain": s.Chain,
+		"utilityVM": s.UVM, "isolation": s.Isolation, "route": s.Route, "scratch": s.Scratch,
+		"chain":    s.Chain,
 		"endpoint": s.Endpoint, "addresses": s.Addresses, "published": s.Published, "acls": s.ACLs,
 	}, func() {
 		fmt.Printf("created %s\n  id:      %s\n  scratch: %s\n", o.ref, id, s.Scratch)
@@ -1233,7 +1301,7 @@ func start(o targetOptions, e cli.Emit) error {
 	if err != nil {
 		return err
 	}
-	c, err := hcsshim.OpenContainer(id)
+	c, err := openContainer(s)
 	if err != nil {
 		return fmt.Errorf("OpenContainer(%s): %w", id, err)
 	}
@@ -1320,10 +1388,11 @@ func stop(o targetOptions, force bool, e cli.Emit) error {
 	if err != nil {
 		return err
 	}
-	if _, err := readState(st, id); err != nil {
+	s, err := readState(st, id)
+	if err != nil {
 		return err
 	}
-	c, err := hcsshim.OpenContainer(id)
+	c, err := openContainer(s)
 	if err != nil {
 		return fmt.Errorf("OpenContainer(%s): %w", id, err)
 	}
@@ -1338,10 +1407,12 @@ func stop(o targetOptions, force bool, e cli.Emit) error {
 	return nil
 }
 
-// shutdown asks politely, then insists. Both Shutdown and Terminate report
-// ErrVmcomputeOperationPending on success -- the operation is asynchronous and Wait is what
-// actually confirms it -- so a pending error here is not an error.
-func shutdown(c hcsshim.Container, e cli.Emit, force bool) error {
+// shutdown asks politely, then insists. On the v1 route both Shutdown and
+// Terminate report ErrVmcomputeOperationPending on success -- the operation is
+// asynchronous and Wait is what actually confirms it -- so a pending error here
+// is not an error. On the v2 route the same calls are synchronous and WaitTimeout
+// is a no-op.
+func shutdown(c containerIface, e cli.Emit, force bool) error {
 	if !force {
 		err := c.Shutdown()
 		if err == nil || hcsshim.IsPending(err) {
@@ -1410,7 +1481,7 @@ type execResult struct {
 // stdin immediately; only explicit interactive mode forwards host input. A non-zero timeout
 // kills the process on expiry. onStart, when non-nil, runs with the guest pid as soon as the
 // process exists -- the primary-process path records it in state.json while it is still running.
-func execIn(c hcsshim.Container, e cli.Emit, cmdline, cwd, user string, env map[string]string, timeout time.Duration, outSink, errSink io.Writer, onStart func(pid int), mode execMode) (execResult, error) {
+func execIn(c containerIface, e cli.Emit, cmdline, cwd, user string, env map[string]string, timeout time.Duration, outSink, errSink io.Writer, onStart func(pid int), mode execMode) (execResult, error) {
 	var res execResult
 	res.ExitCode = -1
 	pc := &hcsshim.ProcessConfig{
@@ -1525,7 +1596,7 @@ func execIn(c hcsshim.Container, e cli.Emit, cmdline, cwd, user string, env map[
 	return res, nil
 }
 
-func waitInteractive(p hcsshim.Process, e cli.Emit, timeout time.Duration, interrupted <-chan struct{}, closeStdin func(), pid int) (timedOut, wasInterrupted bool, err error) {
+func waitInteractive(p processIface, e cli.Emit, timeout time.Duration, interrupted <-chan struct{}, closeStdin func(), pid int) (timedOut, wasInterrupted bool, err error) {
 	exited := make(chan error, 1)
 	go func() { exited <- p.Wait() }()
 
@@ -1594,10 +1665,11 @@ func exec(o *execOptions, e cli.Emit) error {
 		return err
 	}
 	timeout := o.timeout
-	if _, err := readState(st, id); err != nil {
+	s, err := readState(st, id)
+	if err != nil {
 		return err
 	}
-	c, err := hcsshim.OpenContainer(id)
+	c, err := openContainer(s)
 	if err != nil {
 		return fmt.Errorf("OpenContainer(%s): %w", id, err)
 	}
@@ -1754,12 +1826,12 @@ func run(o *runOptions, e cli.Emit) error {
 		return fmt.Errorf("writing state: %w", err)
 	}
 
-	c, err := hcsshim.CreateContainer(id, cfg)
+	c, err := createContainer(id, s.Route, cfg)
 	if err != nil {
 		destroy(st, s)
-		return fmt.Errorf("CreateContainer: %w", err)
+		return err
 	}
-	e.Progress("CreateContainer ok")
+	e.Progress("create ok (%s route)", s.Route)
 
 	// From here the container exists in HCS and must be torn down on every path out.
 	cleanup := func() {
@@ -1808,6 +1880,7 @@ func run(o *runOptions, e cli.Emit) error {
 	doc["ref"] = o.ref
 	doc["utilityVM"] = s.UVM
 	doc["isolation"] = s.Isolation
+	doc["route"] = s.Route
 	doc["kept"] = o.keep
 	doc["endpoint"] = s.Endpoint
 	doc["addresses"] = s.Addresses
@@ -1828,10 +1901,11 @@ func kill(o targetOptions, pid uint64, e cli.Emit) error {
 	if err != nil {
 		return err
 	}
-	if _, err := readState(st, id); err != nil {
+	s, err := readState(st, id)
+	if err != nil {
 		return err
 	}
-	c, err := hcsshim.OpenContainer(id)
+	c, err := openContainer(s)
 	if err != nil {
 		return fmt.Errorf("OpenContainer(%s): %w", id, err)
 	}
@@ -1897,13 +1971,22 @@ func destroyScratchFor(st *store.Store, id, isolation string) error {
 	return destroyScratch(st, id)
 }
 
-// destroy tears down everything a container owns outside HCS: its endpoint, then its scratch.
-// Every step is attempted regardless of earlier failures -- a half-torn-down container should
-// lose as much as possible -- and the first error is what gets reported.
+// destroy tears down everything a container owns outside HCS: its endpoint and
+// HNS namespace (v2 route), then its scratch. Every step is attempted regardless
+// of earlier failures -- a half-torn-down container should lose as much as
+// possible -- and the first error is what gets reported.
 func destroy(st *store.Store, s state) error {
 	var first error
+	// The v2 namespace must go before its attached endpoint: deleting the
+	// endpoint while it still belongs to the namespace can fail and strand both
+	// (probe order: namespace, then endpoint).
+	if s.Namespace != "" {
+		first = deleteNamespace(s.Namespace)
+	}
 	if s.Endpoint != "" {
-		first = deleteEndpoint(s.Endpoint)
+		if err := deleteEndpoint(s.Endpoint); err != nil && first == nil {
+			first = err
+		}
 	}
 	if err := destroyScratchFor(st, s.ID, s.Isolation); err != nil && first == nil {
 		first = err
@@ -1923,7 +2006,7 @@ func remove(o targetOptions, force bool, e cli.Emit) error {
 
 	// A container that is gone from HCS but still on disk is the normal state after a crash, so
 	// a failure to open is not fatal here -- the scratch and endpoint still need removing.
-	if c, err := hcsshim.OpenContainer(id); err == nil {
+	if c, err := openContainer(s); err == nil {
 		if err := shutdown(c, e, force); err != nil {
 			e.Progress("stop: %v", err)
 		}
@@ -2007,15 +2090,16 @@ func list(storeDir string, e cli.Emit) error {
 
 // open is the common preamble for every verb that inspects a live container: resolve the id,
 // confirm we know about it, and get a handle.
-func open(o targetOptions) (hcsshim.Container, string, error) {
+func open(o targetOptions) (containerIface, string, error) {
 	st, id, err := resolve(o)
 	if err != nil {
 		return nil, "", err
 	}
-	if _, err := readState(st, id); err != nil {
+	s, err := readState(st, id)
+	if err != nil {
 		return nil, id, err
 	}
-	c, err := hcsshim.OpenContainer(id)
+	c, err := openContainer(s)
 	if err != nil {
 		return nil, id, fmt.Errorf("OpenContainer(%s): %w", id, err)
 	}
@@ -2110,8 +2194,8 @@ func inspect(o targetOptions, e cli.Emit) error {
 		doc["hcs"] = nil
 	}
 	e.Result(doc, func() {
-		fmt.Printf("id         %s\nref        %s\nscratch    %s\nutilityVM  %s\n",
-			s.ID, s.Ref, s.Scratch, s.UVM)
+		fmt.Printf("id         %s\nref        %s\nscratch    %s\nutilityVM  %s\nroute      %s\n",
+			s.ID, s.Ref, s.Scratch, s.UVM, orDash(s.Route))
 		fmt.Printf("chain      %d layer(s)\n", len(s.Chain))
 		for _, l := range s.Chain {
 			fmt.Printf("           %s\n", l)
