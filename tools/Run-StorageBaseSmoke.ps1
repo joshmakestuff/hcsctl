@@ -31,6 +31,10 @@ if (-not (Test-Path $bin)) {
     Write-Error "No hcsctl.exe at $bin"
     exit 64
 }
+if (Test-Path -LiteralPath $Work) {
+    Write-Error "-Work already exists: $Work -- the smoke creates and later deletes this tree; pass a path that does not exist."
+    exit 64
+}
 
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $null = New-Item -ItemType Directory -Force (Join-Path $repo 'smoke')
@@ -50,20 +54,30 @@ function Assert([string]$name, [bool]$cond) {
 
 # -- a faithful copy of a materialized store layer ----------------------------------------
 "== copy a store layer (backup mode) =="
-$lsJson = (& $bin image ls --json 2>$null) | Out-String
-$img = ($lsJson | ConvertFrom-Json).images | Where-Object ref -eq $Ref
+$ls = (& $bin image ls --json 2>$null) | Out-String | ConvertFrom-Json
+$img = $ls.images | Where-Object ref -eq $Ref
 if ($null -eq $img -or -not $img.materialized) {
     "no materialized layer for $Ref -- run image pull + image import first."
     Stop-Transcript
     exit 1
 }
-$storeRoot = ($lsJson | ConvertFrom-Json).store
-$srcLayer = $img.layers | Select-Object -Last 1   # base layer path if reported
-if (-not $srcLayer -or -not (Test-Path $srcLayer)) {
-    # image ls reports a layer count, not paths, in some versions: resolve from the store.
-    $srcLayer = Get-ChildItem (Join-Path $env:LOCALAPPDATA 'hcsctl\store\layers') -Directory |
-        Where-Object { Test-Path (Join-Path $_.FullName 'UtilityVM\Files') } |
-        Select-Object -First 1 -ExpandProperty FullName
+$storeRoot = $ls.store
+# image ls reports a layer count, not paths: read the ref's record for its diffIDs and
+# resolve the base layer under the store root ls reported. Pull writes base first, so
+# diffIDs[0] is the base layer.
+$rec = Get-ChildItem (Join-Path $storeRoot 'images') -Filter '*.json' | ForEach-Object {
+    Get-Content $_.FullName -Raw | ConvertFrom-Json
+} | Where-Object ref -eq $Ref | Select-Object -First 1
+if ($null -eq $rec -or @($rec.diffIDs).Count -eq 0) {
+    "no record with diffIDs for $Ref under $storeRoot -- run image pull first."
+    Stop-Transcript
+    exit 1
+}
+$srcLayer = Join-Path (Join-Path $storeRoot 'layers') ($rec.diffIDs[0] -replace '^sha256:', '')
+if (-not (Test-Path $srcLayer)) {
+    "base layer for $Ref is missing on disk: $srcLayer -- run image import first."
+    Stop-Transcript
+    exit 1
 }
 "source layer: $srcLayer"
 Assert "source layer carries a UtilityVM" ($null -ne $srcLayer -and (Test-Path (Join-Path $srcLayer 'UtilityVM\Files')))
@@ -91,18 +105,22 @@ $dp = Join-Path $Work 'dp.txt'
 "create vdisk file=`"$vhd`" maximum=10240 type=expandable`nattach vdisk`ncreate partition primary`nformat fs=ntfs quick" | Set-Content $dp
 diskpart /s $dp | Out-Null
 $plainVol = (Get-Disk | Where-Object { $_.Location -eq $vhd } | Get-Partition | Get-Volume).Path
-& $bin storage setup-volume --layer $layer --volume $plainVol --json 2>$null | Out-Null
-Assert "a layer carrying Hives is exit 64" ($LASTEXITCODE -eq 64)
+try {
+    & $bin storage setup-volume --layer $layer --volume $plainVol --json 2>$null | Out-Null
+    Assert "a layer carrying Hives is exit 64" ($LASTEXITCODE -eq 64)
 
-"== storage setup-volume on a plain NTFS volume is caught as a no-op =="
-$fresh = Join-Path $Work 'fresh'
-robocopy $layer $fresh /E /B /COPYALL /DCOPY:DAT /NFL /NDL /NJH /NJS /NP | Out-Null
-Remove-Item (Join-Path $fresh 'blank-base.vhdx'), (Join-Path $fresh 'blank.vhdx'), (Join-Path $fresh 'layout') -Force -ErrorAction SilentlyContinue
-Remove-Item -Recurse -Force (Join-Path $fresh 'Hives') -ErrorAction SilentlyContinue
-& $bin storage setup-volume --layer $fresh --volume $plainVol --json 2>$null | Out-Null
-Assert "a plain NTFS volume is exit 1, not a silent success" ($LASTEXITCODE -eq 1)
-"select vdisk file=`"$vhd`"`ndetach vdisk" | Set-Content $dp
-diskpart /s $dp | Out-Null
+    "== storage setup-volume on a plain NTFS volume is caught as a no-op =="
+    $fresh = Join-Path $Work 'fresh'
+    robocopy $layer $fresh /E /B /COPYALL /DCOPY:DAT /NFL /NDL /NJH /NJS /NP | Out-Null
+    Remove-Item (Join-Path $fresh 'blank-base.vhdx'), (Join-Path $fresh 'blank.vhdx'), (Join-Path $fresh 'layout') -Force -ErrorAction SilentlyContinue
+    Remove-Item -Recurse -Force (Join-Path $fresh 'Hives') -ErrorAction SilentlyContinue
+    & $bin storage setup-volume --layer $fresh --volume $plainVol --json 2>$null | Out-Null
+    Assert "a plain NTFS volume is exit 1, not a silent success" ($LASTEXITCODE -eq 1)
+} finally {
+    "select vdisk file=`"$vhd`"`ndetach vdisk" | Set-Content $dp
+    diskpart /s $dp | Out-Null
+    Assert "preflight vhd detached" ($null -eq (Get-Disk | Where-Object { $_.Location -eq $vhd }))
+}
 
 "== storage setup-volume on a writable-layer volume =="
 # storage mount produces exactly that volume: sandbox.vhdx attached and initialized.
@@ -110,23 +128,43 @@ $scratch = Join-Path $Work 'scratch'
 $mountJson = (& $bin storage mount --ref $Ref --scratch-dir $scratch --json 2>$null) | Out-String
 Assert "storage mount exits 0" ($LASTEXITCODE -eq 0)
 $wlVol = ($mountJson | ConvertFrom-Json).volume
-$fresh2 = Join-Path $Work 'fresh2'
-robocopy $layer $fresh2 /E /B /COPYALL /DCOPY:DAT /NFL /NDL /NJH /NJS /NP | Out-Null
-Remove-Item (Join-Path $fresh2 'blank-base.vhdx'), (Join-Path $fresh2 'blank.vhdx'), (Join-Path $fresh2 'layout') -Force -ErrorAction SilentlyContinue
-Remove-Item -Recurse -Force (Join-Path $fresh2 'Hives') -ErrorAction SilentlyContinue
-& $bin storage setup-volume --layer $fresh2 --volume $wlVol --json 2>$null
-Assert "setup-volume exits 0 on a writable-layer volume" ($LASTEXITCODE -eq 0)
-# storage mount reports the volume without a trailing backslash; \\?\Volume{...} needs one.
-$wlRoot = if ($wlVol.EndsWith('\')) { $wlVol } else { $wlVol + '\' }
-Assert "WcSandboxState present on the volume" ([System.IO.Directory]::Exists($wlRoot + 'WcSandboxState'))
-Assert "the layer was regenerated (Hives)" (Test-Path (Join-Path $fresh2 'Hives'))
-Assert "the layer was regenerated (layout)" (Test-Path (Join-Path $fresh2 'layout'))
-& $bin storage unmount --scratch-dir $scratch --json 2>$null | Out-Null
-Assert "storage unmount exits 0" ($LASTEXITCODE -eq 0)
+try {
+    $fresh2 = Join-Path $Work 'fresh2'
+    robocopy $layer $fresh2 /E /B /COPYALL /DCOPY:DAT /NFL /NDL /NJH /NJS /NP | Out-Null
+    Remove-Item (Join-Path $fresh2 'blank-base.vhdx'), (Join-Path $fresh2 'blank.vhdx'), (Join-Path $fresh2 'layout') -Force -ErrorAction SilentlyContinue
+    Remove-Item -Recurse -Force (Join-Path $fresh2 'Hives') -ErrorAction SilentlyContinue
+    & $bin storage setup-volume --layer $fresh2 --volume $wlVol --json 2>$null
+    Assert "setup-volume exits 0 on a writable-layer volume" ($LASTEXITCODE -eq 0)
+    # storage mount reports the volume without a trailing backslash; \\?\Volume{...} needs one.
+    $wlRoot = if ($wlVol.EndsWith('\')) { $wlVol } else { $wlVol + '\' }
+    Assert "WcSandboxState present on the volume" ([System.IO.Directory]::Exists($wlRoot + 'WcSandboxState'))
+    Assert "the layer was regenerated (Hives)" (Test-Path (Join-Path $fresh2 'Hives'))
+    Assert "the layer was regenerated (layout)" (Test-Path (Join-Path $fresh2 'layout'))
+} finally {
+    & $bin storage unmount --scratch-dir $scratch --json 2>$null | Out-Null
+    Assert "storage unmount exits 0" ($LASTEXITCODE -eq 0)
+}
 
 ""
 "passed: $($script:passed)  failed: $($script:failed)"
-if ($script:failed -eq 0) { Remove-Item -Recurse -Force $Work -ErrorAction SilentlyContinue }
+if ($script:failed -eq 0) {
+    # The robocopy /COPYALL'd copies carry restored deny-delete descriptors that ordinary
+    # file I/O cannot remove; the layer driver is the sanctioned deletion path.
+    foreach ($c in @($layer, $fresh, $fresh2)) {
+        if (Test-Path -LiteralPath $c) {
+            & $bin storage destroy --layer $c --json 2>$null | Out-Null
+            if ($LASTEXITCODE -ne 0 -or (Test-Path -LiteralPath $c)) {
+                "  [FAIL] layer copy survived destroy: $c"
+                $script:failed++
+            }
+        }
+    }
+    Remove-Item -Recurse -Force $Work -ErrorAction SilentlyContinue
+    if (Test-Path -LiteralPath $Work) {
+        "  [FAIL] work dir survived cleanup: $Work -- remove it before re-running with this path"
+        $script:failed++
+    }
+}
 else { "work dir retained for inspection: $Work" }
 Stop-Transcript
 exit ([int]($script:failed -gt 0))
