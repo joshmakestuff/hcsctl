@@ -829,3 +829,61 @@ func copyFile(src, dst string) error {
 	}
 	return d.Sync()
 }
+
+// PrepareScratchVHD produces the computestorage scratch for a container's writable
+// layer: sandbox.vhdx (a blank.vhdx copy) attached and InitializeWritableLayer'd,
+// then detached -- the state the wclayer stack (ActivateLayer + PrepareLayer +
+// GetLayerMountPath) consumes. This is the measured working shape for `container
+// --storage vhd` (argon on a computestorage VHD scratch, #86): the filter attach
+// is not part of it, because the container path runs its own wclayer stack and the
+// storage-filter presentation is what `storage mount` is for. ELEVATED.
+func PrepareScratchVHD(base, scratchDir string, parents []string, e cli.Emit) (sandbox string, err error) {
+	blank := filepath.Join(base, blankName)
+	if _, err := os.Stat(blank); err != nil {
+		return "", cli.Usagef("%s has no %s -- run storage setup-base first", base, blankName)
+	}
+	data, err := layerDataFor(parents)
+	if err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(scratchDir, 0o755); err != nil {
+		return "", err
+	}
+	sandbox = filepath.Join(scratchDir, sandboxName)
+	if _, err := os.Stat(sandbox); err != nil {
+		if err := copyFile(blank, sandbox); err != nil {
+			return "", fmt.Errorf("copy %s -> %s: %w", blank, sandbox, err)
+		}
+		e.Progress("scratch:   %s (fresh from %s)", sandbox, blankName)
+	} else {
+		e.Progress("scratch:   %s (existing, not reinitialized)", sandbox)
+	}
+
+	h, err := vhd.OpenVirtualDisk(sandbox, vhd.VirtualDiskAccessNone, vhd.OpenVirtualDiskFlagNone)
+	if err != nil {
+		return "", fmt.Errorf("OpenVirtualDisk(%s): %w", sandbox, err)
+	}
+	defer syscall.CloseHandle(h)
+
+	ctx := context.Background()
+	if err := vhd.AttachVirtualDisk(h, vhd.AttachVirtualDiskFlagPermanentLifetime,
+		&vhd.AttachVirtualDiskParameters{Version: 2}); err != nil {
+		return "", fmt.Errorf("AttachVirtualDisk: %w", err)
+	}
+	vol, err := computestorage.GetLayerVhdMountPath(ctx, windows.Handle(h))
+	if err != nil {
+		_ = vhd.DetachVirtualDisk(h)
+		return "", fmt.Errorf("GetLayerVhdMountPath: %w", err)
+	}
+	e.Progress("volume:    %s", vol)
+	if err := computestorage.InitializeWritableLayer(ctx, vol, data); err != nil {
+		_ = vhd.DetachVirtualDisk(h)
+		return "", fmt.Errorf("InitializeWritableLayer: %w", err)
+	}
+	e.Progress("InitializeWritableLayer ok")
+	if err := vhd.DetachVirtualDisk(h); err != nil {
+		return "", fmt.Errorf("DetachVirtualDisk: %w", err)
+	}
+	e.Progress("detached, ready for the wclayer stack")
+	return sandbox, nil
+}
