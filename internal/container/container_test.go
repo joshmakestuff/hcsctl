@@ -276,8 +276,37 @@ func TestParseEnvKeepsValueAfterFirstEquals(t *testing.T) {
 	}
 }
 
-func TestReservedLabelKeysCoverStateFields(t *testing.T) {
-	st := reflect.TypeOf(state{})
+func TestValidateStorage(t *testing.T) {
+	cases := []struct {
+		name      string
+		storage   string
+		isolation string
+		wantErr   string
+	}{
+		{"default is wclayer", "", isolationProcess, ""},
+		{"wclayer on process", storageWclayer, isolationProcess, ""},
+		{"wclayer on hyperv", storageWclayer, isolationHyperV, ""},
+		{"vhd on process", storageVHD, isolationProcess, ""},
+		{"vhd on hyperv", storageVHD, isolationHyperV, ""},
+		{"unknown value", "nonsense", isolationProcess, "wclayer"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			err := validateStorage(c.storage, c.isolation)
+			if c.wantErr == "" {
+				if err != nil {
+					t.Fatalf("want nil error, got %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), c.wantErr) {
+				t.Fatalf("want error containing %q, got %v", c.wantErr, err)
+			}
+		})
+	}
+}
+
+func TestReservedLabelKeysCoverStateFields(t *testing.T) {	st := reflect.TypeOf(state{})
 	for i := 0; i < st.NumField(); i++ {
 		tag := st.Field(i).Tag.Get("json")
 		name, _, _ := strings.Cut(tag, ",")

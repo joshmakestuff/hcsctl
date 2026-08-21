@@ -42,6 +42,7 @@ import (
 	"github.com/Microsoft/hcsshim/hcn"
 	"github.com/joshmakestuff/hcsctl/internal/cli"
 	"github.com/joshmakestuff/hcsctl/internal/layer"
+	"github.com/joshmakestuff/hcsctl/internal/storage"
 	"github.com/joshmakestuff/hcsctl/internal/store"
 	"github.com/joshmakestuff/hcsctl/internal/sysinfo"
 	"github.com/spf13/cobra"
@@ -78,6 +79,7 @@ type createOptions struct {
 	scratchSize, cmd    string
 	publish, acl, mount []string
 	label               []string
+	storage             string
 }
 
 // addCreateFlags declares the shared create/run option set once, --cmd excepted: both verbs
@@ -97,6 +99,7 @@ func addCreateFlags(fs *pflag.FlagSet, o *createOptions) {
 	cli.StringArray(fs, &o.acl, "acl", "DIRECTION:ACTION[:tcp|udp], repeatable. A create-time endpoint ACL, added to the endpoint create document like --publish. Enforced on process isolation + NAT and Hyper-V + L2Bridge; refused on every other combination, including Hyper-V + NAT where it would be stored without effect. No runtime mutation")
 	cli.StringArray(fs, &o.mount, "mount", "HOST:CONTAINER[:ro], repeatable. Maps a host directory into the guest over VSMB -- not a bind mount, and not Docker semantics; both paths drive-letter absolute")
 	cli.StringOnce(fs, &o.scratchSize, "scratch-size", "grow the scratch VHD, e.g. 40GB, so the guest's C: is bigger than the default -- anything writing real data wants this")
+	cli.StringOnce(fs, &o.storage, "storage", "wclayer (default) or vhd. wclayer runs CreateScratchLayer like every other verb. vhd consumes a computestorage scratch: the sandbox.vhdx is produced the storage surface's way (blank.vhdx copy + InitializeWritableLayer), then the wclayer stack (ActivateLayer + PrepareLayer + GetLayerMountPath) runs over it -- the measured working shape for a container whose writable layer is a computestorage VHD. Only meaningful with --isolation process; refused elsewhere")
 	cli.StringArray(fs, &o.label, "label", "key=value, repeatable. Stored in state.json, reported by ls and inspect, never interpreted -- ownership and run identity are the consumer's policy")
 }
 
@@ -134,7 +137,7 @@ type execOptions struct {
 func runCmd(e cli.Emit) *cobra.Command {
 	var o runOptions
 	cmd := &cobra.Command{
-		Use:   `run --ref <ref> [--cmd "<cmdline>"] [--id <id>] [--cpus N] [--memory-mb N] [--hostname H] [--cwd D] [--user U] [--env NAME=value]... [--network <name|id>] [--dns-search list] [--publish HOST_PORT:CONTAINER_PORT/tcp|udp]... [--acl DIRECTION:ACTION[:tcp|udp]]... [--mount HOST:CONTAINER[:ro]]... [--scratch-size 40GB] [--isolation hyperv|process] [--timeout <dur>] [--label key=value]... [--store <dir>] [--keep]`,
+		Use:   `run --ref <ref> [--cmd "<cmdline>"] [--id <id>] [--cpus N] [--memory-mb N] [--hostname H] [--cwd D] [--user U] [--env NAME=value]... [--network <name|id>] [--dns-search list] [--publish HOST_PORT:CONTAINER_PORT/tcp|udp]... [--acl DIRECTION:ACTION[:tcp|udp]]... [--mount HOST:CONTAINER[:ro]]... [--scratch-size 40GB] [--isolation hyperv|process] [--storage wclayer|vhd] [--timeout <dur>] [--label key=value]... [--store <dir>] [--keep]`,
 		Short: "create, boot and run one command in a container, then tear it down. ELEVATED",
 		Long: `Create, boot and run one command in a container (hyperv by default), then tear
 it down. --cmd defaults to "cmd /c ver". --network attaches an endpoint on an
@@ -169,7 +172,7 @@ mutation. --timeout bounds the primary command; absent means wait forever.`,
 func createCmd(e cli.Emit) *cobra.Command {
 	var o createOptions
 	cmd := &cobra.Command{
-		Use:   `create --ref <ref> [--id <id>] [--cmd "<cmdline>"] [--cpus N] [--memory-mb N] [--hostname H] [--network <name|id>] [--dns-search list] [--publish HOST_PORT:CONTAINER_PORT/tcp|udp]... [--acl DIRECTION:ACTION[:tcp|udp]]... [--mount HOST:CONTAINER[:ro]]... [--scratch-size 40GB] [--isolation hyperv|process] [--label key=value]... [--store <dir>]`,
+		Use:   `create --ref <ref> [--id <id>] [--cmd "<cmdline>"] [--cpus N] [--memory-mb N] [--hostname H] [--network <name|id>] [--dns-search list] [--publish HOST_PORT:CONTAINER_PORT/tcp|udp]... [--acl DIRECTION:ACTION[:tcp|udp]]... [--mount HOST:CONTAINER[:ro]]... [--scratch-size 40GB] [--isolation hyperv|process] [--storage wclayer|vhd] [--label key=value]... [--store <dir>]`,
 		Short: "create a container without starting it. ELEVATED",
 		Long: `Create a container without starting it. --label stores opaque key=value pairs
 in state.json, reported by ls and inspect and never interpreted -- ownership
@@ -921,6 +924,29 @@ func parseIsolation(v string) (string, error) {
 	}
 }
 
+// -- storage -----------------------------------------------------------------------------
+
+// Storage modes for the writable layer. wclayer is every verb's default: CreateScratchLayer
+// produces the scratch. vhd is the computestorage shape: the scratch VHD is produced the
+// storage surface's way (blank.vhdx copy + InitializeWritableLayer, with the Virtual
+// Machines group ACE granted on the VHD -- measured requirement for a xenon, #86 door 2),
+// then the wclayer stack runs over it for an argon. Working shape for both isolations.
+const (
+	storageWclayer = "wclayer"
+	storageVHD     = "vhd"
+)
+
+func validateStorage(v, isolation string) error {
+	switch v {
+	case "", storageWclayer:
+		return nil
+	case storageVHD:
+		return nil
+	default:
+		return cli.Usagef("--storage wants %q or %q, got %q", storageWclayer, storageVHD, v)
+	}
+}
+
 // -- create ------------------------------------------------------------------------------
 
 // buildConfig assembles the compute system document. Split out from create() because `run`
@@ -936,6 +962,9 @@ func buildConfig(o *createOptions, e cli.Emit, st *store.Store, id string) (*hcs
 	}
 	isolation, err := parseIsolation(o.isolation)
 	if err != nil {
+		return nil, s, err
+	}
+	if err := validateStorage(o.storage, isolation); err != nil {
 		return nil, s, err
 	}
 	published, err := parsePublishedPorts(o.publish)
@@ -1037,11 +1066,23 @@ func buildConfig(o *createOptions, e cli.Emit, st *store.Store, id string) (*hcs
 	}
 	e.Progress("scratch:   %s", sd)
 
-	if err := hcsshim.CreateScratchLayer(hcsshim.DriverInfo{}, sd, "", chain); err != nil {
-		os.RemoveAll(containerDir(st, id))
-		return nil, s, fmt.Errorf("CreateScratchLayer (rerun elevated?): %w", err)
+	if o.storage == "vhd" {
+		// The computestorage scratch: sandbox.vhdx produced the storage surface's way
+		// (blank.vhdx copy + InitializeWritableLayer), detached, then the wclayer stack
+		// below runs over it. The base layer's blank.vhdx is the source; the chain is
+		// topmost-first, the base is the bottom.
+		base := chain[len(chain)-1]
+		if _, err := storage.PrepareScratchVHD(base, sd, chain, e); err != nil {
+			os.RemoveAll(containerDir(st, id))
+			return nil, s, fmt.Errorf("computestorage scratch: %w", err)
+		}
+	} else {
+		if err := hcsshim.CreateScratchLayer(hcsshim.DriverInfo{}, sd, "", chain); err != nil {
+			os.RemoveAll(containerDir(st, id))
+			return nil, s, fmt.Errorf("CreateScratchLayer (rerun elevated?): %w", err)
+		}
+		e.Progress("CreateScratchLayer ok")
 	}
-	e.Progress("CreateScratchLayer ok")
 
 	if scratchSize != 0 {
 		if err := layer.ExpandScratch(sd, scratchSize); err != nil {
