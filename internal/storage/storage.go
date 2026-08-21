@@ -728,6 +728,12 @@ func mount(ref, base, storeDir, scratchDir string, parents []string, e cli.Emit)
 		e.Progress("scratch:   %s (existing, not reinitialized)", sandbox)
 	}
 
+	// Same ACE prep as PrepareScratchVHD: a xenon consuming this scratch opens
+	// the VHD under the Virtual Machines group at create.
+	if err := grantVMGroupAccess(sandbox); err != nil {
+		return err
+	}
+
 	h, err := vhd.OpenVirtualDisk(sandbox, vhd.VirtualDiskAccessNone, vhd.OpenVirtualDiskFlagNone)
 	if err != nil {
 		return fmt.Errorf("OpenVirtualDisk(%s): %w", sandbox, err)
@@ -857,6 +863,14 @@ func PrepareScratchVHD(base, scratchDir string, parents []string, e cli.Emit) (s
 		e.Progress("scratch:   %s (fresh from %s)", sandbox, blankName)
 	} else {
 		e.Progress("scratch:   %s (existing, not reinitialized)", sandbox)
+	}
+
+	// A xenon (hyperv-isolated) container opens the scratch VHD at create under
+	// the Virtual Machines group; without the ACE the create is refused
+	// (Access denied, hcsctl#86 door 2). CreateScratchLayer's product carries
+	// it; mirror it here so --storage vhd works for both isolations.
+	if err := grantVMGroupAccess(sandbox); err != nil {
+		return "", err
 	}
 
 	h, err := vhd.OpenVirtualDisk(sandbox, vhd.VirtualDiskAccessNone, vhd.OpenVirtualDiskFlagNone)

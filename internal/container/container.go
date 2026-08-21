@@ -928,8 +928,9 @@ func parseIsolation(v string) (string, error) {
 
 // Storage modes for the writable layer. wclayer is every verb's default: CreateScratchLayer
 // produces the scratch. vhd is the computestorage shape: the scratch VHD is produced the
-// storage surface's way (blank.vhdx copy + InitializeWritableLayer), then the wclayer stack
-// runs over it -- the measured working shape for an argon on a computestorage VHD scratch.
+// storage surface's way (blank.vhdx copy + InitializeWritableLayer, with the Virtual
+// Machines group ACE granted on the VHD -- measured requirement for a xenon, #86 door 2),
+// then the wclayer stack runs over it for an argon. Working shape for both isolations.
 const (
 	storageWclayer = "wclayer"
 	storageVHD     = "vhd"
@@ -940,9 +941,6 @@ func validateStorage(v, isolation string) error {
 	case "", storageWclayer:
 		return nil
 	case storageVHD:
-		if isolation != isolationProcess {
-			return cli.Usagef("--storage vhd is a process-isolation shape (the wclayer stack runs on the host); a xenon stacks in the guest and cannot consume the computestorage scratch")
-		}
 		return nil
 	default:
 		return cli.Usagef("--storage wants %q or %q, got %q", storageWclayer, storageVHD, v)

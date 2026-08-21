@@ -287,7 +287,7 @@ func TestValidateStorage(t *testing.T) {
 		{"wclayer on process", storageWclayer, isolationProcess, ""},
 		{"wclayer on hyperv", storageWclayer, isolationHyperV, ""},
 		{"vhd on process", storageVHD, isolationProcess, ""},
-		{"vhd on hyperv refuses", storageVHD, isolationHyperV, "process-isolation"},
+		{"vhd on hyperv", storageVHD, isolationHyperV, ""},
 		{"unknown value", "nonsense", isolationProcess, "wclayer"},
 	}
 	for _, c := range cases {

@@ -1,10 +1,12 @@
-# Elevated real-host proof for `container run --isolation process --storage vhd`:
-# an argon whose writable layer is a computestorage VHD scratch. The scratch is
-# produced the storage surface's way (blank.vhdx copy + InitializeWritableLayer,
-# storage.PrepareScratchVHD), then the wclayer stack (ActivateLayer + PrepareLayer +
-# GetLayerMountPath) runs over it, then the container boots. This is the measured
-# working shape from hcsctl#86 (2026-08-21): the raw storage-mount volume hangs at
-# Start; the stacked computestorage scratch boots.
+# Elevated real-host proof for `container run --storage vhd` in both isolations:
+# an argon (process, stacked via wclayer on the host) and a xenon (hyperv, UVM
+# consumes the scratch directly). The scratch is produced the storage surface's
+# way (blank.vhdx copy + InitializeWritableLayer + the Virtual Machines group
+# ACE, storage.PrepareScratchVHD), then the wclayer stack (ActivateLayer +
+# PrepareLayer + GetLayerMountPath) runs over it for the argon. This is the
+# measured working shape from hcsctl#86 (2026-08-21): the raw storage-mount
+# volume hangs at Start for argon; the stacked computestorage scratch boots.
+# The xenon needs the group ACE or its create is refused (door 2).
 #
 #   tools\Run-ContainerStorageVhdSmoke.ps1 -Store <existing-store> -SkipAcquire
 param(
@@ -85,7 +87,29 @@ $scratch = $inspDoc.state.scratch
 Assert "sandbox.vhdx exists" (Test-Path (Join-Path $scratch 'sandbox.vhdx'))
 "scratch: $scratch" | Tee-Object -Append -FilePath $out
 
+"== container run --isolation hyperv --storage vhd ==" | Tee-Object -Append -FilePath $out
+# The xenon leg (#86 door 2): hyperv-isolated container on the computestorage
+# scratch. Needs the Virtual Machines group ACE on sandbox.vhdx (granted by the
+# storage prep) -- without it, create is refused with Access denied.
+$prevEAP = $ErrorActionPreference
+$ErrorActionPreference = 'Continue'
+$errFile = [IO.Path]::GetTempFileName()
+$xv = (& $bin container run --ref $Ref --isolation hyperv --storage vhd --id "$id-xenon" --cmd 'cmd /c ver' --json 2>$errFile | Out-String)
+$ErrorActionPreference = $prevEAP
+$err = if (Test-Path $errFile) { Get-Content $errFile -Raw } else { '' }
+Remove-Item $errFile -ErrorAction SilentlyContinue
+$xv | Tee-Object -Append -FilePath $out
+if ($err) { $err | Tee-Object -Append -FilePath $out }
+Assert "xenon run exits 0" ($LASTEXITCODE -eq 0)
+$xvDoc = $xv | ConvertFrom-Json
+Assert "xenon reports ok" $xvDoc.ok
+Assert "xenon exit code 0" ($xvDoc.exitCode -eq 0)
+Assert "xenon guest reports the OS" ($xvDoc.output -match 'Microsoft Windows')
+Assert "xenon used a utility VM" ($xvDoc.utilityVM -ne '')
+
 "== teardown ==" | Tee-Object -Append -FilePath $out
+# The xenon run tears itself down (no --keep), so only the --keep argon needs
+# an explicit rm.
 & $bin container rm --id "$id-keep" --force 2>&1 | Tee-Object -Append -FilePath $out
 Assert "rm exits 0" ($LASTEXITCODE -eq 0)
 $left = Get-ComputeProcess -ErrorAction SilentlyContinue | Where-Object { $_.Name -like "$id*" }
