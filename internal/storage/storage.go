@@ -867,7 +867,7 @@ func PrepareScratchVHD(base, scratchDir string, parents []string, e cli.Emit) (s
 
 	// A xenon (hyperv-isolated) container opens the scratch VHD at create under
 	// the Virtual Machines group; without the ACE the create is refused
-	// (Access denied, hcsctl#86 door 2). CreateScratchLayer's product carries
+	// (Access denied, hcsctl#86 xenon shape). CreateScratchLayer's product carries
 	// it; mirror it here so --storage vhd works for both isolations.
 	if err := grantVMGroupAccess(sandbox); err != nil {
 		return "", err

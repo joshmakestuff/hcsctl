@@ -276,6 +276,29 @@ func TestParseEnvKeepsValueAfterFirstEquals(t *testing.T) {
 	}
 }
 
+func TestRouteFor(t *testing.T) {
+	cases := []struct {
+		name      string
+		isolation string
+		storage   string
+		want      string
+	}{
+		{"process default is v2", isolationProcess, "", routeV2},
+		{"process vhd is v2", isolationProcess, storageVHD, routeV2},
+		{"process wclayer is v1", isolationProcess, storageWclayer, routeV1},
+		{"hyperv default is v1", isolationHyperV, "", routeV1},
+		{"hyperv wclayer is v1", isolationHyperV, storageWclayer, routeV1},
+		{"hyperv vhd is v1", isolationHyperV, storageVHD, routeV1},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := routeFor(c.isolation, c.storage); got != c.want {
+				t.Fatalf("routeFor(%q, %q) = %q, want %q", c.isolation, c.storage, got, c.want)
+			}
+		})
+	}
+}
+
 func TestValidateStorage(t *testing.T) {
 	cases := []struct {
 		name      string
@@ -306,7 +329,8 @@ func TestValidateStorage(t *testing.T) {
 	}
 }
 
-func TestReservedLabelKeysCoverStateFields(t *testing.T) {	st := reflect.TypeOf(state{})
+func TestReservedLabelKeysCoverStateFields(t *testing.T) {
+	st := reflect.TypeOf(state{})
 	for i := 0; i < st.NumField(); i++ {
 		tag := st.Field(i).Tag.Get("json")
 		name, _, _ := strings.Cut(tag, ",")
