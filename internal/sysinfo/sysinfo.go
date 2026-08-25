@@ -201,7 +201,7 @@ func parseOSVersion(s string) (osversion.OSVersion, bool) {
 // compatibility window (osversion.CheckHostAndContainerCompat).
 func ProcessIsolationReady(containerOSVersion string) error {
 	if !isElevated() {
-		return fmt.Errorf("process isolation needs an enabled BUILTIN\\Administrators SID at every container start -- rerun elevated")
+		return fmt.Errorf("process isolation needs elevation: the scratch attach mounts no volume from an unelevated token -- rerun elevated (hyperv isolation runs unelevated)")
 	}
 	ctr, ok := parseOSVersion(containerOSVersion)
 	if !ok {

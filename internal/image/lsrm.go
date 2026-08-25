@@ -3,10 +3,11 @@
 package image
 
 import (
+	"context"
 	"fmt"
 	"os"
 
-	"github.com/Microsoft/hcsshim"
+	"github.com/Microsoft/hcsshim/computestorage"
 	"github.com/joshmakestuff/hcsctl/internal/cli"
 	"github.com/joshmakestuff/hcsctl/internal/store"
 )
@@ -79,7 +80,7 @@ func remove(ref, storeDir string, blobs bool, e cli.Emit) error {
 		if _, err := os.Stat(entry); err != nil {
 			continue
 		}
-		if err := hcsshim.DestroyLayer(hcsshim.DriverInfo{}, entry); err != nil {
+		if err := computestorage.DestroyLayer(context.Background(), entry); err != nil {
 			return fmt.Errorf("destroy layer %s (rerun elevated?): %w", entry, err)
 		}
 		// The post-condition, not the return value: DestroyLayer can report success and leave

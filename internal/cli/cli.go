@@ -25,7 +25,12 @@ const (
 // reading fields it knows keeps working.
 // "2": requested help became exit 64 with a usage-failure document (it was exit 0 with an
 // ok:true help document) -- an exit code's meaning changed.
-const ContractVersion = "2"
+// "3": the modern-API migration. `container inspect .hcs`, `stats .statistics` and
+// `ps .processes` became raw v2 HCS property passthroughs (schema-1 shapes are gone;
+// statistics lost its network section); `--storage` was removed (one scratch shape);
+// error strings name computecore entry points; the store's layer format changed
+// (format 2, re-import required).
+const ContractVersion = "3"
 
 // ToolVersion identifies the build for humans in a bug report. Release builds stamp it:
 //

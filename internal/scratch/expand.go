@@ -1,6 +1,6 @@
 //go:build windows
 
-package layer
+package scratch
 
 import (
 	"fmt"

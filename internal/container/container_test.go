@@ -22,7 +22,12 @@ func TestLocateUVM(t *testing.T) {
 		for _, u := range withUVM {
 			d := t.TempDir()
 			if u {
+				// A PREPARED UtilityVM: locateUVM keys on the template VHD
+				// SetupUtilityVMBaseLayer produced, not the bare directory.
 				if err := os.Mkdir(filepath.Join(d, "UtilityVM"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(d, "UtilityVM", "SystemTemplate.vhdx"), []byte("x"), 0o644); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -57,10 +62,18 @@ func TestChainFor(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		// Format-2 marker: Chain refuses unmarked stores with materialized layers.
+		if err := st.WriteFormat(); err != nil {
+			t.Fatal(err)
+		}
 		return st
 	}
 	materialize := func(t *testing.T, st *store.Store, diffID string) {
 		if err := os.MkdirAll(filepath.Join(st.LayerPath(diffID), "Files"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		// The base sentinel; harmless on non-base layers.
+		if err := os.WriteFile(filepath.Join(st.LayerPath(diffID), "blank.vhdx"), []byte("x"), 0o644); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -273,59 +286,6 @@ func TestParseEnvKeepsValueAfterFirstEquals(t *testing.T) {
 	}
 	if env["CONN"] != "Server=x;Db=y" {
 		t.Fatalf("value mangled: %q", env["CONN"])
-	}
-}
-
-func TestRouteFor(t *testing.T) {
-	cases := []struct {
-		name      string
-		isolation string
-		storage   string
-		want      string
-	}{
-		{"process default is v2", isolationProcess, "", routeV2},
-		{"process vhd is v2", isolationProcess, storageVHD, routeV2},
-		{"process wclayer is v1", isolationProcess, storageWclayer, routeV1},
-		{"hyperv default is v1", isolationHyperV, "", routeV1},
-		{"hyperv wclayer is v1", isolationHyperV, storageWclayer, routeV1},
-		{"hyperv vhd is v1", isolationHyperV, storageVHD, routeV1},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			if got := routeFor(c.isolation, c.storage); got != c.want {
-				t.Fatalf("routeFor(%q, %q) = %q, want %q", c.isolation, c.storage, got, c.want)
-			}
-		})
-	}
-}
-
-func TestValidateStorage(t *testing.T) {
-	cases := []struct {
-		name      string
-		storage   string
-		isolation string
-		wantErr   string
-	}{
-		{"default is wclayer", "", isolationProcess, ""},
-		{"wclayer on process", storageWclayer, isolationProcess, ""},
-		{"wclayer on hyperv", storageWclayer, isolationHyperV, ""},
-		{"vhd on process", storageVHD, isolationProcess, ""},
-		{"vhd on hyperv", storageVHD, isolationHyperV, ""},
-		{"unknown value", "nonsense", isolationProcess, "wclayer"},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			err := validateStorage(c.storage, c.isolation)
-			if c.wantErr == "" {
-				if err != nil {
-					t.Fatalf("want nil error, got %v", err)
-				}
-				return
-			}
-			if err == nil || !strings.Contains(err.Error(), c.wantErr) {
-				t.Fatalf("want error containing %q, got %v", c.wantErr, err)
-			}
-		})
 	}
 }
 
