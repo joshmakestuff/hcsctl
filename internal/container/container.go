@@ -42,6 +42,7 @@ import (
 	"github.com/Microsoft/hcsshim/hcn"
 	"github.com/joshmakestuff/hcsctl/internal/cli"
 	"github.com/joshmakestuff/hcsctl/internal/layer"
+	"github.com/joshmakestuff/hcsctl/internal/scratch"
 	"github.com/joshmakestuff/hcsctl/internal/storage"
 	"github.com/joshmakestuff/hcsctl/internal/store"
 	"github.com/joshmakestuff/hcsctl/internal/sysinfo"
@@ -1085,7 +1086,7 @@ func buildConfig(o *createOptions, e cli.Emit, st *store.Store, id string) (*hcs
 	}
 
 	if scratchSize != 0 {
-		if err := layer.ExpandScratch(sd, scratchSize); err != nil {
+		if err := scratch.ExpandScratch(sd, scratchSize); err != nil {
 			destroyScratch(st, id)
 			return nil, s, fmt.Errorf("ExpandScratch: %w", err)
 		}

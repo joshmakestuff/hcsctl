@@ -1,6 +1,6 @@
 //go:build windows
 
-package storage
+package scratch
 
 import (
 	"fmt"
@@ -29,7 +29,7 @@ const sidVMGroup = "S-1-5-83-0" // NT VIRTUAL MACHINE\Virtual Machines
 // grantVMGroupAccess adds a Grant ACE for the Virtual Machines group
 // (GENERIC_READ | GENERIC_WRITE, no inheritance) to the file's DACL,
 // preserving every existing entry. Idempotent: re-granting merges to one ACE.
-func grantVMGroupAccess(path string) error {
+func GrantVMGroupAccess(path string) error {
 	const (
 		accessMaskReadWrite = 1<<31 | 1<<30 // GENERIC_READ | GENERIC_WRITE
 		accessModeGrant     = 1

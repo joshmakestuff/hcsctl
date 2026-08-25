@@ -35,6 +35,7 @@ import (
 	"github.com/Microsoft/hcsshim/computestorage"
 	"github.com/Microsoft/hcsshim/osversion"
 	"github.com/joshmakestuff/hcsctl/internal/cli"
+	"github.com/joshmakestuff/hcsctl/internal/scratch"
 	"github.com/joshmakestuff/hcsctl/internal/store"
 	"github.com/spf13/cobra"
 	"golang.org/x/sys/windows"
@@ -730,7 +731,7 @@ func mount(ref, base, storeDir, scratchDir string, parents []string, e cli.Emit)
 
 	// Same ACE prep as PrepareScratchVHD: a xenon consuming this scratch opens
 	// the VHD under the Virtual Machines group at create.
-	if err := grantVMGroupAccess(sandbox); err != nil {
+	if err := scratch.GrantVMGroupAccess(sandbox); err != nil {
 		return err
 	}
 
@@ -869,7 +870,7 @@ func PrepareScratchVHD(base, scratchDir string, parents []string, e cli.Emit) (s
 	// the Virtual Machines group; without the ACE the create is refused
 	// (Access denied, hcsctl#86 door 2). CreateScratchLayer's product carries
 	// it; mirror it here so --storage vhd works for both isolations.
-	if err := grantVMGroupAccess(sandbox); err != nil {
+	if err := scratch.GrantVMGroupAccess(sandbox); err != nil {
 		return "", err
 	}
 

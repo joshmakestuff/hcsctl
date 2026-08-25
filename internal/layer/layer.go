@@ -28,6 +28,7 @@ import (
 
 	"github.com/Microsoft/hcsshim"
 	"github.com/joshmakestuff/hcsctl/internal/cli"
+	"github.com/joshmakestuff/hcsctl/internal/scratch"
 	"github.com/joshmakestuff/hcsctl/internal/store"
 	"github.com/joshmakestuff/hcsctl/internal/sysinfo"
 	"github.com/spf13/cobra"
@@ -231,7 +232,7 @@ func mount(ref, rawID, storeDir string, scratchSize uint64, e cli.Emit) error {
 
 	// Expand before Activate/Prepare, while nothing holds the vhd.
 	if scratchSize != 0 {
-		if err := ExpandScratch(sp, scratchSize); err != nil {
+		if err := scratch.ExpandScratch(sp, scratchSize); err != nil {
 			_ = hcsshim.DestroyLayer(info, sp)
 			return fmt.Errorf("ExpandScratch: %w", err)
 		}
