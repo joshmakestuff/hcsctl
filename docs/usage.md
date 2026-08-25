@@ -24,11 +24,12 @@ that need elevation say so in `hcsctl help`; nothing escalates on its own.
   `SeRestorePrivilege`, both removed from a filtered token. (The old wclayer-era
   `BUILTIN\Administrators` group check is gone with wclayer.)
 - `image rm`, `layer mount|unmount`, and every `storage` command are elevated.
-- **`container create`/`run` are elevated for both isolations**: the scratch is produced by
-  computestorage (blank.vhdx copy, attach, `InitializeWritableLayer`), which a filtered token
-  cannot call. The wclayer-era per-start `BUILTIN\Administrators` gate for process isolation
-  is gone -- elevation is per-create, not per-start. `--scratch-size` additionally needs the
-  grantable `SeManageVolumePrivilege` ("Perform volume maintenance tasks").
+- **`container create`/`run` are UNELEVATED for both isolations** (measured on a filtered
+  medium-IL admin token: scratch production, filter attach, create, run, and teardown all
+  succeed). The wclayer-era per-start `BUILTIN\Administrators` gate for process isolation
+  is gone entirely -- the modern argon needs no elevation at any point. `--scratch-size`
+  needs the grantable `SeManageVolumePrivilege` ("Perform volume maintenance tasks") -- a
+  per-user setup step, not elevation.
 - `vm` commands are unelevated; membership of Hyper-V Administrators is enough.
 - `image pull`, `image ls`, `network ls|endpoints|inspect`, `guest` commands and `info` are
   unelevated.
