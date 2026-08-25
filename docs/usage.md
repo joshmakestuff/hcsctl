@@ -19,15 +19,16 @@ agent, and worked examples.
 `hcsctl info` reports what the current token holds and which commands it can run. Commands
 that need elevation say so in `hcsctl help`; nothing escalates on its own.
 
-- **`image import` is elevated.** Layer extraction needs `SeBackupPrivilege` and
-  `SeRestorePrivilege`, both removed from a UAC-filtered token. `ProcessBaseLayer` additionally
-  needs an enabled `BUILTIN\Administrators` SID, which no user-rights assignment supplies in a
-  filtered token.
+- **`image import` and `image export` are elevated.** The computestorage service refuses a
+  UAC-filtered token, and the import/export calls run under `SeBackupPrivilege` +
+  `SeRestorePrivilege`, both removed from a filtered token. (The old wclayer-era
+  `BUILTIN\Administrators` group check is gone with wclayer.)
 - `image rm`, `layer mount|unmount`, and every `storage` command are elevated.
-- Hyper-V-isolated `container` commands run unelevated, with two per-option exceptions:
-  `--mount` is elevated, and `--scratch-size` needs the grantable `SeManageVolumePrivilege`
-  ("Perform volume maintenance tasks") -- a per-user setup step, not elevation.
-- **Process-isolated containers are elevated at every start** (see below).
+- **`container create`/`run` are elevated for both isolations**: the scratch is produced by
+  computestorage (blank.vhdx copy, attach, `InitializeWritableLayer`), which a filtered token
+  cannot call. The wclayer-era per-start `BUILTIN\Administrators` gate for process isolation
+  is gone -- elevation is per-create, not per-start. `--scratch-size` additionally needs the
+  grantable `SeManageVolumePrivilege` ("Perform volume maintenance tasks").
 - `vm` commands are unelevated; membership of Hyper-V Administrators is enough.
 - `image pull`, `image ls`, `network ls|endpoints|inspect`, `guest` commands and `info` are
   unelevated.

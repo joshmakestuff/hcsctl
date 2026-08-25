@@ -31,10 +31,10 @@ import (
 	winio "github.com/Microsoft/go-winio"
 	"github.com/Microsoft/go-winio/pkg/guid"
 	"github.com/Microsoft/go-winio/vhd"
-	"github.com/Microsoft/hcsshim"
 	"github.com/Microsoft/hcsshim/computestorage"
 	"github.com/Microsoft/hcsshim/osversion"
 	"github.com/joshmakestuff/hcsctl/internal/cli"
+	"github.com/joshmakestuff/hcsctl/internal/layerid"
 	"github.com/joshmakestuff/hcsctl/internal/scratch"
 	"github.com/joshmakestuff/hcsctl/internal/store"
 	"github.com/spf13/cobra"
@@ -478,25 +478,13 @@ func overlayLayerID(p string) (string, error) {
 		}
 		return g.String(), nil
 	}
-	g, err := hcsshim.NameToGuid(filepath.Base(p))
-	if err != nil {
-		return "", fmt.Errorf("NameToGuid(%s): %w", filepath.Base(p), err)
-	}
-	return g.ToString(), nil
+	return layerid.For(filepath.Base(p)), nil
 }
 
 // layerDataFor builds the LayerData every computestorage call wants: parents topmost first,
 // absolute paths, schema 2.1. An empty parent list is a base layer.
 func layerDataFor(parents []string) (computestorage.LayerData, error) {
-	data := computestorage.LayerData{SchemaVersion: computestorage.Version{Major: 2, Minor: 1}}
-	for _, p := range parents {
-		g, err := hcsshim.NameToGuid(filepath.Base(p))
-		if err != nil {
-			return data, fmt.Errorf("NameToGuid(%s): %w", filepath.Base(p), err)
-		}
-		data.Layers = append(data.Layers, computestorage.Layer{Id: g.ToString(), Path: p, PathType: "AbsolutePath"})
-	}
-	return data, nil
+	return layerid.DataFor(parents)
 }
 
 func checkParents(parents []string) error {
@@ -665,8 +653,7 @@ func openScratch(dir string) (syscall.Handle, string, error) {
 	return h, p, nil
 }
 
-// chainFor resolves a store reference to its materialized layer directories, topmost first,
-// the order LayerData wants. The call site checks blank.vhdx in the base.
+// chainFor resolves a store reference via the one chain resolver.
 func chainFor(st *store.Store, ref string) ([]string, error) {
 	rec, err := st.ReadRecord(ref)
 	if err != nil {
@@ -675,22 +662,17 @@ func chainFor(st *store.Store, ref string) ([]string, error) {
 		}
 		return nil, err
 	}
-	// ReadRecord guarantees structural soundness (non-empty, matched arrays, digest syntax).
-	var chain []string // topmost first
-	for _, d := range rec.DiffIDs {
-		p := st.LayerPath(d)
-		if _, err := os.Stat(p); err != nil {
-			return nil, cli.Usagef("layer %s is not materialized -- run image import", filepath.Base(p))
-		}
-		chain = append([]string{p}, chain...)
+	chain, err := st.Chain(rec)
+	if err != nil {
+		return nil, cli.Usagef("%v", err)
 	}
 	return chain, nil
 }
 
 func mount(ref, base, storeDir, scratchDir string, parents []string, e cli.Emit) error {
 	if ref != "" {
-		// wclayer import creates blank.vhdx in base layers, so a store layer mounts as-is;
-		// nothing here mutates the store.
+		// image import completes base layers with blank.vhdx, so a store layer
+		// mounts as-is; nothing here mutates the store.
 		st, err := store.New(storeDir)
 		if err != nil {
 			return err
@@ -835,70 +817,4 @@ func copyFile(src, dst string) error {
 		return err
 	}
 	return d.Sync()
-}
-
-// PrepareScratchVHD produces the computestorage scratch for a container's writable
-// layer: sandbox.vhdx (a blank.vhdx copy) attached and InitializeWritableLayer'd,
-// then detached -- the state the wclayer stack (ActivateLayer + PrepareLayer +
-// GetLayerMountPath) consumes. This is the measured working shape for `container
-// --storage vhd` (argon on a computestorage VHD scratch, #86): the filter attach
-// is not part of it, because the container path runs its own wclayer stack and the
-// storage-filter presentation is what `storage mount` is for. ELEVATED.
-func PrepareScratchVHD(base, scratchDir string, parents []string, e cli.Emit) (sandbox string, err error) {
-	blank := filepath.Join(base, blankName)
-	if _, err := os.Stat(blank); err != nil {
-		return "", cli.Usagef("%s has no %s -- run storage setup-base first", base, blankName)
-	}
-	data, err := layerDataFor(parents)
-	if err != nil {
-		return "", err
-	}
-	if err := os.MkdirAll(scratchDir, 0o755); err != nil {
-		return "", err
-	}
-	sandbox = filepath.Join(scratchDir, sandboxName)
-	if _, err := os.Stat(sandbox); err != nil {
-		if err := copyFile(blank, sandbox); err != nil {
-			return "", fmt.Errorf("copy %s -> %s: %w", blank, sandbox, err)
-		}
-		e.Progress("scratch:   %s (fresh from %s)", sandbox, blankName)
-	} else {
-		e.Progress("scratch:   %s (existing, not reinitialized)", sandbox)
-	}
-
-	// A xenon (hyperv-isolated) container opens the scratch VHD at create under
-	// the Virtual Machines group; without the ACE the create is refused
-	// (Access denied, hcsctl#86 door 2). CreateScratchLayer's product carries
-	// it; mirror it here so --storage vhd works for both isolations.
-	if err := scratch.GrantVMGroupAccess(sandbox); err != nil {
-		return "", err
-	}
-
-	h, err := vhd.OpenVirtualDisk(sandbox, vhd.VirtualDiskAccessNone, vhd.OpenVirtualDiskFlagNone)
-	if err != nil {
-		return "", fmt.Errorf("OpenVirtualDisk(%s): %w", sandbox, err)
-	}
-	defer syscall.CloseHandle(h)
-
-	ctx := context.Background()
-	if err := vhd.AttachVirtualDisk(h, vhd.AttachVirtualDiskFlagPermanentLifetime,
-		&vhd.AttachVirtualDiskParameters{Version: 2}); err != nil {
-		return "", fmt.Errorf("AttachVirtualDisk: %w", err)
-	}
-	vol, err := computestorage.GetLayerVhdMountPath(ctx, windows.Handle(h))
-	if err != nil {
-		_ = vhd.DetachVirtualDisk(h)
-		return "", fmt.Errorf("GetLayerVhdMountPath: %w", err)
-	}
-	e.Progress("volume:    %s", vol)
-	if err := computestorage.InitializeWritableLayer(ctx, vol, data); err != nil {
-		_ = vhd.DetachVirtualDisk(h)
-		return "", fmt.Errorf("InitializeWritableLayer: %w", err)
-	}
-	e.Progress("InitializeWritableLayer ok")
-	if err := vhd.DetachVirtualDisk(h); err != nil {
-		return "", fmt.Errorf("DetachVirtualDisk: %w", err)
-	}
-	e.Progress("detached, ready for the wclayer stack")
-	return sandbox, nil
 }
