@@ -75,6 +75,15 @@ func importImage(ref, storeDir string, sizeGB uint64, e cli.Emit) error {
 		entry := st.LayerPath(diffID)
 		if _, err := os.Stat(filepath.Join(entry, "Files")); err == nil {
 			e.Progress("  layer %d/%d already materialized: %s", i+1, len(rec.DiffIDs), entry)
+			// A crash between publish and base completion leaves Files without
+			// blank.vhdx; finish the base now.
+			if i == 0 {
+				if _, err := os.Stat(filepath.Join(entry, "blank.vhdx")); err != nil {
+					if err := finishBase(ctx, entry, sizeGB, e); err != nil {
+						return err
+					}
+				}
+			}
 			chain = append([]string{entry}, chain...)
 			continue
 		}
@@ -124,15 +133,6 @@ func importImage(ref, storeDir string, sizeGB uint64, e cli.Emit) error {
 		e.Progress("     imported in %s", time.Since(start).Round(time.Millisecond))
 		total += stats.Bytes
 
-		// Base completion happens BEFORE publish, so the sentinel (blank.vhdx
-		// at the final path) only ever appears on a finished base.
-		if i == 0 {
-			if err := finishBase(ctx, importTmp, sizeGB, e); err != nil {
-				_ = computestorage.DestroyLayer(ctx, importTmp)
-				return err
-			}
-		}
-
 		if err := os.MkdirAll(filepath.Dir(entry), 0o755); err != nil {
 			_ = computestorage.DestroyLayer(ctx, importTmp)
 			return err
@@ -140,6 +140,18 @@ func importImage(ref, storeDir string, sizeGB uint64, e cli.Emit) error {
 		if err := os.Rename(importTmp, entry); err != nil {
 			_ = computestorage.DestroyLayer(ctx, importTmp)
 			return fmt.Errorf("publish layer %d: %w", i, err)
+		}
+
+		// Base completion happens AFTER publish: SetupContainerBaseLayer bakes
+		// blank-base.vhdx's ABSOLUTE path into blank.vhdx's parent locator
+		// (measured -- a rename after setup breaks the VHDX chain), so the
+		// VHDs must be created at the layer's final path. blank.vhdx is the
+		// completion sentinel store.Chain checks, and the skip branch above
+		// heals a crash between publish and completion.
+		if i == 0 {
+			if err := finishBase(ctx, entry, sizeGB, e); err != nil {
+				return err
+			}
 		}
 		chain = append([]string{entry}, chain...)
 	}

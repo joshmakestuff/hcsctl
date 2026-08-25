@@ -115,6 +115,12 @@ func IsNotFound(err error) bool { return codeIs(err, hcsNotFound) }
 // the system has already stopped.
 func IsAlreadyStopped(err error) bool { return codeIs(err, hcsAlreadyStopped) }
 
+// IsTimeout reports whether err is a wait expiring rather than failing --
+// HRESULT_FROM_WIN32 of WAIT_TIMEOUT or ERROR_TIMEOUT.
+func IsTimeout(err error) bool {
+	return codeIs(err, 0x80070102) || codeIs(err, 0x800705B4)
+}
+
 // -- operations --------------------------------------------------------------------------
 
 func utf16arg(s string) uintptr {

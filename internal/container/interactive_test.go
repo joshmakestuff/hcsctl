@@ -49,22 +49,22 @@ func TestCtrlCReaderCancelsWithoutForwardingControlByte(t *testing.T) {
 	}
 }
 
+// interruptibleProcess fakes the waitProc surface: WaitExit blocks until the
+// process is terminated, then reports a clean exit.
 type interruptibleProcess struct {
 	killed chan struct{}
 	once   sync.Once
 }
 
-func (p *interruptibleProcess) Pid() int                           { return 42 }
-func (p *interruptibleProcess) Kill() error                        { p.once.Do(func() { close(p.killed) }); return nil }
-func (p *interruptibleProcess) Wait() error                        { <-p.killed; return nil }
-func (p *interruptibleProcess) WaitTimeout(time.Duration) error    { return nil }
-func (p *interruptibleProcess) ExitCode() (int, error)             { return 0, nil }
-func (p *interruptibleProcess) ResizeConsole(uint16, uint16) error { return nil }
-func (p *interruptibleProcess) Stdio() (io.WriteCloser, io.ReadCloser, io.ReadCloser, error) {
-	return nil, nil, nil, nil
+func (p *interruptibleProcess) Terminate(time.Duration) error {
+	p.once.Do(func() { close(p.killed) })
+	return nil
 }
-func (p *interruptibleProcess) CloseStdin() error { return nil }
-func (p *interruptibleProcess) Close() error      { return nil }
+
+func (p *interruptibleProcess) WaitExit(time.Duration) (string, error) {
+	<-p.killed
+	return `{"ProcessId":42,"Exited":true,"ExitCode":0}`, nil
+}
 
 func TestWaitInteractiveKillsOnlyTheExecProcessOnInterrupt(t *testing.T) {
 	process := &interruptibleProcess{killed: make(chan struct{})}
@@ -72,9 +72,9 @@ func TestWaitInteractiveKillsOnlyTheExecProcessOnInterrupt(t *testing.T) {
 	close(interrupt)
 	stdinClosed := false
 
-	timedOut, interrupted, err := waitInteractive(process, cli.Emit{JSON: true}, 0, interrupt, func() {
+	_, timedOut, interrupted, err := waitInteractive(process, cli.Emit{JSON: true}, 0, interrupt, func() {
 		stdinClosed = true
-	}, process.Pid())
+	}, 42)
 	if err != nil {
 		t.Fatalf("wait interactive: %v", err)
 	}

@@ -350,6 +350,14 @@ func TestStreamJSONTypesStderr(t *testing.T) {
 	if err := os.WriteFile(recordPath(t, store, "fake/img:1"), []byte(rec), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	// The format-2 marker and the base sentinel, so the run gets past chain
+	// resolution and fails at the first real HCS/VHD call.
+	if err := os.WriteFile(filepath.Join(store, "format"), []byte("2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(layerDir, "blank.vhdx"), []byte("not a real vhdx"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	args := []string{"container", "run", "--ref", "fake/img:1", "--store", store, "--json"}
 
 	framed := invoke(t, append(args, "--stream-json")...)
