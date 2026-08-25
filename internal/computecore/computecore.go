@@ -410,10 +410,12 @@ func (p *Process) Terminate(timeout time.Duration) error {
 	return err
 }
 
-// CloseStdin closes the process's stdin on the guest side, the modern
-// equivalent of hcsshim's Process.CloseStdin.
+// CloseStdin closes the process's stdin on the guest side. The modify
+// document nests the handle (hcsshim's wire shape); a flat
+// {"Operation":"CloseHandle","Handle":"StdIn"} is silently ignored and the
+// guest never sees EOF (measured -- a piped interactive exec hangs).
 func (p *Process) CloseStdin(timeout time.Duration) error {
-	const settings = `{"Operation":"CloseHandle","Handle":"StdIn"}`
+	const settings = `{"Operation":"CloseHandle","CloseHandle":{"Handle":"StdIn"}}`
 	_, err := operation("HcsModifyProcess", procModifyProcess, p.handle, timeout, utf16arg(settings))
 	return err
 }

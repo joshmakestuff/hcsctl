@@ -521,18 +521,23 @@ func chainFor(st *store.Store, ref string) ([]string, error) {
 	return chain, nil
 }
 
-// locateUVM finds the uppermost layer carrying a UtilityVM directory, as hcsshim's internal
-// uvmfolder.LocateUVMFolder does.
+// locateUVM finds the uppermost layer whose UtilityVM is PREPARED -- it
+// carries the SystemTemplate.vhdx SetupUtilityVMBaseLayer produced. A diff
+// layer's tar can carry a UtilityVM delta too, but the modern import prepares
+// only the base's (the legacy path cloned parent UVMs per layer; the modern
+// one does not), and a document naming an unprepared UVM fails create with
+// 0x80070002 (measured on servercore:ltsc2022). The utility VM therefore runs
+// the BASE build; the container's own filesystem still stacks the full chain.
 func locateUVM(chain []string) (string, error) {
 	for _, l := range chain {
 		p := filepath.Join(l, "UtilityVM")
-		if _, err := os.Stat(p); err == nil {
+		if _, err := os.Stat(filepath.Join(p, "SystemTemplate.vhdx")); err == nil {
 			return p, nil
 		} else if !os.IsNotExist(err) {
 			return "", err
 		}
 	}
-	return "", fmt.Errorf("no layer in the chain carries a UtilityVM directory -- this image cannot boot Hyper-V isolated (a Nano/Server Core base normally has one; a --platform-mismatched pull will not)")
+	return "", fmt.Errorf("no layer in the chain carries a prepared UtilityVM -- this image cannot boot Hyper-V isolated (a Nano/Server Core base normally has one; a --platform-mismatched pull will not, and a pre-format-2 import needs re-importing)")
 }
 
 // layersFor builds the document's layer list: ids from layerid (matching what

@@ -22,7 +22,12 @@ func TestLocateUVM(t *testing.T) {
 		for _, u := range withUVM {
 			d := t.TempDir()
 			if u {
+				// A PREPARED UtilityVM: locateUVM keys on the template VHD
+				// SetupUtilityVMBaseLayer produced, not the bare directory.
 				if err := os.Mkdir(filepath.Join(d, "UtilityVM"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(d, "UtilityVM", "SystemTemplate.vhdx"), []byte("x"), 0o644); err != nil {
 					t.Fatal(err)
 				}
 			}
