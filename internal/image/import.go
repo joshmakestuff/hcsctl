@@ -3,19 +3,39 @@
 package image
 
 import (
-	"compress/gzip"
 	"context"
-	"encoding/json"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
 	"time"
 
 	winio "github.com/Microsoft/go-winio"
-	"github.com/Microsoft/hcsshim/pkg/ociwclayer"
+	"github.com/Microsoft/hcsshim/computestorage"
 	"github.com/joshmakestuff/hcsctl/internal/cli"
+	"github.com/joshmakestuff/hcsctl/internal/layerid"
+	"github.com/joshmakestuff/hcsctl/internal/scratch"
 	"github.com/joshmakestuff/hcsctl/internal/store"
+	"github.com/joshmakestuff/hcsctl/internal/transport"
 )
+
+// The modern import pipeline, per layer bottom-up (measured end to end,
+// hcsspike modernlc, docs/findings.md 2026-08-25):
+//
+//	blob -> transport.Stage (plain files, no privileges)
+//	     -> HcsImportLayer under SeBackup/SeRestore, parents topmost-first
+//	     -> rename-publish into <root>/layers/<diffID>
+//	base only, afterward:
+//	     -> SetupContainerBaseLayer (creates blank-base.vhdx + blank.vhdx,
+//	        replaces the imported Hives with *_BASE hardlinks)
+//	     -> re-add the five *_Delta stubs (setup strips them; HcsExportLayer
+//	        of the base later requires them)
+//	     -> UtilityVM present: SetupUtilityVMBaseLayer + the Virtual Machines
+//	        group ACE on both template VHDs (the xenon requirement)
+//
+// No wclayer anywhere: zero-parent HcsImportLayer runs no base processing, and
+// setup-base IS the modern completion of the base.
 
 type importResult struct {
 	OK      bool     `json:"ok"`
@@ -25,12 +45,11 @@ type importResult struct {
 	Bytes   int64    `json:"bytes"`
 }
 
-func importImage(ref, storeDir string, e cli.Emit) error {
+func importImage(ref, storeDir string, sizeGB uint64, e cli.Emit) error {
 	st, err := store.New(storeDir)
 	if err != nil {
 		return err
 	}
-
 	rec, err := st.ReadRecord(ref)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -38,15 +57,15 @@ func importImage(ref, storeDir string, e cli.Emit) error {
 		}
 		return err
 	}
-
-	// hcsshim's ImportLayerFromTar documents that the caller must hold backup and restore
-	// privileges. This can only ENABLE what the token already carries, so it is not a way
-	// around elevation: import needs an enabled BUILTIN\Administrators SID at
-	// ProcessBaseLayer, which is a group check no user-rights grant satisfies.
-	if err := winio.EnableProcessPrivileges([]string{winio.SeBackupPrivilege, winio.SeRestorePrivilege}); err != nil {
-		return fmt.Errorf("enable backup/restore privileges (rerun elevated): %w", err)
+	if err := st.CheckFormat(); err != nil {
+		return err
 	}
-	e.Progress("privileges: SeBackupPrivilege + SeRestorePrivilege enabled")
+
+	tmpRoot := filepath.Join(st.Root, "tmp")
+	if err := os.MkdirAll(tmpRoot, 0o755); err != nil {
+		return err
+	}
+	sweepOrphans(tmpRoot, e)
 
 	ctx := context.Background()
 	var chain []string // topmost first
@@ -54,7 +73,6 @@ func importImage(ref, storeDir string, e cli.Emit) error {
 
 	for i, diffID := range rec.DiffIDs {
 		entry := st.LayerPath(diffID)
-
 		if _, err := os.Stat(filepath.Join(entry, "Files")); err == nil {
 			e.Progress("  layer %d/%d already materialized: %s", i+1, len(rec.DiffIDs), entry)
 			chain = append([]string{entry}, chain...)
@@ -66,39 +84,68 @@ func importImage(ref, storeDir string, e cli.Emit) error {
 		if err != nil {
 			return fmt.Errorf("open blob for layer %d: %w", i, err)
 		}
-		gz, err := gzip.NewReader(f)
-		if err != nil {
-			f.Close()
-			return fmt.Errorf("gunzip layer %d: %w", i, err)
-		}
 
-		e.Progress("  layer %d/%d -> %s", i+1, len(rec.DiffIDs), entry)
+		// Stage the transport form. Plain files -- no privileges; parents are
+		// consulted only to materialize cross-layer hardlinks.
+		staging := filepath.Join(tmpRoot, "stage-"+randSuffix())
+		e.Progress("  layer %d/%d staging -> %s", i+1, len(rec.DiffIDs), staging)
 		start := time.Now()
-
-		// Extract + ProcessBaseLayer + ProcessUtilityVMImage, in one call. parents are the
-		// already-materialized layers below this one, TOPMOST FIRST -- hcsshim's doc says
-		// "lowest to highest" but its own callers pass topmost-first, and topmost-first
-		// materializes and mounts correctly (measured on a six-layer chain).
-		n, err := ociwclayer.ImportLayerFromTar(ctx, gz, entry, chain)
-		gz.Close()
+		stats, err := transport.Stage(f, staging, chain)
 		f.Close()
 		if err != nil {
-			return fmt.Errorf("import layer %d: %w", i, err)
+			_ = os.RemoveAll(staging)
+			return fmt.Errorf("stage layer %d: %w", i, err)
 		}
-		e.Progress("     %d MB in %s", n/(1024*1024), time.Since(start).Round(time.Millisecond))
-		total += n
+		e.Progress("     staged %d files, %d dirs, %d links, %d tombstones in %s",
+			stats.Files, stats.Dirs, stats.Links, stats.Tombstones, time.Since(start).Round(time.Millisecond))
 
+		// Import into a temp sibling and publish by rename, so a layer at its
+		// final path is always complete.
+		importTmp := filepath.Join(tmpRoot, "import-"+randSuffix())
+		data, err := layerid.DataFor(chain)
+		if err != nil {
+			_ = os.RemoveAll(staging)
+			return err
+		}
+		if err := os.MkdirAll(importTmp, 0o755); err != nil {
+			_ = os.RemoveAll(staging)
+			return err
+		}
+		e.Progress("  layer %d/%d HcsImportLayer (%d parents)", i+1, len(rec.DiffIDs), len(chain))
+		start = time.Now()
+		err = winio.RunWithPrivileges([]string{winio.SeBackupPrivilege, winio.SeRestorePrivilege}, func() error {
+			return computestorage.ImportLayer(ctx, importTmp, staging, data)
+		})
+		_ = os.RemoveAll(staging)
+		if err != nil {
+			_ = computestorage.DestroyLayer(ctx, importTmp)
+			return fmt.Errorf("import layer %d (rerun elevated?): %w", i, err)
+		}
+		e.Progress("     imported in %s", time.Since(start).Round(time.Millisecond))
+		total += stats.Bytes
+
+		// Base completion happens BEFORE publish, so the sentinel (blank.vhdx
+		// at the final path) only ever appears on a finished base.
+		if i == 0 {
+			if err := finishBase(ctx, importTmp, sizeGB, e); err != nil {
+				_ = computestorage.DestroyLayer(ctx, importTmp)
+				return err
+			}
+		}
+
+		if err := os.MkdirAll(filepath.Dir(entry), 0o755); err != nil {
+			_ = computestorage.DestroyLayer(ctx, importTmp)
+			return err
+		}
+		if err := os.Rename(importTmp, entry); err != nil {
+			_ = computestorage.DestroyLayer(ctx, importTmp)
+			return fmt.Errorf("publish layer %d: %w", i, err)
+		}
 		chain = append([]string{entry}, chain...)
 	}
 
-	// hcsshim does NOT write layerchain.json -- it is a moby convention, and the consumer of
-	// this store reads it. A base layer's chain is JSON null; higher layers list their parents
-	// topmost first.
-	for i, entry := range chain {
-		parents := chain[i+1:]
-		if err := writeLayerChain(entry, parents); err != nil {
-			return fmt.Errorf("write layerchain.json: %w", err)
-		}
+	if err := st.WriteFormat(); err != nil {
+		return err
 	}
 
 	res := importResult{OK: true, Command: "image import", Ref: rec.Ref, Chain: chain, Bytes: total}
@@ -111,15 +158,72 @@ func importImage(ref, storeDir string, e cli.Emit) error {
 	return nil
 }
 
-func writeLayerChain(entry string, parents []string) error {
-	var b []byte
-	var err error
-	if len(parents) == 0 {
-		b = []byte("null")
-	} else if b, err = json.Marshal(parents); err != nil {
+// finishBase completes a freshly imported base layer: container base setup,
+// the delta-hive stubs setup strips, and -- when the image carries a utility
+// VM -- the UVM template VHDs with the Virtual Machines group ACE.
+func finishBase(ctx context.Context, base string, sizeGB uint64, e cli.Emit) error {
+	e.Progress("  SetupContainerBaseLayer (%d GB)", sizeGB)
+	start := time.Now()
+	if err := computestorage.SetupContainerBaseLayer(ctx, base,
+		filepath.Join(base, "blank-base.vhdx"), filepath.Join(base, "blank.vhdx"), sizeGB); err != nil {
+		return fmt.Errorf("SetupContainerBaseLayer: %w", err)
+	}
+	e.Progress("     done in %s", time.Since(start).Round(time.Millisecond))
+
+	// Setup replaces the imported Hives with *_BASE hardlinks and strips the
+	// *_Delta stubs; HcsExportLayer of this base later requires them back
+	// (measured), so they are part of the finished shape.
+	if err := transport.WriteDeltaHiveStubs(filepath.Join(base, "Hives")); err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(entry, "layerchain.json"), b, 0o644)
+
+	uvm := filepath.Join(base, "UtilityVM")
+	if _, err := os.Stat(filepath.Join(uvm, "Files")); err != nil {
+		return nil // no utility VM in this image
+	}
+	e.Progress("  SetupUtilityVMBaseLayer (%d GB)", sizeGB)
+	start = time.Now()
+	// The UVM directory, NOT UtilityVM\Files -- the Files path fails
+	// ERROR_GEN_FAILURE (measured).
+	if err := computestorage.SetupUtilityVMBaseLayer(ctx, uvm,
+		filepath.Join(uvm, "SystemTemplateBase.vhdx"), filepath.Join(uvm, "SystemTemplate.vhdx"), sizeGB); err != nil {
+		return fmt.Errorf("SetupUtilityVMBaseLayer: %w", err)
+	}
+	e.Progress("     done in %s", time.Since(start).Round(time.Millisecond))
+	// A xenon's worker opens the template VHDs under the Virtual Machines
+	// group; grant at import so xenon create stays read-only against the store.
+	for _, vhd := range []string{
+		filepath.Join(uvm, "SystemTemplateBase.vhdx"),
+		filepath.Join(uvm, "SystemTemplate.vhdx"),
+	} {
+		if err := scratch.GrantVMGroupAccess(vhd); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// sweepOrphans clears leftovers of interrupted imports. Staging dirs are plain
+// files; import dirs may need DestroyLayer.
+func sweepOrphans(tmpRoot string, e cli.Emit) {
+	entries, err := os.ReadDir(tmpRoot)
+	if err != nil {
+		return
+	}
+	for _, ent := range entries {
+		p := filepath.Join(tmpRoot, ent.Name())
+		if err := os.RemoveAll(p); err != nil {
+			if derr := computestorage.DestroyLayer(context.Background(), p); derr != nil {
+				e.Progress("WARNING: orphaned import temp %s: %v", p, derr)
+			}
+		}
+	}
+}
+
+func randSuffix() string {
+	var b [6]byte
+	_, _ = rand.Read(b[:])
+	return hex.EncodeToString(b[:])
 }
 
 func trimSha(d string) string {

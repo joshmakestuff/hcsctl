@@ -134,6 +134,78 @@ func (r Record) validate() error {
 	return nil
 }
 
+// FormatVersion is the store's layer format. Format 2 layers are
+// computestorage import products (HcsImportLayer + SetupContainerBaseLayer);
+// format-1 (wclayer) layers carry differently shaped hives and are not read --
+// they are deleted with `image rm` and re-imported.
+const FormatVersion = "2"
+
+func (s *Store) formatPath() string { return filepath.Join(s.Root, "format") }
+
+// Format reads the store's format marker; "" means unmarked (a pre-format-2
+// store, or a store with nothing materialized yet).
+func (s *Store) Format() string {
+	b, err := os.ReadFile(s.formatPath())
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(b))
+}
+
+// WriteFormat stamps the store as the current format.
+func (s *Store) WriteFormat() error {
+	if err := os.MkdirAll(s.Root, 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(s.formatPath(), []byte(FormatVersion+"\n"), 0o644)
+}
+
+// hasMaterializedLayers reports whether anything sits under <root>/layers.
+func (s *Store) hasMaterializedLayers() bool {
+	entries, err := os.ReadDir(filepath.Join(s.Root, "layers"))
+	return err == nil && len(entries) > 0
+}
+
+// CheckFormat guards a store that predates format 2: materialized layers with
+// no marker are wclayer products, unreadable by the modern path.
+func (s *Store) CheckFormat() error {
+	if f := s.Format(); f != "" && f != FormatVersion {
+		return fmt.Errorf("store %s is format %s; this build reads format %s -- "+
+			"remove the layers with `image rm` and re-run image import", s.Root, f, FormatVersion)
+	}
+	if s.Format() == "" && s.hasMaterializedLayers() {
+		return fmt.Errorf("store %s holds wclayer-era layers (no format marker) -- "+
+			"remove them with `image rm` and re-run image import", s.Root)
+	}
+	return nil
+}
+
+// Chain resolves a record's materialized layer chain, TOPMOST FIRST -- the
+// order every consumer (documents, LayerData, scratch) takes. Materialization
+// sentinel: Files\ per layer, plus blank.vhdx on the base (setup-base
+// completed -- every scratch starts from it).
+func (s *Store) Chain(r Record) ([]string, error) {
+	if err := s.CheckFormat(); err != nil {
+		return nil, err
+	}
+	var chain []string // built by prepending: record is base first
+	for i, diffID := range r.DiffIDs {
+		entry := s.LayerPath(diffID)
+		if _, err := os.Stat(filepath.Join(entry, "Files")); err != nil {
+			return nil, fmt.Errorf("layer %d/%d (%s) is not materialized -- run image import --ref %s",
+				i+1, len(r.DiffIDs), entry, r.Ref)
+		}
+		if i == 0 {
+			if _, err := os.Stat(filepath.Join(entry, "blank.vhdx")); err != nil {
+				return nil, fmt.Errorf("base layer %s has no blank.vhdx -- run image import --ref %s",
+					entry, r.Ref)
+			}
+		}
+		chain = append([]string{entry}, chain...)
+	}
+	return chain, nil
+}
+
 // Records lists every record in the store, unsorted; callers sort.
 func (s *Store) Records() ([]Record, error) {
 	entries, err := os.ReadDir(s.ImagesDir())
