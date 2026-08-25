@@ -71,12 +71,23 @@ var (
 	procRevokeVmAccess = dll.NewProc("HcsRevokeVmAccess")
 )
 
-// HRESULTs that carry meaning to callers.
+// HRESULTs that carry meaning to callers. computecore reports these WITHOUT
+// the customer bit vmcompute set (0x8037010E where vmcompute said 0xC037010E
+// -- measured), so matching masks that bit.
 const (
-	hcsNotFound       = 0xC037010E // HCS_E_SYSTEM_NOT_FOUND
+	hcsNotFound       = 0x8037010E // HCS_E_SYSTEM_NOT_FOUND
 	hcsAlreadyStopped = 0x80370110 // HCS_E_VM_ALREADY_STOPPED -- also what a
 	// terminate after a completed graceful shutdown returns (measured)
+
+	// severityBit is what separates vmcompute's 0xC037010E from computecore's
+	// 0x8037010E for the same condition.
+	severityBit = 0x40000000
 )
+
+func codeIs(err error, hresult uint32) bool {
+	e, ok := err.(*Error)
+	return ok && e.Code&^uint32(severityBit) == hresult
+}
 
 // Error carries the HRESULT and, when HCS supplied one, the result document.
 // The document names the part of the configuration HCS rejected -- the single
@@ -98,17 +109,11 @@ func (e *Error) Error() string {
 // IsNotFound reports whether err is HCS saying the compute system does not
 // exist. HCS destroys a system when it exits (once the last handle closes), so
 // not-found is the ordinary "stopped" answer, not an anomaly.
-func IsNotFound(err error) bool {
-	e, ok := err.(*Error)
-	return ok && e.Code == hcsNotFound
-}
+func IsNotFound(err error) bool { return codeIs(err, hcsNotFound) }
 
 // IsAlreadyStopped reports whether err is HCS refusing an operation because
 // the system has already stopped.
-func IsAlreadyStopped(err error) bool {
-	e, ok := err.(*Error)
-	return ok && e.Code == hcsAlreadyStopped
-}
+func IsAlreadyStopped(err error) bool { return codeIs(err, hcsAlreadyStopped) }
 
 // -- operations --------------------------------------------------------------------------
 

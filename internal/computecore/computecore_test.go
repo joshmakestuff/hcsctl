@@ -26,8 +26,11 @@ func TestErrorWithoutResultOmitsSuffix(t *testing.T) {
 }
 
 func TestIsNotFound(t *testing.T) {
-	if !IsNotFound(&Error{Op: "x", Code: hcsNotFound}) {
-		t.Error("HCS_E_SYSTEM_NOT_FOUND not recognised")
+	// computecore's spelling (measured) and vmcompute's legacy severity both match.
+	for _, code := range []uint32{0x8037010E, 0xC037010E} {
+		if !IsNotFound(&Error{Op: "x", Code: code}) {
+			t.Errorf("0x%08X not recognised as not-found", code)
+		}
 	}
 	if IsNotFound(&Error{Op: "x", Code: 0x80070005}) {
 		t.Error("access denied misread as not-found")

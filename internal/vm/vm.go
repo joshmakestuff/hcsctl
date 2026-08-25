@@ -24,9 +24,9 @@ import (
 	"github.com/Microsoft/go-winio/pkg/guid"
 	"github.com/Microsoft/hcsshim/hcn"
 	"github.com/joshmakestuff/hcsctl/internal/cli"
+	"github.com/joshmakestuff/hcsctl/internal/computecore"
 	"github.com/joshmakestuff/hcsctl/internal/guest"
 	"github.com/joshmakestuff/hcsctl/internal/store"
-	"github.com/joshmakestuff/hcsctl/internal/vmcompute"
 	"github.com/spf13/cobra"
 )
 
@@ -95,7 +95,53 @@ const (
 	startTimeout     = 120 * time.Second
 	terminateTimeout = 60 * time.Second
 	shutdownTimeout  = 120 * time.Second
+
+	propertiesTimeout = 30 * time.Second
 )
+
+// shutdownOptions is required by HcsShutDownComputeSystem on a VM: NULL
+// options fails 0x80070032 ERROR_NOT_SUPPORTED even with a live guest
+// (measured) -- the same code the missing-Services-section defect produces, so
+// it misdirects without this.
+const shutdownOptions = `{"Mechanism":"IntegrationService","Type":"Shutdown"}`
+
+// waitStopped polls the system's properties until they report Stopped. On
+// computecore the shutdown/terminate operation completing is the REQUEST
+// landing; the exit can lag, and while this process holds a handle the system
+// stays queryable after it stops (destroyed on last close) -- so the exit
+// signal is Stopped:true, never properties-stops-answering (measured).
+func waitStopped(sys *computecore.System, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		props, err := sys.Properties("", propertiesTimeout)
+		if err != nil {
+			// The system can vanish if another handle closed: also stopped.
+			return nil
+		}
+		var p struct {
+			Stopped bool `json:"Stopped"`
+		}
+		if json.Unmarshal([]byte(props), &p) == nil && p.Stopped {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("system still running %s after the stop request", timeout)
+		}
+		time.Sleep(time.Second)
+	}
+}
+
+// stopSystem terminates and waits for the exit, the teardown shape create's
+// rollback, stop --force and rm share.
+func stopSystem(sys *computecore.System, timeout time.Duration) error {
+	if err := sys.Terminate(timeout); err != nil {
+		if computecore.IsAlreadyStopped(err) {
+			return nil
+		}
+		return err
+	}
+	return waitStopped(sys, timeout)
+}
 
 func vmsDir(s *store.Store) string           { return filepath.Join(s.Root, "vms") }
 func vmDir(s *store.Store, id string) string { return filepath.Join(vmsDir(s), id) }
@@ -321,8 +367,8 @@ func create(opt createOptions, e cli.Emit) error {
 	// a missing grant on the parent fails at start with the child's path in the message.
 	revokeAccess, err := grantPathsWithRollback(
 		grantPaths(disk, opt.Base, opt.CopyOnWrite),
-		func(path string) error { return vmcompute.GrantVmAccess(id, path) },
-		func(path string) error { return vmcompute.RevokeVmAccess(id, path) },
+		func(path string) error { return computecore.GrantVmAccess(id, path) },
+		func(path string) error { return computecore.RevokeVmAccess(id, path) },
 	)
 	if err != nil {
 		_ = os.RemoveAll(dir)
@@ -343,13 +389,13 @@ func create(opt createOptions, e cli.Emit) error {
 		CreatedUTC: time.Now().UTC().Format(time.RFC3339),
 		Labels:     opt.Labels, DNS: opt.DNS,
 	}
-	var sys *vmcompute.System
+	var sys *computecore.System
 
 	// undo takes back every resource acquired so far, in reverse. It exists before the
 	// endpoint so failures creating it, or anything after it, also revoke the VHDX grants.
 	undo := func() {
 		if sys != nil {
-			if terr := sys.Terminate(terminateTimeout); terr != nil {
+			if terr := stopSystem(sys, terminateTimeout); terr != nil {
 				e.Progress("WARNING: leaked compute system %s: %v", id, terr)
 			}
 			sys.Close()
@@ -484,9 +530,12 @@ func samePath(a, b string) bool {
 // createSystem turns a store record into a live compute system. Both create and start go
 // through it: a VM that has exited no longer exists as a compute system, so starting one again
 // is literally creating it again over the same disk.
-func createSystem(record state) (*vmcompute.System, error) {
-	doc := buildDocument(specFor(record))
-	return vmcompute.Create(record.ID, doc, createTimeout)
+func createSystem(record state) (*computecore.System, error) {
+	doc, err := json.Marshal(buildDocument(specFor(record)))
+	if err != nil {
+		return nil, err
+	}
+	return computecore.Create(record.ID, string(doc), createTimeout)
 }
 
 // spec for the record, so create and start build the same document from the same source.
@@ -579,8 +628,8 @@ func start(id, storeDir string, e cli.Emit) error {
 	}
 
 	recreated := false
-	sys, err := vmcompute.Open(id)
-	if vmcompute.IsNotFound(err) {
+	sys, err := computecore.Open(id)
+	if computecore.IsNotFound(err) {
 		// HCS destroys a compute system when it exits, so a VM that has been stopped is
 		// simply not there any more -- "stopped" is not a state HCS keeps. The store record
 		// and the disk are what survive a power cycle, so start rebuilds the system from
@@ -666,8 +715,8 @@ guest that lacks one cannot be asked. --force powers it off.`,
 }
 
 func stop(id string, force bool, e cli.Emit) error {
-	sys, err := vmcompute.Open(id)
-	if vmcompute.IsNotFound(err) {
+	sys, err := computecore.Open(id)
+	if computecore.IsNotFound(err) {
 		// Already stopped: stop asks for a state, and the VM is in it. Success, so a teardown
 		// script can run twice.
 		e.Result(stopResult{OK: true, Command: "vm stop", ID: id, Method: "already stopped"}, func() {
@@ -684,12 +733,12 @@ func stop(id string, force bool, e cli.Emit) error {
 	if force {
 		method = "terminate"
 		e.Progress("terminating %s", id)
-		if err := sys.Terminate(terminateTimeout); err != nil {
+		if err := stopSystem(sys, terminateTimeout); err != nil {
 			return err
 		}
 	} else {
 		e.Progress("shutting down %s through the guest integration service", id)
-		if err := sys.Shutdown(shutdownTimeout); err != nil {
+		if err := sys.Shutdown(shutdownOptions, shutdownTimeout); err != nil {
 			return fmt.Errorf("%w -- a guest without the shutdown integration service "+
 				"cannot be asked; use --force to power it off", err)
 		}
@@ -745,8 +794,8 @@ func remove(id string, force bool, storeDir string, e cli.Emit) error {
 
 	// Terminate first. A VM still running holds its disk open, so the delete below would
 	// fail with a sharing violation and leave half a removal behind.
-	if sys, oerr := vmcompute.Open(id); oerr == nil {
-		terr := sys.Terminate(terminateTimeout)
+	if sys, oerr := computecore.Open(id); oerr == nil {
+		terr := stopSystem(sys, terminateTimeout)
 		sys.Close()
 		switch {
 		case terr == nil:
@@ -756,7 +805,7 @@ func remove(id string, force bool, storeDir string, e cli.Emit) error {
 		default:
 			return terr
 		}
-	} else if !vmcompute.IsNotFound(oerr) {
+	} else if !computecore.IsNotFound(oerr) {
 		// A VM that is simply not running is the ordinary case for rm and says nothing.
 		// Anything else is reported, without failing the removal -- the disk and the record
 		// still have to go.
@@ -771,7 +820,7 @@ func remove(id string, force bool, storeDir string, e cli.Emit) error {
 	// would leave a compute system behind.
 	if staterr == nil {
 		for _, p := range grantPaths(record.DiskPath, record.BaseVHDX, record.CopyOnWrite) {
-			if rerr := vmcompute.RevokeVmAccess(id, p); rerr != nil {
+			if rerr := computecore.RevokeVmAccess(id, p); rerr != nil {
 				res.Warnings = append(res.Warnings, "revoke "+p+": "+rerr.Error())
 			}
 		}
@@ -1033,7 +1082,7 @@ func list(all bool, storeDir string, e cli.Emit) error {
 // A system that has exited is simply absent: HCS destroys it rather than keeping a stopped
 // state, so this cannot be read as "everything that was ever created".
 func hostSystems() ([]systemEntry, error) {
-	doc, err := vmcompute.Enumerate("")
+	doc, err := computecore.Enumerate("", propertiesTimeout)
 	if err != nil {
 		return nil, err
 	}
@@ -1056,15 +1105,15 @@ func orDash(s string) string {
 // wrote. "stopped" is a store-side reading, not an HCS one: HCS has no stopped state, it
 // destroys the compute system when it exits, so what is measured is its absence.
 func hcsState(id string) string {
-	sys, err := vmcompute.Open(id)
-	if vmcompute.IsNotFound(err) {
+	sys, err := computecore.Open(id)
+	if computecore.IsNotFound(err) {
 		return "stopped"
 	}
 	if err != nil {
 		return "unknown"
 	}
 	defer sys.Close()
-	props, err := sys.Properties("")
+	props, err := sys.Properties("", propertiesTimeout)
 	if err != nil {
 		return "unknown"
 	}
@@ -1139,8 +1188,8 @@ func inspect(id, storeDir string, e cli.Emit) error {
 			res.Addresses = addrs
 		}
 	}
-	if sys, oerr := vmcompute.Open(id); oerr == nil {
-		props, perr := sys.Properties("")
+	if sys, oerr := computecore.Open(id); oerr == nil {
+		props, perr := sys.Properties("", propertiesTimeout)
 		sys.Close()
 		if perr != nil {
 			res.HCSError = perr.Error()
