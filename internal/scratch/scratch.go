@@ -91,6 +91,16 @@ func Prepare(scratchDir string, chainTopFirst []string, size uint64, attachFilte
 		}
 	}
 
+	if !attachFilter {
+		// Xenon: the document consumes the DIRECTORY and the utility VM
+		// initializes the writable layer in-guest -- no host-side attach, no
+		// InitializeWritableLayer (the blank.vhdx copy plus the VM-group ACE
+		// is the complete scratch, matching what the legacy service-side
+		// CreateScratchLayer produced). This is also what keeps the xenon
+		// unelevated: an unelevated attach yields no mount path (see below).
+		return &Scratch{Dir: scratchDir, Sandbox: sandbox}, nil
+	}
+
 	h, err := vhd.OpenVirtualDisk(sandbox, vhd.VirtualDiskAccessNone, vhd.OpenVirtualDiskFlagNone)
 	if err != nil {
 		return nil, fmt.Errorf("OpenVirtualDisk(%s): %w", sandbox, err)
@@ -116,6 +126,13 @@ func Prepare(scratchDir string, chainTopFirst []string, size uint64, attachFilte
 		undo()
 		return nil, fmt.Errorf("GetLayerVhdMountPath: %w", err)
 	}
+	if vol == "" {
+		// The attach succeeds unelevated but yields NO mount path -- the call
+		// reports success with an empty string (measured). Without the volume
+		// there is nothing to initialize or filter.
+		undo()
+		return nil, fmt.Errorf("the attached scratch has no mount path -- an unelevated attach mounts no volume; process isolation needs elevation")
+	}
 	if vol[len(vol)-1] != '\\' {
 		vol += `\`
 	}
@@ -126,13 +143,6 @@ func Prepare(scratchDir string, chainTopFirst []string, size uint64, attachFilte
 		}
 	}
 
-	if !attachFilter {
-		// Xenon: the document consumes the directory; leave the VHD detached.
-		if err := vhd.DetachVirtualDisk(h); err != nil {
-			return nil, fmt.Errorf("DetachVirtualDisk: %w", err)
-		}
-		return &Scratch{Dir: scratchDir, Sandbox: sandbox}, nil
-	}
 	if err := computestorage.AttachLayerStorageFilter(ctx, vol, data); err != nil {
 		undo()
 		return nil, fmt.Errorf("AttachLayerStorageFilter: %w", err)
@@ -169,15 +179,18 @@ const (
 )
 
 // Teardown releases and destroys a scratch. filtered says the argon
-// presentation was (or may have been) active: detach the storage filter and
-// the VHD before destroying. Destruction is verified by absence -- DestroyLayer
-// can report success and leave the tree.
+// presentation was (or may have been) active: detach the storage filter
+// before the VHD. The VHD detach itself is attempted unconditionally -- a
+// crashed create can leave a permanent attach behind with no filter, and
+// DestroyLayer fails on a directory holding an attached VHD (measured).
+// Destruction is verified by absence -- DestroyLayer can report success and
+// leave the tree.
 func Teardown(scratchDir string, filtered bool) error {
 	ctx := context.Background()
-	if filtered {
-		sandbox := filepath.Join(scratchDir, sandboxName)
-		if h, err := vhd.OpenVirtualDisk(sandbox, vhd.VirtualDiskAccessNone, vhd.OpenVirtualDiskFlagNone); err == nil {
-			if vol, verr := computestorage.GetLayerVhdMountPath(ctx, windows.Handle(h)); verr == nil {
+	sandbox := filepath.Join(scratchDir, sandboxName)
+	if h, err := vhd.OpenVirtualDisk(sandbox, vhd.VirtualDiskAccessNone, vhd.OpenVirtualDiskFlagNone); err == nil {
+		if filtered {
+			if vol, verr := computestorage.GetLayerVhdMountPath(ctx, windows.Handle(h)); verr == nil && vol != "" {
 				var derr error
 				for i := 0; i < detachRetries; i++ {
 					if derr = computestorage.DetachLayerStorageFilter(ctx, vol); derr == nil {
@@ -190,9 +203,10 @@ func Teardown(scratchDir string, filtered bool) error {
 					return fmt.Errorf("DetachLayerStorageFilter: %w", derr)
 				}
 			}
-			_ = vhd.DetachVirtualDisk(h)
-			_ = syscall.CloseHandle(h)
 		}
+		// Detach errors are ignored: a not-attached disk is the ordinary case.
+		_ = vhd.DetachVirtualDisk(h)
+		_ = syscall.CloseHandle(h)
 	}
 	if _, err := os.Stat(scratchDir); os.IsNotExist(err) {
 		return nil

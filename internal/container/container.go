@@ -1926,7 +1926,16 @@ func remove(o targetOptions, force bool, e cli.Emit) error {
 	}
 	s, err := readState(st, id)
 	if err != nil {
-		return err
+		// A create that died before writeState leaves a directory with no
+		// state.json -- a scratch (possibly with a still-attached sandbox)
+		// and nothing else. rm is the only thing that can ever clean it, so
+		// it proceeds with an empty record; Teardown detaches defensively.
+		if _, serr := os.Stat(containerDir(st, id)); serr == nil {
+			e.Progress("no state.json -- removing the orphaned directory (interrupted create)")
+			s = state{ID: id, Isolation: isolationProcess}
+		} else {
+			return err
+		}
 	}
 
 	// A container that is gone from HCS but still on disk is the normal state after a crash, so
