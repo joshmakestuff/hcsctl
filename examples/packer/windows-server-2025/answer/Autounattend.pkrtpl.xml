@@ -6,17 +6,15 @@
   ${image_name} and ${admin_password}. The password is written into XML, so a value that
   contains & < > " or ' will break the file. Use a simple value.
 
-  WinRM is started in the SPECIALIZE pass, not from FirstLogonCommands. Measured on Server
-  Core: a first-logon command is registered in setupact.log and never runs, because the
-  Explorer first-logon path does not exist on that edition. A specialize-pass synchronous
-  command runs as SYSTEM on every edition.
+  WinRM is started in the SPECIALIZE pass, not from FirstLogonCommands: a first-logon
+  command never runs on Server Core (the Explorer first-logon path does not exist on that
+  edition). A specialize-pass synchronous command runs as SYSTEM on every edition.
 
   The listener is created directly instead of by `winrm quickconfig`. quickconfig refuses
   when a network adapter has the Public profile, which is the profile a machine has before
   OOBE sets the network location.
 
-  Example scaffolding: replace with your own base-image process. Reused as-is from the
-  workspace image templates; measured working on Server 2025 Core.
+  Example scaffolding: replace with your own base-image process.
 -->
 <unattend xmlns="urn:schemas-microsoft-com:unattend">
 
@@ -146,14 +144,12 @@
           <Order>4</Order>
           <Description>Let WinRM accept an unencrypted message body</Description>
           <!--
-            Measured 2026-08-08. Without this, Packer answers a correct Administrator
+            Without this, Packer answers a correct Administrator
             credential with a repeating 401 and the build waits until winrm_timeout.
 
             Packer's NTLM transport authenticates the request but does not encrypt the
             message body. A WinRM service with AllowUnencrypted=false rejects that at the
-            HTTP layer, so the failure looks like a bad password and is not one. A host-side
-            probe with the same credential reproduced the 401, and the connection succeeded
-            the moment this value became true.
+            HTTP layer, so the failure looks like a bad password and is not one.
 
             The build runs on an internal switch and the guest is a test fixture, so a
             plaintext body during the build is acceptable.

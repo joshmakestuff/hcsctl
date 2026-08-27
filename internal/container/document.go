@@ -1,11 +1,11 @@
 //go:build windows
 
 // The two compute-system documents this package produces, both consumed by
-// computecore.dll (measured: HcsCreateComputeSystem accepts either).
+// computecore.dll (HcsCreateComputeSystem accepts either).
 //
 //   - argon: schema 2.1. Storage is the filter-attached scratch volume plus
 //     the layer chain; networking is an HNS namespace the endpoint was added
-//     to; HostName/Memory/MappedDirectories are in-guest verified (M4).
+//     to; HostName/Memory/MappedDirectories are in-guest verified.
 //   - xenon: schema 1 -- no self-contained v2 xenon document exists (the v2
 //     Container schema has no HvRuntime, and the two-system HostedSystem route
 //     needs hcsshim's unimportable GCS machinery). The document shape is
@@ -102,11 +102,9 @@ type v2Networking struct {
 // buildArgonDoc assembles the schema-2.1 process-isolated document. The
 // volume must be filter-attached with a trailing backslash; the filter attach
 // is scratch.Prepare's job -- HCS does not attach it from the document (Start
-// fails 0x80070287 without it, measured).
+// fails 0x80070287 without it).
 func buildArgonDoc(in docInputs) (string, error) {
-	// An empty Layers array crashed vmcompute.exe outright (gsl bounds abort,
-	// hcsctl#86); refuse to marshal one no matter which service is behind the
-	// call today.
+	// An empty Layers array crashes the compute service; refuse to marshal one.
 	if len(in.Layers) == 0 {
 		return "", fmt.Errorf("refusing a document with empty Storage.Layers (crashes the compute service)")
 	}
@@ -148,7 +146,7 @@ func buildArgonDoc(in docInputs) (string, error) {
 
 // schema-1 document types, exactly the fields hcsshim's ContainerConfig
 // marshals for a xenon. No SchemaVersion field -- its absence is how the
-// service tells the schemas apart (measured on computecore).
+// service tells the schemas apart.
 type v1Doc struct {
 	SystemType                  string      `json:"SystemType"`
 	Name                        string      `json:"Name"`
@@ -215,8 +213,7 @@ func buildXenonDoc(id string, in docInputs) (string, error) {
 }
 
 // processDoc is the process-parameters document. The field names coincide
-// between schema 1 and v2, so one shape serves both isolations (measured on
-// both).
+// between schema 1 and v2, so one shape serves both isolations.
 type processDoc struct {
 	CommandLine      string            `json:"CommandLine"`
 	WorkingDirectory string            `json:"WorkingDirectory,omitempty"`

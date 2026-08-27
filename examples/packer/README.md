@@ -55,6 +55,6 @@ hcsctl guest info --vmid <guid>
 ## Note on version pinning
 
 There is no `latest`. The examples install a specific local artifact whose checksum you pass in.
-Once the repository is public, the installers can instead download a pinned tag directly
+The installers can instead download a pinned tag directly
 (`install-hcsguest.sh -v <tag>` / `Install-HcsGuest.ps1 -Version <tag>`); swap the two `file`
 + installer provisioners for a single download call if you prefer that.

@@ -5,7 +5,7 @@
 // It surfaces HCS -- images, layers, compute systems, networking -- as a tool you can drive
 // from a shell or an agent.
 //
-// Two rules this repo is built to:
+// Two rules this repo follows:
 //
 //	Public hcsshim packages only. pkg/*, the hcsshim root package, computestorage, osversion.
 //	Where hcsshim exports no public equivalent -- the v2 compute-system API that `vm` needs --
@@ -99,7 +99,7 @@ func run(argv []string) int {
 	var ue *cli.UsageError
 	if errors.As(err, &ue) {
 		// Failure before usage, so the one document is first on stdout under --json; the
-		// usage text accompanies the error on stderr, where it has always lived.
+		// usage text accompanies the error on stderr.
 		e.Failure("usage", err)
 		fmt.Fprint(os.Stderr, cmd.UsageString())
 		return cli.Usage
@@ -120,7 +120,7 @@ exit codes: 0 ok, 1 ran and failed, 64 bad arguments (nothing attempted)
 		// No completion command: its output is shell script on stdout, which the --json
 		// contract cannot admit. The hidden __complete twin is rejected in run().
 		CompletionOptions: cobra.CompletionOptions{DisableDefaultCmd: true},
-		// An unknown flag at the root rode behind a mistyped group (`hcsctl frobnicate
+		// An unknown flag at the root follows a mistyped group (`hcsctl frobnicate
 		// --id x`); allowing it lets the RunE name the group, the actual mistake, exactly
 		// as cli.Group does for verbs.
 		FParseErrWhitelist: cobra.FParseErrWhitelist{UnknownFlags: true},
@@ -173,8 +173,8 @@ exit codes: 0 ok, 1 ran and failed, 64 bad arguments (nothing attempted)
 	})
 
 	// Requested help means nothing was attempted, so it is exit 64 like every other
-	// command line that ran no verb: the full help text on stderr, where usage has always
-	// lived, and run() emits the one failure document under --json. Exit 0 with help would
+	// command line that ran no verb: the full help text on stderr, and run() emits the one
+	// failure document under --json. Exit 0 with help would
 	// let a forwarded --help make a script record a verb as succeeded when it never ran.
 	root.SetHelpFunc(func(c *cobra.Command, _ []string) {
 		*helpRequested = true
@@ -218,7 +218,7 @@ func disableFlagsInUseLine(c *cobra.Command) {
 	}
 }
 
-// usageTemplate is cobra's default reshaped to this tool's voice: the usage line is
+// usageTemplate is cobra's default reshaped: the usage line is
 // lowercase and inline (a consumer's contract test greps for "usage: hcsctl").
 const usageTemplate = `usage: {{.UseLine}}{{if .HasAvailableSubCommands}}
 

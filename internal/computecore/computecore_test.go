@@ -26,7 +26,7 @@ func TestErrorWithoutResultOmitsSuffix(t *testing.T) {
 }
 
 func TestIsNotFound(t *testing.T) {
-	// computecore's spelling (measured) and vmcompute's legacy severity both match.
+	// Both severity spellings of the not-found code are recognised.
 	for _, code := range []uint32{0x8037010E, 0xC037010E} {
 		if !IsNotFound(&Error{Op: "x", Code: code}) {
 			t.Errorf("0x%08X not recognised as not-found", code)
@@ -50,13 +50,13 @@ func TestIsAlreadyStopped(t *testing.T) {
 }
 
 func TestProcessStatusParsesMeasuredShape(t *testing.T) {
-	// The measured HcsWaitForProcessExit document (cmd /c exit 42).
+	// The HcsWaitForProcessExit document (cmd /c exit 42).
 	const doc = `{"ProcessId":69576,"Exited":true,"ExitCode":42,"LastWaitResult":0}`
 	var st ProcessStatus
 	if err := json.Unmarshal([]byte(doc), &st); err != nil {
 		t.Fatal(err)
 	}
 	if !st.Exited || st.ExitCode != 42 || st.ProcessID != 69576 {
-		t.Errorf("parsed %+v from the measured document", st)
+		t.Errorf("parsed %+v from the sample document", st)
 	}
 }

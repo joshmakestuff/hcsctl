@@ -13,10 +13,10 @@
 //
 // Only mount accepts a store ref. SetupBaseOSLayer regenerates Hives/ and Layout inside the
 // layer directory it is given, and whether the regenerated hives are equivalent to what
-// wclayer import produced is not measured, so setup-base must not run on a store layer.
+// wclayer import produced is not guaranteed, so setup-base must not run on a store layer.
 //
 // ELEVATED: FormatWritableLayerVhd is denied from a filtered token even holding
-// SeManageVolumePrivilege (measured).
+// SeManageVolumePrivilege.
 package storage
 
 import (
@@ -107,7 +107,7 @@ func setupVolumeCmd(e cli.Emit) *cobra.Command {
 		Long: `HcsSetupBaseOSVolume -- the volume-taking variant of the base OS setup that
 setup-base performs against a VHD handle.
 
-Two measured requirements, neither of which the API reports as an error:
+Two requirements, neither of which the API reports as an error:
 
 The volume must be a writable-layer-formatted volume (what storage mount
 attaches). On a plain NTFS volume the call returns SUCCESS and does nothing at
@@ -135,7 +135,7 @@ Build 19645 or newer. MUTATES both the layer and the volume. ELEVATED.`,
 			if b := osversion.Build(); b < 19645 {
 				return cli.Usagef("SetupBaseOSVolume needs build 19645 or newer, host is %d", b)
 			}
-			// Measured: either artifact alone makes the call fail "file already exists",
+			// Either artifact alone makes the call fail "file already exists",
 			// which names neither the layer nor the artifact.
 			for _, a := range []string{"Hives", "layout"} {
 				if _, err := os.Stat(filepath.Join(layer, a)); err == nil {
@@ -146,7 +146,7 @@ Build 19645 or newer. MUTATES both the layer and the volume. ELEVATED.`,
 			if err := computestorage.SetupBaseOSVolume(context.Background(), layer, volume, opts); err != nil {
 				return fmt.Errorf("SetupBaseOSVolume: %w", err)
 			}
-			// Measured: on a volume that is not writable-layer-formatted the call returns
+			// On a volume that is not writable-layer-formatted the call returns
 			// success and writes nothing, so the nil return proves nothing on its own.
 			// WcSandboxState is what the handle variant leaves behind.
 			if _, err := os.Stat(volumeJoin(volume, "WcSandboxState")); err != nil {
@@ -267,8 +267,8 @@ func exportCmd(e cli.Emit) *cobra.Command {
 		Use:   "export --layer <volume> --dest <existing-dir> [--parent <dir>]... [--writable]",
 		Short: "HcsExportLayer from a mounted writable layer's volume",
 		Long: `HcsExportLayer. Works on a *mounted* writable layer's volume path with
---writable, producing Files/Hives/tombstones. A legacy (wclayer) directory
-layer fails partway; the legacy variants are not public hcsshim.`,
+--writable, producing Files/Hives/tombstones. A wclayer directory
+layer fails partway; its variants are not public hcsshim.`,
 		Args: cli.NoExtraArgs,
 		RunE: func(*cobra.Command, []string) error {
 			if err := requireDir("--layer", layer); err != nil {
@@ -326,10 +326,10 @@ Layers topmost first. A layer under a mounted CIM volume is given by its path
 inside that volume (hcsshim's convention puts container content under Files, so
 that is usually <cim-volume>\Files); the layer id derives from the volume GUID,
 or from the directory name for a plain path. unionfs is what hcsshim uses for
-CIM layers; wcifs is the legacy directory-layer filter.
+CIM layers; wcifs is the directory-layer filter.
 
 The writable volume must carry a WcSandboxState directory or the attach fails
-with a bare path-not-found (measured) -- volumes prepared by setup-base or
+with a bare path-not-found -- volumes prepared by setup-base or
 InitializeWritableLayer have one; on a fresh volume, create it. ELEVATED.`,
 		Args: cli.NoExtraArgs,
 		RunE: func(*cobra.Command, []string) error {
@@ -345,8 +345,8 @@ InitializeWritableLayer have one; on a fresh volume, create it. ELEVATED.`,
 					return err
 				}
 			}
-			// Without this the filter fails with a bare path-not-found (measured on
-			// 26200 and 29641); the check turns it into an error naming the fix.
+			// Without this the filter fails with a bare path-not-found; the check
+			// turns it into an error naming the fix.
 			if _, err := os.Stat(volumeJoin(volume, "WcSandboxState")); err != nil {
 				return cli.Usagef("--volume %s has no WcSandboxState directory -- the overlay filter requires one (create it, or use a volume prepared by setup-base or InitializeWritableLayer)", volume)
 			}
@@ -615,7 +615,7 @@ func setupBase(layer string, size uint64, e cli.Emit) error {
 //
 // uvmPath is the layer's UtilityVM directory, NOT UtilityVM\Files: hcsshim documents it
 // as "the path to the UtilityVM filesystem", but the Files path fails ERROR_GEN_FAILURE
-// and the directory above it succeeds (measured).
+// and the directory above it succeeds.
 func setupUVMBase(layer string, size uint64, e cli.Emit) error {
 	uvm := filepath.Join(layer, uvmPath)
 	base := filepath.Join(layer, uvmPath, uvmBaseVhd)

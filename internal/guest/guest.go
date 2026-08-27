@@ -247,10 +247,10 @@ func dial(vmid, svc guid.GUID, timeout time.Duration) (*guestproto.Info, string,
 }
 
 // classify turns the connect errno into the distinction that matters to a caller waiting for
-// a guest. Measured, host to guest:
+// a guest. Host to guest:
 //
-//	10049 WSAEADDRNOTAVAIL  no such VM, or the VM is not running   (~1 ms)
-//	10060 WSAETIMEDOUT      the guest is up, the agent is not      (~30 s)
+//	10049 WSAEADDRNOTAVAIL  no such VM, or the VM is not running
+//	10060 WSAETIMEDOUT      the guest is up, the agent is not
 //
 // A caller polling for readiness should treat "absent" as "keep waiting" and "no-agent" as a
 // problem with the image, not with the wait.

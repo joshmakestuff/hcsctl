@@ -20,8 +20,7 @@ import (
 	"github.com/joshmakestuff/hcsctl/internal/transport"
 )
 
-// The modern import pipeline, per layer bottom-up (measured end to end,
-// hcsspike modernlc, docs/findings.md 2026-08-25):
+// The modern import pipeline, per layer bottom-up:
 //
 //	blob -> transport.Stage (plain files, no privileges)
 //	     -> HcsImportLayer under SeBackup/SeRestore, parents topmost-first
@@ -144,7 +143,7 @@ func importImage(ref, storeDir string, sizeGB uint64, e cli.Emit) error {
 
 		// Base completion happens AFTER publish: SetupContainerBaseLayer bakes
 		// blank-base.vhdx's ABSOLUTE path into blank.vhdx's parent locator
-		// (measured -- a rename after setup breaks the VHDX chain), so the
+		// (a rename after setup breaks the VHDX chain), so the
 		// VHDs must be created at the layer's final path. blank.vhdx is the
 		// completion sentinel store.Chain checks, and the skip branch above
 		// heals a crash between publish and completion.
@@ -183,8 +182,8 @@ func finishBase(ctx context.Context, base string, sizeGB uint64, e cli.Emit) err
 	e.Progress("     done in %s", time.Since(start).Round(time.Millisecond))
 
 	// Setup replaces the imported Hives with *_BASE hardlinks and strips the
-	// *_Delta stubs; HcsExportLayer of this base later requires them back
-	// (measured), so they are part of the finished shape.
+	// *_Delta stubs; HcsExportLayer of this base later requires them back,
+	// so they are part of the finished shape.
 	if err := transport.WriteDeltaHiveStubs(filepath.Join(base, "Hives")); err != nil {
 		return err
 	}
@@ -196,7 +195,7 @@ func finishBase(ctx context.Context, base string, sizeGB uint64, e cli.Emit) err
 	e.Progress("  SetupUtilityVMBaseLayer (%d GB)", sizeGB)
 	start = time.Now()
 	// The UVM directory, NOT UtilityVM\Files -- the Files path fails
-	// ERROR_GEN_FAILURE (measured).
+	// ERROR_GEN_FAILURE.
 	if err := computestorage.SetupUtilityVMBaseLayer(ctx, uvm,
 		filepath.Join(uvm, "SystemTemplateBase.vhdx"), filepath.Join(uvm, "SystemTemplate.vhdx"), sizeGB); err != nil {
 		return fmt.Errorf("SetupUtilityVMBaseLayer: %w", err)

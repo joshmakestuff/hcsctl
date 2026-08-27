@@ -309,7 +309,7 @@ func holdsPrivilege(name string) bool {
 
 // ExpandScratchReady reports whether this token can run the local scratch expand
 // (layer.ExpandScratch). Its one requirement is SeManageVolumePrivilege, spent at
-// AttachVirtualDisk -- 1314 ERROR_PRIVILEGE_NOT_HELD without it, measured on #36. The
+// AttachVirtualDisk -- 1314 ERROR_PRIVILEGE_NOT_HELD without it. The
 // privilege is grantable ("Perform volume maintenance tasks") and survives UAC filtering,
 // so this is a per-user setup step, not an elevation requirement.
 func ExpandScratchReady() error {

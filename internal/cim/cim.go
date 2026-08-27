@@ -8,7 +8,7 @@
 // everything into one container: a block-formatted regular file (--block <file>) or a raw
 // block device (--block \\.\PhysicalDriveN). Merged and verified CIMs are block-only.
 //
-// Elevation, measured: create and merge are unprivileged -- unique in this tool. Mount and
+// Elevation: create and merge are unprivileged -- unique in this tool. Mount and
 // unmount need elevation; the specific right is unidentified (SeManageVolumePrivilege is
 // not sufficient), so the requirement is documented, not gated.
 //
@@ -54,13 +54,13 @@ func createCmd(e cli.Emit) *cobra.Command {
 		Long: `Build a CIM from a directory tree: files with data and security descriptors,
 directories, reparse points (not followed), hard links, empty alternate data
 streams. A nonzero stream payload fails the build: it cannot be written through
-public hcsshim pkg/cimfs (measured). Extended attributes are not captured.
+public hcsshim pkg/cimfs. Extended attributes are not captured.
 
 --cim writes a standard CIM (the .cim plus region/objectid files land in its
 directory); --fork-of forks from a sibling CIM in that directory, and --unlink
 then removes inherited paths. Unlinking a nested path requires its parent
-directory to exist in --dir too: without it the unlink is silently a no-op
-(measured), which is why layer tars always carry parent directory entries.
+directory to exist in --dir too: without it the unlink is silently a no-op,
+which is why layer tars always carry parent directory entries.
 --block writes a single-file or device block CIM;
 --tombstone and --merged-link are merge-time operations recorded for later
 cim merge; --consistent makes identical input produce an identical CIM;

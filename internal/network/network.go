@@ -3,7 +3,7 @@
 // Package network is the `hcsctl network` verb group over the Host Compute Network (HCN)
 // object surface: ls, endpoints, inspect, create, rm.
 //
-// Reads are unelevated. Measured against HNS schema 16.0: listing networks, endpoints and
+// Reads are unelevated: listing networks, endpoints and
 // namespaces all work from a filtered token. `hcn.GetGlobals` is the one call that needs
 // elevation, so it is reported as optional detail.
 //
@@ -323,7 +323,7 @@ type inspectDns struct {
 	Options    []string `json:"options"`
 }
 
-// flagNames decodes the HCN network flag bits that have measured meanings. 32 (EnableDhcp) is
+// flagNames decodes the HCN network flag bits that have known meanings. 32 (EnableDhcp) is
 // returned by HNS on ICS networks but absent from hcn's constants. Bits with no name
 // stay visible through the numeric Flags field.
 func flagNames(flags uint32) []string {

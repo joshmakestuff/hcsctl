@@ -31,7 +31,7 @@ type walkStats struct {
 //
 //   - A nonzero alternate-data-stream payload is a hard error naming the stream. The
 //     writer's Write refuses bytes after CreateAlternateStream (its internal budget is set
-//     only by AddFile, measured 2026-08-20) and CimCreateFile rejects stream-spelled
+//     only by AddFile) and CimCreateFile rejects stream-spelled
 //     paths, so the payload cannot be written; failing loudly beats dropping data.
 //   - Extended attributes are not captured: nothing public reads them off a live tree.
 func writeTree(w *cimfs.CimFsWriter, src string) (walkStats, error) {
@@ -139,8 +139,8 @@ func addEntry(w *cimfs.CimFsWriter, path, rel string, st *walkStats, firstSeen m
 }
 
 func securityDescriptorOf(f *os.File) ([]byte, error) {
-	// Owner, group and DACL only: no SACL, so no SeSecurityPrivilege, and the walk stays
-	// unprivileged -- the property that makes cim create worth having.
+	// Owner, group and DACL only: no SACL, so no SeSecurityPrivilege is required
+	// and the walk stays unprivileged.
 	sd, err := windows.GetSecurityInfo(windows.Handle(f.Fd()), windows.SE_FILE_OBJECT,
 		windows.OWNER_SECURITY_INFORMATION|windows.GROUP_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
 	if err != nil {
@@ -169,7 +169,7 @@ func addStreams(w *cimfs.CimFsWriter, path, rel string, st *walkStats) error {
 	for _, s := range streams {
 		if s.size != 0 {
 			return fmt.Errorf("%s has alternate data stream %q with %d bytes -- "+
-				"stream payloads cannot be written through public hcsshim pkg/cimfs (measured 2026-08-20); "+
+				"stream payloads cannot be written through public hcsshim pkg/cimfs; "+
 				"remove the stream or drop the file", path, s.name, s.size)
 		}
 		if err := w.CreateAlternateStream(rel+":"+s.name, 0); err != nil {
@@ -180,8 +180,8 @@ func addStreams(w *cimfs.CimFsWriter, path, rel string, st *walkStats) error {
 	return nil
 }
 
-// FindFirstStreamW/FindNextStreamW are not in x/sys/windows; bound directly, same policy
-// as internal/vmcompute: documented entry points only, no hcsshim internals copied.
+// FindFirstStreamW/FindNextStreamW are not in x/sys/windows; bound directly --
+// documented entry points only, no hcsshim internals copied.
 var (
 	kernel32             = windows.NewLazySystemDLL("kernel32.dll")
 	procFindFirstStreamW = kernel32.NewProc("FindFirstStreamW")

@@ -4,10 +4,6 @@ hcsctl is experimental and pre-1.0. There is no support commitment and no compat
 guarantee between releases; the `--json` documents and exit codes are the contract, and they
 change when the design needs it.
 
-## I'm new to opensource
-
-Please assume ignorance instead of malice.
-
 ## Issues
 
 Bugs, questions and proposals go in [issues](https://github.com/joshmakestuff/hcsctl/issues).

@@ -3,13 +3,11 @@
 // Package layerid derives the GUIDs that name layers in computestorage
 // LayerData and in v2 container documents, locally.
 //
-// The legacy producer was NameToGuid -- a vmcompute.dll export. Measured
-// (hcsspike modernlc, guidid cell, 2026-08-25): HCS only requires the id for
-// a given layer to be CONSISTENT across ImportLayer parents,
-// InitializeWritableLayer, AttachLayerStorageFilter, and the document's
-// Storage.Layers -- the derivation itself is free. So the id is an RFC-4122
-// v5 (SHA-1 name-based) GUID under a fixed namespace, computed here with no
-// DLL involved.
+// HCS only requires the id for a given layer to be CONSISTENT across
+// ImportLayer parents, InitializeWritableLayer, AttachLayerStorageFilter, and
+// the document's Storage.Layers -- the derivation itself is free. So the id
+// is an RFC-4122 v5 (SHA-1 name-based) GUID under a fixed namespace, computed
+// here with no DLL involved.
 //
 // Key discipline: one key per layer, chosen by the caller -- the store uses
 // the layer directory's base name (which is the diffID hex for store layers),
@@ -70,7 +68,7 @@ func ForPath(p string) (string, error) {
 
 // DataFor builds the LayerData every computestorage call takes: parents
 // topmost first, absolute paths, schema 2.1. An empty parent list is a base
-// layer. Topmost-first is the measured order end to end (import, initialize,
+// layer. Topmost-first is the required order end to end (import, initialize,
 // filter attach, document, export).
 func DataFor(parentsTopFirst []string) (computestorage.LayerData, error) {
 	data := computestorage.LayerData{SchemaVersion: computestorage.Version{Major: 2, Minor: 1}}

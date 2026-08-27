@@ -1,13 +1,12 @@
 # The overlay smoke: the operational check behind "works" for storage attach-overlay /
-# detach-overlay, the last two computestorage functions (#18), consuming a CIM the cim
-# verbs produced (#16). Windows PowerShell 5.1 compatible: the target is an Insider
-# server host without pwsh.
+# detach-overlay, consuming a CIM the cim verbs produced. Windows PowerShell 5.1
+# compatible: the target is an Insider server host without pwsh.
 #
 # Shape mirrors hcsshim's process-isolated CIM mount (internal/layers/wcow_mount.go):
 # content under Files\ inside the CIM, the CIM mounted at a volume, UnionFS overlaying
 # <cim-volume>\Files onto a writable volume. The writable volume is a fresh NTFS VHDX
 # via diskpart plus a WcSandboxState directory -- the one piece of upstream's
-# wclayer-activated scratch the filter actually requires (measured).
+# wclayer-activated scratch the filter actually requires.
 #
 #   powershell -NoProfile -File tools\Run-StorageOverlaySmoke.ps1
 param(
@@ -67,8 +66,8 @@ $disk = Get-Disk | Where-Object { $_.Location -eq $vhd }
 $scratchVol = ($disk | Get-Partition | Get-Volume).Path
 "scratch volume: $scratchVol"
 Assert "scratch volume presents" ($null -ne $scratchVol -and [System.IO.Directory]::Exists($scratchVol))
-# The overlay filter requires WcSandboxState on the writable volume (measured: without it
-# the attach is a bare path-not-found on both 26200 and 29641).
+# The overlay filter requires WcSandboxState on the writable volume: without it the
+# attach is a bare path-not-found.
 $null = [System.IO.Directory]::CreateDirectory($scratchVol + 'WcSandboxState')
 
 # -- attach: the union view --------------------------------------------------------------
