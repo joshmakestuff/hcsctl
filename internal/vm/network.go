@@ -13,6 +13,7 @@ package vm
 
 import (
 	"crypto/rand"
+	"encoding/json"
 	"fmt"
 	"net/netip"
 	"strings"
@@ -166,7 +167,11 @@ func generateMAC() (string, error) {
 //
 // An empty id lets HNS assign one. A non-empty id asks for that exact id back, which HNS honours
 // -- that is what makes a restart keep the endpoint id it was created with.
-func createVMEndpoint(netw *hcn.HostComputeNetwork, id, name, mac string) (*hcn.HostComputeEndpoint, error) {
+//
+// A non-zero vlan tags the endpoint's switch port as access VLAN <vlan>. A switch whose other
+// ports are access-tagged isolates an untagged port from them, so a VM joining such a network
+// is unreachable without it.
+func createVMEndpoint(netw *hcn.HostComputeNetwork, id, name, mac string, vlan uint32) (*hcn.HostComputeEndpoint, error) {
 	ep := &hcn.HostComputeEndpoint{
 		Id:                 id,
 		Name:               name,
@@ -174,6 +179,16 @@ func createVMEndpoint(netw *hcn.HostComputeNetwork, id, name, mac string) (*hcn.
 		SchemaVersion:      hcn.V2SchemaVersion(),
 		MacAddress:         mac,
 		Flags:              endpointFlagsEnableDhcp,
+	}
+	if vlan != 0 {
+		settings, err := json.Marshal(hcn.VlanPolicySetting{IsolationId: vlan})
+		if err != nil {
+			return nil, err
+		}
+		ep.Policies = append(ep.Policies, hcn.EndpointPolicy{
+			Type:     "VLAN",
+			Settings: settings,
+		})
 	}
 	created, err := ep.Create()
 	if err != nil {
@@ -211,9 +226,10 @@ func deleteVMEndpoint(id string) error {
 // destroys a compute system when it exits, so every restart builds a new one and would hit that
 // on the second boot of any VM with a NIC.
 //
-// The id and the MAC are both preserved. The id because callers hold it; the MAC because the ICS
-// DHCP server keys the lease on it, so the guest comes back on the same address it had.
-func remakeVMEndpoint(networkID, endpointID, name, mac string) error {
+// The id, the MAC and the VLAN are all preserved. The id because callers hold it; the MAC
+// because the ICS DHCP server keys the lease on it, so the guest comes back on the same
+// address it had; the VLAN because losing it would silently isolate the port.
+func remakeVMEndpoint(networkID, endpointID, name, mac string, vlan uint32) error {
 	netw, err := hcn.GetNetworkByID(networkID)
 	if err != nil {
 		return fmt.Errorf("the network %s this vm's endpoint was on is gone: %w", networkID, err)
@@ -221,7 +237,7 @@ func remakeVMEndpoint(networkID, endpointID, name, mac string) error {
 	if err := deleteVMEndpoint(endpointID); err != nil {
 		return err
 	}
-	if _, err := createVMEndpoint(netw, endpointID, name, mac); err != nil {
+	if _, err := createVMEndpoint(netw, endpointID, name, mac, vlan); err != nil {
 		return err
 	}
 	return nil

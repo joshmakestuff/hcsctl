@@ -2,6 +2,8 @@
 
 package vm
 
+import "strconv"
+
 // The HCS v2 schema, subset. Property names are the JSON keys -- HCS documents are PascalCase,
 // so nothing is renamed by a policy. Reference: the schema reference on Microsoft Learn, plus
 // hcsshim's internal/hcs/schema2, which is not importable.
@@ -121,6 +123,14 @@ type services struct {
 
 // buildDocument assembles the boot document.
 func buildDocument(spec spec) document {
+	// LUN 0 boots; extra disks sit at LUN 1..n on the same controller in declaration order.
+	// One controller carries them all -- hcsshim attaches multiple LUNs the same way.
+	attachments := map[string]attachment{
+		"0": {Type: "VirtualDisk", Path: spec.DiskPath},
+	}
+	for i, path := range spec.ExtraDisks {
+		attachments[strconv.Itoa(i+1)] = attachment{Type: "VirtualDisk", Path: path}
+	}
 	d := document{
 		SchemaVersion: schemaVersion{Major: 2, Minor: 5},
 		Owner:         "hcsctl",
@@ -142,9 +152,7 @@ func buildDocument(spec spec) document {
 			},
 			Devices: devices{
 				Scsi: map[string]scsiController{
-					scsiController0: {Attachments: map[string]attachment{
-						"0": {Type: "VirtualDisk", Path: spec.DiskPath},
-					}},
+					scsiController0: {Attachments: attachments},
 				},
 				// Without this section the VM has no Hyper-V socket surface at all, and a
 				// host-side dial fails WSAEADDRNOTAVAIL (10049) -- the same errno a VM that

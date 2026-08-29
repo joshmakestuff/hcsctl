@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"sort"
@@ -40,6 +41,7 @@ func Command(e cli.Emit) *cobra.Command {
 // spec is what buildDocument turns into a v2 document.
 type spec struct {
 	DiskPath   string
+	ExtraDisks []string // attached at SCSI LUN 1..n, in order
 	CPUs       uint64
 	MemoryMB   uint64
 	SerialPipe string
@@ -59,6 +61,11 @@ type state struct {
 	SerialPipe  string `json:"serialPipe,omitempty"`
 	CreatedUTC  string `json:"createdUtc"`
 
+	// ExtraDisks are data disks attached at SCSI LUN 1..n after the boot disk, in order.
+	// They share the boot disk's copy-on-write policy: with it, Path is a differencing
+	// child in the store; without it, Path is Base and boots mutate it.
+	ExtraDisks []extraDisk `json:"extraDisks,omitempty"`
+
 	// The endpoint this tool made, and the adapter it is behind. The id has to survive the
 	// process: an endpoint is host-global, so a `vm rm` running in a later invocation -- or
 	// after a crash -- is the only thing that will ever delete it.
@@ -66,6 +73,7 @@ type state struct {
 	NetworkName string   `json:"networkName,omitempty"`
 	EndpointID  string   `json:"endpointId,omitempty"`
 	MacAddress  string   `json:"macAddress,omitempty"`
+	Vlan        uint32   `json:"vlan,omitempty"`
 	DNS         []string `json:"dns,omitempty"`
 
 	// Labels are stored and reported, never interpreted. Ownership and run identity are the
@@ -76,10 +84,17 @@ type state struct {
 	Labels map[string]string `json:"labels,omitempty"`
 }
 
+// extraDisk records where a data disk came from and what is attached.
+type extraDisk struct {
+	Base string `json:"base"`
+	Path string `json:"path"`
+}
+
 // reservedLabelKeys are the field names a consumer sees when it flattens state.json or an
 // inspect document. A label may not shadow one. Kept in sync with the structs in this file.
 var reservedLabelKeys = map[string]bool{
 	"id": true, "baseVhdx": true, "diskPath": true, "copyOnWrite": true, "cpus": true,
+	"extraDisks": true, "disks": true, "vlan": true,
 	"memoryMb": true, "serialPipe": true, "createdUtc": true, "labels": true,
 	"networkId": true, "networkName": true, "network": true, "endpointId": true,
 	"macAddress": true, "dns": true, "addresses": true, "endpointError": true,
@@ -198,11 +213,15 @@ type createResult struct {
 	CPUs        uint64 `json:"cpus"`
 	MemoryMB    uint64 `json:"memoryMb"`
 	SerialPipe  string `json:"serialPipe,omitempty"`
+	// Disks are the attached data disk paths, LUN 1..n in order -- the differencing
+	// children under copy-on-write, the --disk arguments themselves without it.
+	Disks []string `json:"disks,omitempty"`
 
 	Network    string   `json:"network,omitempty"`
 	NetworkID  string   `json:"networkId,omitempty"`
 	EndpointID string   `json:"endpointId,omitempty"`
 	MacAddress string   `json:"macAddress,omitempty"`
+	Vlan       uint32   `json:"vlan,omitempty"`
 	DNS        []string `json:"dns,omitempty"`
 	// Addresses is empty until the endpoint has one; a caller polls `vm inspect` for it. See
 	// addressesOf.
@@ -214,28 +233,32 @@ type createResult struct {
 // behind it.
 type createOptions struct {
 	ID          string
-	Base        string // absolute, and it exists
+	Base        string   // absolute, and it exists
+	ExtraBases  []string // absolute, they exist, and no duplicates among them or Base
 	CPUs        uint64
 	MemoryMB    uint64
 	SerialPipe  string // empty means the default console pipe
 	CopyOnWrite bool
 	Network     *hcn.HostComputeNetwork // nil without --network
+	Mac         string                  // normalized XX-XX-XX-XX-XX-XX, or empty to generate one
+	Vlan        uint32                  // access VLAN for the endpoint's port; 0 means untagged
 	DNS         []string
 	Labels      map[string]string
 	StoreDir    string
 }
 
 func createCmd(e cli.Emit) *cobra.Command {
-	var vhdx, cpusStr, memoryStr, network, dnsCSV, serialPipe, storeDir string
+	var vhdx, cpusStr, memoryStr, network, dnsCSV, serialPipe, storeDir, mac, vlanStr string
 	var id *cli.GUIDFlag
 	var noCopyOnWrite bool
-	var labelVals []string
+	var labelVals, diskVals []string
 	cmd := &cobra.Command{
-		Use:   `create --vhdx <path> [--id <guid>] [--cpus N] [--memory-mb N] [--network <name|id|default>] [--dns <IPv4,...>] [--serial-pipe \\.\pipe\name] [--no-copy-on-write] [--label key=value]... [--store <dir>]`,
+		Use:   `create --vhdx <path> [--disk <path>]... [--id <guid>] [--cpus N] [--memory-mb N] [--network <name|id|default>] [--mac <addr>] [--vlan N] [--dns <IPv4,...>] [--serial-pipe \\.\pipe\name] [--no-copy-on-write] [--label key=value]... [--store <dir>]`,
 		Short: "make a Hyper-V VM that boots a Gen 2 VHDX; does not start it",
-		Long: `Make a Hyper-V VM that boots a Gen 2 VHDX. By default the disk is a
-differencing child, so the image is never written to; --no-copy-on-write boots
-the image itself and MUTATES it. The id is a GUID because it is also the VM's
+		Long: `Make a Hyper-V VM that boots a Gen 2 VHDX. By default every disk is a
+differencing child, so the images are never written to; --no-copy-on-write boots
+the images themselves and MUTATES them. --disk attaches additional data disks
+after the boot disk, in order. The id is a GUID because it is also the VM's
 hvsocket address -- guest info --vmid takes it unchanged. Unelevated;
 Hyper-V Administrators is enough. Does not start it.
 
@@ -260,6 +283,27 @@ and never interpreted -- record an owner pid; scavenge only on proof it is dead.
 			}
 			if _, err := os.Stat(base); err != nil {
 				return cli.Usagef("--vhdx %s: %v", base, err)
+			}
+
+			// A path attached twice is one file opened as two disks -- refuse it here,
+			// with the boot disk counted in.
+			extraBases := make([]string, 0, len(diskVals))
+			seen := []string{base}
+			for _, d := range diskVals {
+				p, derr := filepath.Abs(d)
+				if derr != nil {
+					return cli.Usagef("--disk %v", derr)
+				}
+				if _, derr := os.Stat(p); derr != nil {
+					return cli.Usagef("--disk %s: %v", p, derr)
+				}
+				for _, s := range seen {
+					if samePath(s, p) {
+						return cli.Usagef("--disk %s: already attached", p)
+					}
+				}
+				seen = append(seen, p)
+				extraBases = append(extraBases, p)
 			}
 
 			vmID := ""
@@ -307,19 +351,45 @@ and never interpreted -- record an owner pid; scavenge only on proof it is dead.
 				return err
 			}
 
+			vlan := uint64(0)
+			if vlanStr != "" {
+				if netw == nil {
+					return cli.Usagef("--vlan requires --network; a VM with no NIC has no port to tag")
+				}
+				if vlan, err = cli.ParseUint(vlanStr, 4094); err != nil {
+					return cli.Usagef("--vlan %v", err)
+				}
+			}
+
+			normalizedMac := ""
+			if mac != "" {
+				if netw == nil {
+					return cli.Usagef("--mac requires --network; a VM with no NIC has no address to set")
+				}
+				hw, merr := net.ParseMAC(mac)
+				if merr != nil || len(hw) != 6 {
+					return cli.Usagef("--mac %s: not a 48-bit MAC address", mac)
+				}
+				normalizedMac = strings.ToUpper(strings.ReplaceAll(hw.String(), ":", "-"))
+			}
+
 			return create(createOptions{
-				ID: vmID, Base: base, CPUs: cpus, MemoryMB: memoryMB,
+				ID: vmID, Base: base, ExtraBases: extraBases, CPUs: cpus, MemoryMB: memoryMB,
 				SerialPipe: serialPipe, CopyOnWrite: !noCopyOnWrite,
-				Network: netw, DNS: dns, Labels: labels, StoreDir: storeDir,
+				Network: netw, Mac: normalizedMac, Vlan: uint32(vlan),
+				DNS: dns, Labels: labels, StoreDir: storeDir,
 			}, e)
 		},
 	}
 	cli.StringOnce(cmd.Flags(), &vhdx, "vhdx", "Gen 2 VHDX the VM boots")
 	cli.Required(cmd, "vhdx")
+	cli.StringArray(cmd.Flags(), &diskVals, "disk", "additional VHDX attached after the boot disk, repeatable; shares the boot disk's copy-on-write policy")
 	id = cli.GUID(cmd.Flags(), "id", "VM id, a GUID; also its hvsocket address (default: generated)")
 	cli.StringOnce(cmd.Flags(), &cpusStr, "cpus", "virtual processor count (default 2)")
 	cli.StringOnce(cmd.Flags(), &memoryStr, "memory-mb", "memory in MB (default 2048)")
 	cli.StringOnce(cmd.Flags(), &network, "network", "attach an endpoint on this network; 'default' picks the Hyper-V Default Switch")
+	cli.StringOnce(cmd.Flags(), &mac, "mac", "MAC address for the NIC (default: generated); for guests whose config is pinned to a specific address")
+	cli.StringOnce(cmd.Flags(), &vlanStr, "vlan", "access VLAN id for the NIC's switch port (default: untagged); for networks whose other ports are VLAN-tagged")
 	cli.StringOnce(cmd.Flags(), &dnsCSV, "dns", "comma-separated IPv4 DNS servers; required for NAT and non-Default-Switch ICS networks")
 	cli.StringOnce(cmd.Flags(), &serialPipe, "serial-pipe", `named pipe for the COM port (default: \\.\pipe\hcsctl-<id>)`)
 	cmd.Flags().BoolVar(&noCopyOnWrite, "no-copy-on-write", false, "boot the image itself and MUTATE it, instead of a differencing child")
@@ -343,6 +413,7 @@ func create(opt createOptions, e cli.Emit) error {
 	}
 
 	disk := opt.Base
+	extras := make([]extraDisk, len(opt.ExtraBases))
 	if opt.CopyOnWrite {
 		disk = filepath.Join(dir, "disk.vhdx")
 		e.Progress("creating a differencing disk over %s", opt.Base)
@@ -350,29 +421,31 @@ func create(opt createOptions, e cli.Emit) error {
 			_ = os.RemoveAll(dir)
 			return err
 		}
-	} else {
-		if children, cerr := childrenOf(st, opt.Base, id); cerr != nil {
-			_ = os.RemoveAll(dir)
-			return cerr
-		} else if len(children) > 0 {
-			_ = os.RemoveAll(dir)
-			return fmt.Errorf(
-				"%s is the parent of %d differencing disk(s) -- booting it directly writes to it "+
-					"and corrupts every child: %s", opt.Base, len(children), strings.Join(children, ", "))
+		for i, base := range opt.ExtraBases {
+			child := filepath.Join(dir, fmt.Sprintf("disk%d.vhdx", i+1))
+			e.Progress("creating a differencing disk over %s", base)
+			if err := createDifferencing(base, child); err != nil {
+				_ = os.RemoveAll(dir)
+				return err
+			}
+			extras[i] = extraDisk{Base: base, Path: child}
 		}
-		e.Progress("booting %s directly -- this MUTATES it", opt.Base)
-	}
-
-	// Both the child and the parent need the grant. The VM worker opens the whole chain, and
-	// a missing grant on the parent fails at start with the child's path in the message.
-	revokeAccess, err := grantPathsWithRollback(
-		grantPaths(disk, opt.Base, opt.CopyOnWrite),
-		func(path string) error { return computecore.GrantVmAccess(id, path) },
-		func(path string) error { return computecore.RevokeVmAccess(id, path) },
-	)
-	if err != nil {
-		_ = os.RemoveAll(dir)
-		return err
+	} else {
+		for _, base := range append([]string{opt.Base}, opt.ExtraBases...) {
+			if children, cerr := childrenOf(st, base, id); cerr != nil {
+				_ = os.RemoveAll(dir)
+				return cerr
+			} else if len(children) > 0 {
+				_ = os.RemoveAll(dir)
+				return fmt.Errorf(
+					"%s is the parent of %d differencing disk(s) -- booting it directly writes to it "+
+						"and corrupts every child: %s", base, len(children), strings.Join(children, ", "))
+			}
+		}
+		for i, base := range opt.ExtraBases {
+			extras[i] = extraDisk{Base: base, Path: base}
+		}
+		e.Progress("booting %s directly -- this MUTATES it and every --disk", opt.Base)
 	}
 
 	// Every VM gets a COM port. It costs nothing to boot: a guest whose pipe nobody reads
@@ -385,9 +458,22 @@ func create(opt createOptions, e cli.Emit) error {
 
 	record := state{
 		ID: id, BaseVHDX: opt.Base, DiskPath: disk, CopyOnWrite: opt.CopyOnWrite,
-		CPUs: opt.CPUs, MemoryMB: opt.MemoryMB, SerialPipe: pipe,
+		ExtraDisks: extras,
+		CPUs:       opt.CPUs, MemoryMB: opt.MemoryMB, SerialPipe: pipe,
 		CreatedUTC: time.Now().UTC().Format(time.RFC3339),
 		Labels:     opt.Labels, DNS: opt.DNS,
+	}
+
+	// Both the children and the parents need the grant. The VM worker opens the whole chain,
+	// and a missing grant on a parent fails at start with the child's path in the message.
+	revokeAccess, err := grantPathsWithRollback(
+		grantPaths(record),
+		func(path string) error { return computecore.GrantVmAccess(id, path) },
+		func(path string) error { return computecore.RevokeVmAccess(id, path) },
+	)
+	if err != nil {
+		_ = os.RemoveAll(dir)
+		return err
 	}
 	var sys *computecore.System
 
@@ -416,19 +502,23 @@ func create(opt createOptions, e cli.Emit) error {
 	// on every failure uses undo: the endpoint and access grants are host-global, and no store
 	// record points at them until writeState succeeds.
 	if opt.Network != nil {
-		mac, merr := generateMAC()
-		if merr != nil {
-			undo()
-			return merr
+		mac := opt.Mac
+		if mac == "" {
+			var merr error
+			if mac, merr = generateMAC(); merr != nil {
+				undo()
+				return merr
+			}
 		}
-		ep, eerr := createVMEndpoint(opt.Network, "", endpointName(id), mac)
+		ep, eerr := createVMEndpoint(opt.Network, "", endpointName(id), mac, opt.Vlan)
 		if eerr != nil {
 			undo()
 			return eerr
 		}
 		record.NetworkID, record.NetworkName = opt.Network.Id, opt.Network.Name
 		record.EndpointID, record.MacAddress = ep.Id, mac
-		e.Progress("endpoint:  %s on %s (mac %s)", ep.Id, opt.Network.Name, mac)
+		record.Vlan = opt.Vlan
+		e.Progress("endpoint:  %s on %s (mac %s, vlan %d)", ep.Id, opt.Network.Name, mac, opt.Vlan)
 	}
 
 	e.Progress("creating compute system %s", id)
@@ -459,16 +549,25 @@ func create(opt createOptions, e cli.Emit) error {
 		e.Progress("addresses after attach, before start: %v", addrs)
 	}
 
+	disks := make([]string, len(extras))
+	for i, d := range extras {
+		disks[i] = d.Path
+	}
 	e.Result(createResult{
 		OK: true, Command: "vm create", ID: id, DiskPath: disk, CopyOnWrite: opt.CopyOnWrite,
-		CPUs: opt.CPUs, MemoryMB: opt.MemoryMB, SerialPipe: record.SerialPipe,
+		Disks: disks,
+		CPUs:  opt.CPUs, MemoryMB: opt.MemoryMB, SerialPipe: record.SerialPipe,
 		Network: record.NetworkName, NetworkID: record.NetworkID,
 		EndpointID: record.EndpointID, MacAddress: record.MacAddress,
+		Vlan:      record.Vlan,
 		DNS:       record.DNS,
 		Addresses: addrs,
 	}, func() {
 		fmt.Printf("created %s\n", id)
 		fmt.Printf("  disk    %s\n", disk)
+		for _, d := range disks {
+			fmt.Printf("  disk    %s\n", d)
+		}
 		fmt.Printf("  cpus    %d\n  memory  %d MB\n", opt.CPUs, opt.MemoryMB)
 		if record.EndpointID != "" {
 			fmt.Printf("  network %s\n", record.NetworkName)
@@ -513,11 +612,25 @@ func childrenOf(s *store.Store, base, exceptID string) ([]string, error) {
 			out = append(out, entry.Name()+" (unreadable record)")
 			continue
 		}
-		if record.CopyOnWrite && samePath(record.BaseVHDX, base) {
+		if record.CopyOnWrite && parentOf(record, base) {
 			out = append(out, record.ID)
 		}
 	}
 	return out, nil
+}
+
+// parentOf reports whether base is the parent of any of the record's disks -- the boot disk
+// or an extra one.
+func parentOf(record state, base string) bool {
+	if samePath(record.BaseVHDX, base) {
+		return true
+	}
+	for _, d := range record.ExtraDisks {
+		if samePath(d.Base, base) {
+			return true
+		}
+	}
+	return false
 }
 
 // samePath compares two Windows paths for the purpose of "is this the same file". Case
@@ -540,8 +653,13 @@ func createSystem(record state) (*computecore.System, error) {
 
 // spec for the record, so create and start build the same document from the same source.
 func specFor(record state) spec {
+	extras := make([]string, len(record.ExtraDisks))
+	for i, d := range record.ExtraDisks {
+		extras[i] = d.Path
+	}
 	return spec{
 		DiskPath:   record.DiskPath,
+		ExtraDisks: extras,
 		CPUs:       record.CPUs,
 		MemoryMB:   record.MemoryMB,
 		SerialPipe: record.SerialPipe,
@@ -550,11 +668,18 @@ func specFor(record state) spec {
 	}
 }
 
-func grantPaths(disk, base string, copyOnWrite bool) []string {
-	if !copyOnWrite {
-		return []string{disk}
+func grantPaths(record state) []string {
+	paths := []string{record.DiskPath}
+	if record.CopyOnWrite {
+		paths = append(paths, record.BaseVHDX)
 	}
-	return []string{disk, base}
+	for _, d := range record.ExtraDisks {
+		paths = append(paths, d.Path)
+		if record.CopyOnWrite {
+			paths = append(paths, d.Base)
+		}
+	}
+	return paths
 }
 
 // grantPathsWithRollback acquires every VHDX access grant or revokes the successful prefix.
@@ -641,7 +766,7 @@ func start(id, storeDir string, e cli.Emit) error {
 		if record.EndpointID != "" {
 			e.Progress("remaking endpoint %s so it can be attached again", record.EndpointID)
 			if rerr := remakeVMEndpoint(record.NetworkID, record.EndpointID,
-				endpointName(record.ID), record.MacAddress); rerr != nil {
+				endpointName(record.ID), record.MacAddress, record.Vlan); rerr != nil {
 				return rerr
 			}
 		}
@@ -818,7 +943,7 @@ func remove(id string, force bool, storeDir string, e cli.Emit) error {
 	// Failures are warnings, not errors: the ACE is inert, and refusing to remove the VM over one
 	// would leave a compute system behind.
 	if staterr == nil {
-		for _, p := range grantPaths(record.DiskPath, record.BaseVHDX, record.CopyOnWrite) {
+		for _, p := range grantPaths(record) {
 			if rerr := computecore.RevokeVmAccess(id, p); rerr != nil {
 				res.Warnings = append(res.Warnings, "revoke "+p+": "+rerr.Error())
 			}
@@ -858,8 +983,12 @@ func remove(id string, force bool, storeDir string, e cli.Emit) error {
 			return err
 		}
 		res.Removed = append(res.Removed, dir)
-		res.Warnings = append(res.Warnings, "the base image "+record.BaseVHDX+
-			" was booted directly and has been modified; it was not removed")
+		bases := []string{record.BaseVHDX}
+		for _, d := range record.ExtraDisks {
+			bases = append(bases, d.Base)
+		}
+		res.Warnings = append(res.Warnings, "the base image(s) "+strings.Join(bases, ", ")+
+			" were booted directly and have been modified; they were not removed")
 	}
 
 	e.Result(res, func() {
@@ -1203,6 +1332,9 @@ func inspect(id, storeDir string, e cli.Emit) error {
 		fmt.Printf("%s\n", id)
 		fmt.Printf("  disk     %s\n", record.DiskPath)
 		fmt.Printf("  base     %s\n", record.BaseVHDX)
+		for _, d := range record.ExtraDisks {
+			fmt.Printf("  disk     %s (base %s)\n", d.Path, d.Base)
+		}
 		fmt.Printf("  cow      %t\n", record.CopyOnWrite)
 		fmt.Printf("  cpus     %d\n  memory   %d MB\n", record.CPUs, record.MemoryMB)
 		fmt.Printf("  state    %s\n", hcsState(id))
