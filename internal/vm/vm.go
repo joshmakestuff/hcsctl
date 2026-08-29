@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"sort"
@@ -72,6 +73,7 @@ type state struct {
 	NetworkName string   `json:"networkName,omitempty"`
 	EndpointID  string   `json:"endpointId,omitempty"`
 	MacAddress  string   `json:"macAddress,omitempty"`
+	Vlan        uint32   `json:"vlan,omitempty"`
 	DNS         []string `json:"dns,omitempty"`
 
 	// Labels are stored and reported, never interpreted. Ownership and run identity are the
@@ -92,7 +94,7 @@ type extraDisk struct {
 // inspect document. A label may not shadow one. Kept in sync with the structs in this file.
 var reservedLabelKeys = map[string]bool{
 	"id": true, "baseVhdx": true, "diskPath": true, "copyOnWrite": true, "cpus": true,
-	"extraDisks": true, "disks": true,
+	"extraDisks": true, "disks": true, "vlan": true,
 	"memoryMb": true, "serialPipe": true, "createdUtc": true, "labels": true,
 	"networkId": true, "networkName": true, "network": true, "endpointId": true,
 	"macAddress": true, "dns": true, "addresses": true, "endpointError": true,
@@ -219,6 +221,7 @@ type createResult struct {
 	NetworkID  string   `json:"networkId,omitempty"`
 	EndpointID string   `json:"endpointId,omitempty"`
 	MacAddress string   `json:"macAddress,omitempty"`
+	Vlan       uint32   `json:"vlan,omitempty"`
 	DNS        []string `json:"dns,omitempty"`
 	// Addresses is empty until the endpoint has one; a caller polls `vm inspect` for it. See
 	// addressesOf.
@@ -237,18 +240,20 @@ type createOptions struct {
 	SerialPipe  string // empty means the default console pipe
 	CopyOnWrite bool
 	Network     *hcn.HostComputeNetwork // nil without --network
+	Mac         string                  // normalized XX-XX-XX-XX-XX-XX, or empty to generate one
+	Vlan        uint32                  // access VLAN for the endpoint's port; 0 means untagged
 	DNS         []string
 	Labels      map[string]string
 	StoreDir    string
 }
 
 func createCmd(e cli.Emit) *cobra.Command {
-	var vhdx, cpusStr, memoryStr, network, dnsCSV, serialPipe, storeDir string
+	var vhdx, cpusStr, memoryStr, network, dnsCSV, serialPipe, storeDir, mac, vlanStr string
 	var id *cli.GUIDFlag
 	var noCopyOnWrite bool
 	var labelVals, diskVals []string
 	cmd := &cobra.Command{
-		Use:   `create --vhdx <path> [--disk <path>]... [--id <guid>] [--cpus N] [--memory-mb N] [--network <name|id|default>] [--dns <IPv4,...>] [--serial-pipe \\.\pipe\name] [--no-copy-on-write] [--label key=value]... [--store <dir>]`,
+		Use:   `create --vhdx <path> [--disk <path>]... [--id <guid>] [--cpus N] [--memory-mb N] [--network <name|id|default>] [--mac <addr>] [--vlan N] [--dns <IPv4,...>] [--serial-pipe \\.\pipe\name] [--no-copy-on-write] [--label key=value]... [--store <dir>]`,
 		Short: "make a Hyper-V VM that boots a Gen 2 VHDX; does not start it",
 		Long: `Make a Hyper-V VM that boots a Gen 2 VHDX. By default every disk is a
 differencing child, so the images are never written to; --no-copy-on-write boots
@@ -346,10 +351,33 @@ and never interpreted -- record an owner pid; scavenge only on proof it is dead.
 				return err
 			}
 
+			vlan := uint64(0)
+			if vlanStr != "" {
+				if netw == nil {
+					return cli.Usagef("--vlan requires --network; a VM with no NIC has no port to tag")
+				}
+				if vlan, err = cli.ParseUint(vlanStr, 4094); err != nil {
+					return cli.Usagef("--vlan %v", err)
+				}
+			}
+
+			normalizedMac := ""
+			if mac != "" {
+				if netw == nil {
+					return cli.Usagef("--mac requires --network; a VM with no NIC has no address to set")
+				}
+				hw, merr := net.ParseMAC(mac)
+				if merr != nil || len(hw) != 6 {
+					return cli.Usagef("--mac %s: not a 48-bit MAC address", mac)
+				}
+				normalizedMac = strings.ToUpper(strings.ReplaceAll(hw.String(), ":", "-"))
+			}
+
 			return create(createOptions{
 				ID: vmID, Base: base, ExtraBases: extraBases, CPUs: cpus, MemoryMB: memoryMB,
 				SerialPipe: serialPipe, CopyOnWrite: !noCopyOnWrite,
-				Network: netw, DNS: dns, Labels: labels, StoreDir: storeDir,
+				Network: netw, Mac: normalizedMac, Vlan: uint32(vlan),
+				DNS: dns, Labels: labels, StoreDir: storeDir,
 			}, e)
 		},
 	}
@@ -360,6 +388,8 @@ and never interpreted -- record an owner pid; scavenge only on proof it is dead.
 	cli.StringOnce(cmd.Flags(), &cpusStr, "cpus", "virtual processor count (default 2)")
 	cli.StringOnce(cmd.Flags(), &memoryStr, "memory-mb", "memory in MB (default 2048)")
 	cli.StringOnce(cmd.Flags(), &network, "network", "attach an endpoint on this network; 'default' picks the Hyper-V Default Switch")
+	cli.StringOnce(cmd.Flags(), &mac, "mac", "MAC address for the NIC (default: generated); for guests whose config is pinned to a specific address")
+	cli.StringOnce(cmd.Flags(), &vlanStr, "vlan", "access VLAN id for the NIC's switch port (default: untagged); for networks whose other ports are VLAN-tagged")
 	cli.StringOnce(cmd.Flags(), &dnsCSV, "dns", "comma-separated IPv4 DNS servers; required for NAT and non-Default-Switch ICS networks")
 	cli.StringOnce(cmd.Flags(), &serialPipe, "serial-pipe", `named pipe for the COM port (default: \\.\pipe\hcsctl-<id>)`)
 	cmd.Flags().BoolVar(&noCopyOnWrite, "no-copy-on-write", false, "boot the image itself and MUTATE it, instead of a differencing child")
@@ -472,19 +502,23 @@ func create(opt createOptions, e cli.Emit) error {
 	// on every failure uses undo: the endpoint and access grants are host-global, and no store
 	// record points at them until writeState succeeds.
 	if opt.Network != nil {
-		mac, merr := generateMAC()
-		if merr != nil {
-			undo()
-			return merr
+		mac := opt.Mac
+		if mac == "" {
+			var merr error
+			if mac, merr = generateMAC(); merr != nil {
+				undo()
+				return merr
+			}
 		}
-		ep, eerr := createVMEndpoint(opt.Network, "", endpointName(id), mac)
+		ep, eerr := createVMEndpoint(opt.Network, "", endpointName(id), mac, opt.Vlan)
 		if eerr != nil {
 			undo()
 			return eerr
 		}
 		record.NetworkID, record.NetworkName = opt.Network.Id, opt.Network.Name
 		record.EndpointID, record.MacAddress = ep.Id, mac
-		e.Progress("endpoint:  %s on %s (mac %s)", ep.Id, opt.Network.Name, mac)
+		record.Vlan = opt.Vlan
+		e.Progress("endpoint:  %s on %s (mac %s, vlan %d)", ep.Id, opt.Network.Name, mac, opt.Vlan)
 	}
 
 	e.Progress("creating compute system %s", id)
@@ -525,6 +559,7 @@ func create(opt createOptions, e cli.Emit) error {
 		CPUs:  opt.CPUs, MemoryMB: opt.MemoryMB, SerialPipe: record.SerialPipe,
 		Network: record.NetworkName, NetworkID: record.NetworkID,
 		EndpointID: record.EndpointID, MacAddress: record.MacAddress,
+		Vlan:      record.Vlan,
 		DNS:       record.DNS,
 		Addresses: addrs,
 	}, func() {
@@ -731,7 +766,7 @@ func start(id, storeDir string, e cli.Emit) error {
 		if record.EndpointID != "" {
 			e.Progress("remaking endpoint %s so it can be attached again", record.EndpointID)
 			if rerr := remakeVMEndpoint(record.NetworkID, record.EndpointID,
-				endpointName(record.ID), record.MacAddress); rerr != nil {
+				endpointName(record.ID), record.MacAddress, record.Vlan); rerr != nil {
 				return rerr
 			}
 		}
