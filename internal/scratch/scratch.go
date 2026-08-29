@@ -9,12 +9,12 @@
 //     storage filter on its volume, and the volume path goes into the v2
 //     document's Container.Storage.Path. The filter attach is the caller's
 //     job -- HCS does not attach it from the document; Start fails 0x80070287
-//     without it (measured).
+//     without it.
 //   - xenon: the VHD is initialized then detached -- the schema-1 document
 //     consumes the scratch DIRECTORY, and the layers stack in-guest.
 //
 // Every sandbox gets the Virtual Machines group ACE: a xenon opens the VHD
-// under S-1-5-83-0 at create and is refused without it (measured, hcsctl#86);
+// under S-1-5-83-0 at create and is refused without it;
 // an argon is unharmed by it.
 package scratch
 
@@ -95,8 +95,7 @@ func Prepare(scratchDir string, chainTopFirst []string, size uint64, attachFilte
 		// Xenon: the document consumes the DIRECTORY and the utility VM
 		// initializes the writable layer in-guest -- no host-side attach, no
 		// InitializeWritableLayer (the blank.vhdx copy plus the VM-group ACE
-		// is the complete scratch, matching what the legacy service-side
-		// CreateScratchLayer produced). This is also what keeps the xenon
+		// is the complete scratch). This is also what keeps the xenon
 		// unelevated: an unelevated attach yields no mount path (see below).
 		return &Scratch{Dir: scratchDir, Sandbox: sandbox}, nil
 	}
@@ -128,7 +127,7 @@ func Prepare(scratchDir string, chainTopFirst []string, size uint64, attachFilte
 	}
 	if vol == "" {
 		// The attach succeeds unelevated but yields NO mount path -- the call
-		// reports success with an empty string (measured). Without the volume
+		// reports success with an empty string. Without the volume
 		// there is nothing to initialize or filter.
 		undo()
 		return nil, fmt.Errorf("the attached scratch has no mount path -- an unelevated attach mounts no volume; process isolation needs elevation")
@@ -172,7 +171,7 @@ func Volume(scratchDir string) (string, error) {
 
 // detachRetries x detachInterval bounds the storage-filter detach: container
 // teardown is asynchronous and the filter refuses while the volume is still in
-// use ("Do not detach... at this time", measured), settling within seconds.
+// use ("Do not detach... at this time"), settling within seconds.
 const (
 	detachRetries  = 10
 	detachInterval = time.Second
@@ -182,7 +181,7 @@ const (
 // presentation was (or may have been) active: detach the storage filter
 // before the VHD. The VHD detach itself is attempted unconditionally -- a
 // crashed create can leave a permanent attach behind with no filter, and
-// DestroyLayer fails on a directory holding an attached VHD (measured).
+// DestroyLayer fails on a directory holding an attached VHD.
 // Destruction is verified by absence -- DestroyLayer can report success and
 // leave the tree.
 func Teardown(scratchDir string, filtered bool) error {

@@ -19,7 +19,7 @@ curl -fsSL https://raw.githubusercontent.com/joshmakestuff/hcsctl/v0.4.0/install
 
 - **Pin the version.** Substitute `v0.4.0` with the tag you are pinning. It must be a release
   that ships the guest binaries (`hcsguest-windows-amd64.exe`, `hcsguest-linux-amd64`,
-  `SHA256SUMS`); v0.4.0 is the first. Use the same tag as the host `hcsctl`: the guest agent and
+  `SHA256SUMS`). Use the same tag as the host `hcsctl`: the guest agent and
   the host share a wire protocol. There is no `latest` form.
 - **Both forms need network.** The download path reaches github.com. For an air-gapped guest, copy
   the artifact in and run the script with `-Path` / `-p <artifact>` (optionally `-Sha256` / `-s`).

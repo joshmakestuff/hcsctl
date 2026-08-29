@@ -7,8 +7,7 @@
 // only the tar side of WalkToTar and parent materialization read with
 // SeBackupPrivilege, which the caller holds).
 //
-// The transport format (measured, hcsspike modernlc, docs/findings.md
-// 2026-08-25):
+// The transport format:
 //
 //	Files\<path>            blob: LE u32 attribute word + raw Win32 backup
 //	                        stream. The blob file's own timestamps carry the
@@ -52,9 +51,9 @@ const whiteoutPrefix = ".wh."
 var hiveNames = []string{"DefaultUser", "Sam", "Security", "Software", "System"}
 
 // hiveTemplates are empty offreg differencing hives ("OfRg", 8 KB each),
-// image-independent (measured on nanoserver and servercore). Provenance: the
-// HcsExportLayer product of a layer with no registry changes; the programmatic
-// regeneration route is offreg.dll ORCreateHive + ORSaveHive.
+// image-independent. They are the HcsExportLayer product of a layer with no
+// registry changes; the programmatic regeneration route is offreg.dll
+// ORCreateHive + ORSaveHive.
 //
 //go:embed hives/*_Delta
 var hiveTemplates embed.FS
@@ -108,8 +107,7 @@ func Stage(r io.Reader, staging string, parents []string) (Stats, error) {
 			linkTarget := filepath.Join(staging, filepath.FromSlash(hdr.Linkname))
 			_ = os.MkdirAll(filepath.Dir(linkName), 0o755)
 			if lerr := os.Link(linkTarget, linkName); lerr != nil {
-				// A link can precede its target in the tar (measured in
-				// servercore diff layers); defer and retry after the full pass.
+				// A link can precede its target in the tar; defer and retry after the full pass.
 				pendingLinks = append(pendingLinks, [2]string{linkTarget, linkName})
 			}
 			st.Links++
@@ -202,7 +200,7 @@ func Stage(r io.Reader, staging string, parents []string) (Stats, error) {
 // for any hive not already present. Two callers: Stage (HcsImportLayer
 // requires the deltas even for zero-parent imports) and the import pipeline
 // after SetupContainerBaseLayer (which strips them, and HcsExportLayer of the
-// base later requires them -- both measured).
+// base later requires them).
 func WriteDeltaHiveStubs(hivesDir string) error {
 	for _, hv := range hiveNames {
 		p := filepath.Join(hivesDir, hv+"_Delta")

@@ -3,10 +3,9 @@
 # consumes the scratch directly). The scratch is produced the storage surface's
 # way (blank.vhdx copy + InitializeWritableLayer + the Virtual Machines group
 # ACE, storage.PrepareScratchVHD), then the wclayer stack (ActivateLayer +
-# PrepareLayer + GetLayerMountPath) runs over it for the argon. This is the
-# measured working shape from hcsctl#86 (2026-08-21): the raw storage-mount
+# PrepareLayer + GetLayerMountPath) runs over it for the argon. The raw storage-mount
 # volume hangs at Start for argon; the stacked computestorage scratch boots.
-# The xenon needs the group ACE or its create is refused (door 2).
+# The xenon needs the group ACE or its create is refused.
 #
 #   tools\Run-ContainerStorageVhdSmoke.ps1 -Store <existing-store> -SkipAcquire
 param(
@@ -88,7 +87,7 @@ Assert "sandbox.vhdx exists" (Test-Path (Join-Path $scratch 'sandbox.vhdx'))
 "scratch: $scratch" | Tee-Object -Append -FilePath $out
 
 "== container run --isolation hyperv --storage vhd ==" | Tee-Object -Append -FilePath $out
-# The xenon leg (#86 door 2): hyperv-isolated container on the computestorage
+# The xenon leg: hyperv-isolated container on the computestorage
 # scratch. Needs the Virtual Machines group ACE on sandbox.vhdx (granted by the
 # storage prep) -- without it, create is refused with Access denied.
 $prevEAP = $ErrorActionPreference

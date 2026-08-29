@@ -2,20 +2,16 @@
 
 // Package computecore binds computecore.dll, the documented public Host
 // Compute System API, for both containers and full VMs -- the one compute
-// binding in this tool. It replaces internal/vmcompute (the legacy RPC
-// surface) and hcsshim's schema-1 container surface.
+// binding in this tool.
 //
 // The API is operation-based and this package waits synchronously: every call
 // makes an HCS_OPERATION, invokes the function, and blocks in
 // HcsWaitForOperationResult (or ...AndProcessInfo). There are no notification
-// callbacks anywhere -- the operation result IS the completion, which deletes
-// the vmcompute binding's entire syscall.NewCallback/channel apparatus.
+// callbacks anywhere -- the operation result IS the completion.
 //
-// Measured constraints this package encodes (hcsspike probes/modernlc,
-// docs/findings.md 2026-08-25):
+// Constraints this package encodes:
 //
-//   - The shutdown export is HcsShutDownComputeSystem -- capital D. The
-//     vmcompute spelling is not in computecore's export table.
+//   - The shutdown export is HcsShutDownComputeSystem -- capital D.
 //   - A VM shutdown REQUIRES the options document
 //     {"Mechanism":"IntegrationService","Type":"Shutdown"}; NULL options fails
 //     0x80070032, misdirecting to the missing-Services-section defect. A
@@ -26,7 +22,7 @@
 //     properties, never properties-stops-answering.
 //   - HcsWaitForProcessExit's ProcessStatus carries the real exit code -- no
 //     0xFFFFFFFF pre-reap artifact on this route.
-//   - Result documents are freed with LocalFree (vmcompute's are CoTaskMemFree).
+//   - Result documents are freed with LocalFree.
 package computecore
 
 import (
@@ -72,15 +68,13 @@ var (
 )
 
 // HRESULTs that carry meaning to callers. computecore reports these WITHOUT
-// the customer bit vmcompute set (0x8037010E where vmcompute said 0xC037010E
-// -- measured), so matching masks that bit.
+// the customer bit (0x8037010E), so matching masks that bit.
 const (
 	hcsNotFound       = 0x8037010E // HCS_E_SYSTEM_NOT_FOUND
 	hcsAlreadyStopped = 0x80370110 // HCS_E_VM_ALREADY_STOPPED -- also what a
-	// terminate after a completed graceful shutdown returns (measured)
+	// terminate after a completed graceful shutdown returns
 
-	// severityBit is what separates vmcompute's 0xC037010E from computecore's
-	// 0x8037010E for the same condition.
+	// severityBit is the customer bit; codeIs clears it before comparing.
 	severityBit = 0x40000000
 )
 
@@ -90,8 +84,8 @@ func codeIs(err error, hresult uint32) bool {
 }
 
 // Error carries the HRESULT and, when HCS supplied one, the result document.
-// The document names the part of the configuration HCS rejected -- the single
-// most valuable diagnostic HCS emits. Op is the computecore entry point.
+// The document names the part of the configuration HCS rejected. Op is the
+// computecore entry point.
 type Error struct {
 	Op     string
 	Code   uint32
@@ -201,7 +195,7 @@ type System struct {
 
 // Create makes a compute system from a JSON document string and waits for the
 // creation to complete. The document may be schema 2 (argon, VM) or schema 1
-// (xenon) -- computecore accepts both (measured).
+// (xenon) -- computecore accepts both.
 func Create(id, document string, timeout time.Duration) (*System, error) {
 	const op = "HcsCreateComputeSystem"
 	oph, err := newOp(op)
@@ -258,7 +252,7 @@ func (s *System) Start(timeout time.Duration) error {
 }
 
 // Shutdown asks the system to shut down. options is the shutdown options
-// document: a container takes "" (measured); a VM requires
+// document: a container takes ""; a VM requires
 // {"Mechanism":"IntegrationService","Type":"Shutdown"} and a guest whose
 // shutdown integration service is up.
 func (s *System) Shutdown(options string, timeout time.Duration) error {
@@ -379,7 +373,7 @@ func (s *System) OpenProcess(pid uint32) (*Process, error) {
 }
 
 // ProcessStatus is HcsWaitForProcessExit's answer. The exit code is real on
-// this route -- no pre-reap artifact (measured).
+// this route -- no pre-reap artifact.
 type ProcessStatus struct {
 	ProcessID uint32 `json:"ProcessId"`
 	Exited    bool   `json:"Exited"`
@@ -413,7 +407,7 @@ func (p *Process) Terminate(timeout time.Duration) error {
 // CloseStdin closes the process's stdin on the guest side. The modify
 // document nests the handle (hcsshim's wire shape); a flat
 // {"Operation":"CloseHandle","Handle":"StdIn"} is silently ignored and the
-// guest never sees EOF (measured -- a piped interactive exec hangs).
+// guest never sees EOF (a piped interactive exec hangs).
 func (p *Process) CloseStdin(timeout time.Duration) error {
 	const settings = `{"Operation":"CloseHandle","CloseHandle":{"Handle":"StdIn"}}`
 	_, err := operation("HcsModifyProcess", procModifyProcess, p.handle, timeout, utf16arg(settings))

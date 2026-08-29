@@ -1,12 +1,12 @@
 # The base-setup smoke: the operational check behind "works" for storage setup-base --uvm
-# (SetupUtilityVMBaseLayer) and storage setup-volume (SetupBaseOSVolume), the last two
-# computestorage functions (#18). Windows PowerShell 5.1 compatible.
+# (SetupUtilityVMBaseLayer) and storage setup-volume (SetupBaseOSVolume).
+# Windows PowerShell 5.1 compatible.
 #
 # Both calls MUTATE the layer they are given (Hives\ and layout are regenerated), so this
 # works on a backup-mode copy of a store layer, never the store itself. Ordinary copying
 # does not reproduce a layer faithfully -- robocopy /B /COPYALL is required.
 #
-# Two measured requirements this exercises, neither reported by the API as an error:
+# Two requirements this exercises, neither reported by the API as an error:
 #   * SetupUtilityVMBaseLayer's uvmPath is <layer>\UtilityVM, NOT UtilityVM\Files
 #     (hcsshim documents "the UtilityVM filesystem"; the Files path is ERROR_GEN_FAILURE).
 #   * SetupBaseOSVolume silently does nothing on a volume that is not

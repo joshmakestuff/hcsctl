@@ -4,9 +4,7 @@
 # create / usage / mount / fork+unlink / unmount-by-addressing / destroy, asserting an
 # observable postcondition after each step. Transcript retained under smoke\.
 #
-# The SDDL comparison is a measurement, not just a gate: descriptor round-trip fidelity
-# through a CIM was an open question (read-back failed on 2026-08-05). Whatever this run
-# shows belongs in docs/findings.md.
+# The SDDL comparison checks that descriptors round-trip through a CIM.
 #
 # pwsh only: Windows PowerShell 5.1 cannot create an empty alternate stream and mangles
 # \\?\ paths, which silently invalidates the tree this smoke builds.
@@ -65,14 +63,14 @@ $src = Join-Path $Work 'src'
 $delta = Join-Path $Work 'delta'
 $cims = Join-Path $Work 'cims'
 # The delta carries sub\ itself: unlinking a nested parent-CIM path needs the parent
-# directory present in the fork's own tree (measured; a layer tar does the same).
+# directory present in the fork's own tree (a layer tar does the same).
 $null = New-Item -ItemType Directory -Force "$src\sub", "$delta\sub"
 Set-Content "$src\a.txt" 'alpha'
 Set-Content "$src\sub\b.txt" 'bravo'
 Set-Content "$src\acl.txt" 'guarded'
 $null = New-Item -ItemType HardLink -Path "$src\link.txt" -Target "$src\a.txt"
 $null = New-Item -ItemType SymbolicLink -Path "$src\sym.txt" -Target 'a.txt'
-Set-Content -Path "$src\a.txt" -Stream 'marker' -Value $null   # empty ADS; payloads are unwritable (measured)
+Set-Content -Path "$src\a.txt" -Stream 'marker' -Value $null   # empty ADS; payloads are unwritable
 $inheritedSddl = (Get-Acl "$src\acl.txt").Sddl
 icacls "$src\acl.txt" /grant '*S-1-5-32-546:(R)' | Out-Null
 if ($LASTEXITCODE -ne 0) {
@@ -81,11 +79,11 @@ if ($LASTEXITCODE -ne 0) {
     exit 1
 }
 $srcSddl = (Get-Acl "$src\acl.txt").Sddl
-Assert "the grant changed the descriptor (measurement is not vacuous)" ($srcSddl -ne $inheritedSddl)
+Assert "the grant changed the descriptor" ($srcSddl -ne $inheritedSddl)
 Set-Content "$delta\c.txt" 'charlie'
 
 # PS provider cmdlets (Get-Item, Get-Acl, -Stream) mangle \\?\Volume{...} paths, and a
-# junction onto a CIM volume does not resolve (measured) -- but mountvol drive-letter
+# junction onto a CIM volume does not resolve -- but mountvol drive-letter
 # assignment works. .NET IO reads the \\?\ form fine.
 $driveLetter = 'Z', 'Y', 'X', 'W', 'V', 'U', 'T', 'S' | Where-Object { -not (Test-Path "${_}:\") } | Select-Object -First 1
 $mnt = "${driveLetter}:"
@@ -104,7 +102,7 @@ $usageJson = (& $bin cim usage --cim "$cims\base.cim" --json) | Out-String
 Assert "usage exits 0" ($LASTEXITCODE -eq 0)
 Assert "usage is nonzero" (($usageJson | ConvertFrom-Json).usageBytes -gt 0)
 
-# -- mount: content, links, streams, SD measurement ---------------------------------------
+# -- mount: content, links, streams, SDDL round-trip ---------------------------------------
 "== cim mount (elevated) =="
 $mountJson = (& $bin cim mount --cim "$cims\base.cim" --json 2>$null) | Out-String
 Assert "mount exits 0" ($LASTEXITCODE -eq 0)
@@ -123,11 +121,11 @@ try {
     Assert "symlink target is a.txt" ($symItem.Target -match 'a\.txt$')
     $streams = (Get-Item "$mnt\a.txt" -Stream * -ErrorAction SilentlyContinue).Stream
     Assert "empty ADS present" ($streams -contains 'marker')
-    # The measurement: descriptor fidelity was unconfirmed (2026-08-05 read-back failed).
+    # The descriptor must be identical after the CIM round trip.
     $mountedSddl = (Get-Acl "$mnt\acl.txt" -ErrorAction SilentlyContinue).Sddl
-    "  measured: source SDDL:  $srcSddl"
-    "  measured: mounted SDDL: $mountedSddl"
-    Assert "MEASUREMENT: DACL SDDL round-trips through the CIM" ($mountedSddl -eq $srcSddl)
+    "  source SDDL:  $srcSddl"
+    "  mounted SDDL: $mountedSddl"
+    Assert "DACL SDDL round-trips through the CIM" ($mountedSddl -eq $srcSddl)
     mountvol $mnt /D
     $mntAssigned = $false
 
@@ -170,7 +168,7 @@ Assert "child destroy exits 0" ($LASTEXITCODE -eq 0)
 Assert "base destroy exits 0" ($LASTEXITCODE -eq 0)
 Assert "no cim artifacts remain" ($null -eq (Get-ChildItem $cims -ErrorAction SilentlyContinue))
 
-# -- ADS payload refusal: the measured limit fails loudly, undo cleans up -----------------
+# -- ADS payload refusal: the limit fails loudly, undo cleans up -----------------
 "== cim create refuses an ADS payload =="
 Set-Content -Path "$src\a.txt" -Stream 'payload' -Value 'data'
 & $bin cim create --dir $src --cim "$cims\refused.cim" --json 2>$null | Out-Null

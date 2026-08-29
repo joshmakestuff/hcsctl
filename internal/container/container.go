@@ -12,7 +12,7 @@
 //	xenon  -- the scratch is a detached VHD in a directory a SCHEMA-1 document
 //	          consumes (LayerFolderPath + HvRuntime.ImagePath); the utility VM
 //	          stacks the layers in-guest. The document shape is legacy because
-//	          no self-contained v2 xenon document exists (measured); every
+//	          no self-contained v2 xenon document exists; every
 //	          call carrying it is computecore.
 //
 // ELEVATED.
@@ -457,9 +457,8 @@ func statePath(st *store.Store, id string) string {
 }
 
 func writeState(st *store.Store, s state) error {
-	// Failpoint: a real state-write failure is reachable only after a real acquisition --
-	// scratch, endpoint, compute system -- which no hosted runner can do. The env var makes
-	// the branch reachable from the elevated smoke path.
+	// Failpoint: HCSCTL_TEST_FAIL_WRITESTATE forces a state-write failure without a real
+	// acquisition.
 	if os.Getenv("HCSCTL_TEST_FAIL_WRITESTATE") != "" {
 		return fmt.Errorf("injected failure: HCSCTL_TEST_FAIL_WRITESTATE is set")
 	}
@@ -524,9 +523,8 @@ func chainFor(st *store.Store, ref string) ([]string, error) {
 // locateUVM finds the uppermost layer whose UtilityVM is PREPARED -- it
 // carries the SystemTemplate.vhdx SetupUtilityVMBaseLayer produced. A diff
 // layer's tar can carry a UtilityVM delta too, but the modern import prepares
-// only the base's (the legacy path cloned parent UVMs per layer; the modern
-// one does not), and a document naming an unprepared UVM fails create with
-// 0x80070002 (measured on servercore:ltsc2022). The utility VM therefore runs
+// only the base's, and a document naming an unprepared UVM fails create with
+// 0x80070002. The utility VM therefore runs
 // the BASE build; the container's own filesystem still stacks the full chain.
 func locateUVM(chain []string) (string, error) {
 	for _, l := range chain {
@@ -695,7 +693,7 @@ func validatePublishNetwork(published []publishedPort, netw *hcn.HostComputeNetw
 // user-selectable: Host and Switch both enforce on the argon + NAT topology, and the surface
 // fixes Switch. Enforcement is topology-dependent (argon + NAT and xenon + L2Bridge enforce;
 // xenon + NAT stores without dataplane effect) and create-time only: runtime ApplyPolicy is
-// inert on every measured topology.
+// inert.
 type aclRule struct {
 	Direction hcn.DirectionType `json:"direction"`
 	Action    hcn.ActionType    `json:"action"`
@@ -794,9 +792,9 @@ func parseACL(v string) (aclRule, error) {
 
 // aclEnforcementReason reports whether ACLs on this isolation/network combination are known to
 // enforce on the dataplane. Empty means they do; any other value is why they must not be
-// applied. The measured matrix: process (argon) + NAT and hyperv (xenon) + L2Bridge enforce.
-// hyperv + NAT is a no-op (HNS stores the policy, the dataplane is unchanged), and every other
-// combination is unmeasured -- both fail closed.
+// applied. The matrix: process (argon) + NAT and hyperv (xenon) + L2Bridge enforce.
+// hyperv + NAT is a no-op (HNS stores the policy, the dataplane is unchanged), and every
+// other combination fails closed.
 func aclEnforcementReason(isolation string, netw *hcn.HostComputeNetwork) string {
 	if netw == nil {
 		return "no HCN network"
@@ -806,22 +804,22 @@ func aclEnforcementReason(isolation string, netw *hcn.HostComputeNetwork) string
 		if netw.Type == hcn.NAT {
 			return ""
 		}
-		return fmt.Sprintf("process isolation was measured only on NAT; %s is unverified", netw.Type)
+		return fmt.Sprintf("process isolation supports ACLs only on NAT; %s is unsupported", netw.Type)
 	case isolationHyperV:
 		if netw.Type == hcn.L2Bridge {
 			return ""
 		}
 		if netw.Type == hcn.NAT {
-			return "hyperv isolation + NAT stores the ACL without enforcing it (measured)"
+			return "hyperv isolation + NAT stores the ACL without enforcing it"
 		}
-		return fmt.Sprintf("hyperv isolation was measured only on L2Bridge; %s is unverified", netw.Type)
+		return fmt.Sprintf("hyperv isolation supports ACLs only on L2Bridge; %s is unsupported", netw.Type)
 	default:
 		return fmt.Sprintf("unknown isolation %q", isolation)
 	}
 }
 
 // validateACLNetwork fails closed for ACLs on an isolation/network combination whose
-// enforcement is inert or unmeasured. It runs before any disk or endpoint transaction so a
+// enforcement is inert or unverified. It runs before any disk or endpoint transaction so a
 // refused combination is exit 64 with nothing attempted; createEndpoint guards the same matrix
 // so a future call site cannot bypass it.
 func validateACLNetwork(acls []aclRule, isolation string, netw *hcn.HostComputeNetwork) error {
@@ -898,7 +896,7 @@ func parseMounts(vals []string) ([]mappedDir, error) {
 }
 
 // reservedLabelKeys are what a consumer sees when it flattens state.json (or the inspect
-// document) -- a label may not shadow one. Grown alongside the state struct's json tags.
+// document) -- a label may not shadow one. Kept in sync with the state struct's json tags.
 var reservedLabelKeys = map[string]bool{
 	"id": true, "ref": true, "scratch": true, "utilityVM": true, "isolation": true,
 	"chain": true, "volume": true, "namespace": true,
@@ -1096,8 +1094,7 @@ func buildConfig(o *createOptions, e cli.Emit, st *store.Store, id string) (stri
 	}
 	if ep != nil {
 		in.Endpoint = ep.Id
-		// Unqualified lookups are what a developer's `ping example.com` is, so this defaults
-		// on rather than being a switch nobody remembers.
+		// Enable unqualified DNS lookups whenever an endpoint is attached.
 		in.AllowDNS = true
 		in.DNSSearch = o.dnsSearch
 	}
@@ -1132,7 +1129,7 @@ func buildConfig(o *createOptions, e cli.Emit, st *store.Store, id string) (stri
 func createNamespace(endpointID string) (string, error) {
 	// The empty namespace type is what hcsshim's own container path creates
 	// (hcn.NewNamespace("")); a typed namespace fails the document's Construct
-	// with 0x80070057 (measured).
+	// with 0x80070057.
 	ns, err := hcn.NewNamespace("").Create()
 	if err != nil {
 		return "", fmt.Errorf("namespace Create: %w", err)
@@ -1339,7 +1336,7 @@ func stop(o targetOptions, force bool, e cli.Emit) error {
 }
 
 // shutdown asks politely, then insists. A container's HcsShutDownComputeSystem
-// takes NULL options (measured, unlike the VM's). The operation completing is
+// takes NULL options (unlike the VM's). The operation completing is
 // the request landing; Stopped:true in the properties is the exit -- a
 // handle-holding process keeps a stopped system queryable, so absence is not
 // the signal.
@@ -1420,7 +1417,7 @@ func parseEnv(vals []string) (map[string]string, error) {
 // long is a failure to report, not a thing to wait harder on.
 const killWait = 10 * time.Second
 
-// execResult is what execIn measured. ExitCode is meaningful only when neither TimedOut nor
+// execResult is what execIn reports. ExitCode is meaningful only when neither TimedOut nor
 // Interrupted is true: a killed process's code is an invention of the kill, not something the
 // guest produced.
 type execResult struct {
@@ -1432,7 +1429,7 @@ type execResult struct {
 
 // parseExitCode reads the exit code out of a ProcessStatus document
 // (HcsWaitForProcessExit's answer -- the code is real on this route, no
-// pre-reap artifact, measured).
+// pre-reap artifact).
 func parseExitCode(status string) (int, error) {
 	var st computecore.ProcessStatus
 	if err := json.Unmarshal([]byte(status), &st); err != nil {
@@ -1537,9 +1534,9 @@ func execIn(c *computecore.System, e cli.Emit, cmdline, cwd, user string, env ma
 	status, err := p.WaitExit(timeout) // timeout 0 = wait forever
 	if err != nil {
 		if timeout > 0 && computecore.IsTimeout(err) {
-			// Expired: kill, then confirm the kill landed rather than trusting it. "We gave
-			// up on it" and "it exited" must stay distinguishable, so the exit code is not
-			// collected -- it would be the kill's invention, not the guest's.
+			// Expired: kill, then confirm the kill landed rather than trusting it. A timeout
+			// and a guest exit must stay distinguishable, so the exit code is not collected --
+			// it would be the kill's invention, not the guest's.
 			res.TimedOut = true
 			e.Progress("timeout %s expired, killing pid %d", timeout, res.Pid)
 			kerr := killConfirmed(p, res.Pid)
@@ -2045,7 +2042,7 @@ func open(o targetOptions) (*computecore.System, string, error) {
 	return c, id, nil
 }
 
-// v2Statistics is the measured shape of the Statistics property (M5). There
+// v2Statistics is the shape of the Statistics property. There
 // is NO network section in v2 -- the schema-1 one is gone.
 type v2Statistics struct {
 	Statistics struct {
@@ -2104,7 +2101,7 @@ func stats(o targetOptions, e cli.Emit) error {
 	return nil
 }
 
-// v2ProcessEntry is one ProcessList row (measured field set, M5).
+// v2ProcessEntry is one ProcessList row.
 type v2ProcessEntry struct {
 	ProcessId         uint32 `json:"ProcessId"`
 	ImageName         string `json:"ImageName"`

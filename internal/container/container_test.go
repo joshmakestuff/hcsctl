@@ -248,8 +248,8 @@ func TestValidateACLNetwork(t *testing.T) {
 	acls := []aclRule{{Direction: hcn.DirectionTypeIn, Action: hcn.ActionTypeBlock, Protocol: "tcp"}}
 	types := []hcn.NetworkType{hcn.NAT, hcn.Transparent, hcn.L2Bridge, hcn.L2Tunnel, hcn.ICS, hcn.Private, hcn.Overlay}
 
-	// The measured enforcement matrix: process+NAT and hyperv+L2Bridge enforce; every other
-	// combination is inert or unmeasured and must fail closed.
+	// The enforcement matrix: process+NAT and hyperv+L2Bridge enforce; every other
+	// combination is unsupported and must fail closed.
 	enforces := map[string]map[hcn.NetworkType]bool{
 		isolationProcess: {hcn.NAT: true},
 		isolationHyperV:  {hcn.L2Bridge: true},

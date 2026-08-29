@@ -22,7 +22,7 @@ import (
 	"github.com/joshmakestuff/hcsctl/internal/transport"
 )
 
-// Export route (measured, hcsspike modernlc exportdir cell, 2026-08-25):
+// Export route:
 // HcsExportLayer takes a COMMITTED layer directory as its source -- the diff
 // layers with their parents, and the zero-parent base -- with no wclayer
 // Activate/Prepare dance. The one requirement is Hives\*_Delta in the source,

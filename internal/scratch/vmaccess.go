@@ -18,11 +18,9 @@ import (
 // InitializeWritableLayer) carries only SYSTEM/Administrators/user ACEs, so a
 // xenon create fails with "Access is denied" before the doc is even accepted.
 // CreateScratchLayer's product carries the group ACE; the computestorage path
-// never adds it. Measured isolation (hcsctl#86 door 2): granting
-// S-1-5-83-0 read+write on the sandbox.vhdx flips the xenon create from
-// Access denied to a full boot. This is a re-implementation of vmcompute's
-// unexported GrantVmGroupAccess (go-winio/pkg/security ships one, but it
-// grants GENERIC_READ only; the measured grant includes write).
+// never adds it, so a xenon create needs S-1-5-83-0 read+write on the
+// sandbox.vhdx to boot. go-winio/pkg/security ships GrantVmGroupAccess, but
+// it grants GENERIC_READ only; this grant includes write.
 
 const sidVMGroup = "S-1-5-83-0" // NT VIRTUAL MACHINE\Virtual Machines
 

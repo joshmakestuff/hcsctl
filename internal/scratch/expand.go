@@ -14,18 +14,16 @@ import (
 )
 
 // ExpandScratch grows a scratch layer's sandbox.vhdx to at least size bytes: the virtual
-// disk, then its GPT data partition, then the NTFS volume. It replaces vmcompute's
-// ExpandSandboxSize (hcsshim.ExpandScratchSize), which fails 0x5 for any unelevated caller
-// -- the service-side check is unreachable from a filtered token no matter what it holds.
-// This sequence needs no elevation; its one requirement is SeManageVolumePrivilege, spent
-// at AttachVirtualDisk (1314 ERROR_PRIVILEGE_NOT_HELD without it). Measured on hcsctl#36.
+// disk, then its GPT data partition, then the NTFS volume. This sequence needs no
+// elevation; its one requirement is SeManageVolumePrivilege, spent at AttachVirtualDisk
+// (1314 ERROR_PRIVILEGE_NOT_HELD without it).
 //
 // Call it between CreateScratchLayer and Activate/Prepare, while nothing holds the vhd.
 // The disk detaches when the handle closes, so no attach state survives this function.
 //
 // Everything here goes through the volume device, not the disk device: an attached VHD's
-// disk object is ACLed to Administrators only (and AttachVirtualDisk's security-descriptor
-// parameter measurably does not override that), while its volume object grants Authenticated
+// disk object is ACLed to Administrators only (AttachVirtualDisk's security-descriptor
+// parameter does not override that), while its volume object grants Authenticated
 // Users read/write. IOCTL_DISK_GROW_PARTITION is forwarded down the storage stack from the
 // volume handle.
 func ExpandScratch(scratchDir string, size uint64) error {
@@ -36,7 +34,7 @@ func ExpandScratch(scratchDir string, size uint64) error {
 	defer syscall.Close(vhd)
 
 	// A request at or below the current virtual size resizes nothing, matching the "at
-	// least" contract of the call this replaces; the partition and volume steps still run
+	// least" contract; the partition and volume steps still run
 	// and no-op against an already-full disk.
 	current, err := vhdVirtualSize(vhd)
 	if err != nil {

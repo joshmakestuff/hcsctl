@@ -21,24 +21,21 @@ that need elevation say so in `hcsctl help`; nothing escalates on its own.
 
 - **`image import` and `image export` are elevated.** The computestorage service refuses a
   UAC-filtered token, and the import/export calls run under `SeBackupPrivilege` +
-  `SeRestorePrivilege`, both removed from a filtered token. (The old wclayer-era
-  `BUILTIN\Administrators` group check is gone with wclayer.)
+  `SeRestorePrivilege`, both removed from a filtered token.
 - `image rm`, `layer mount|unmount`, and every `storage` command are elevated.
-- **Hyper-V-isolated (xenon) `container` commands run UNELEVATED** (measured at medium IL:
-  full run to exit 0, rm included). The xenon scratch is a blank.vhdx copy plus the
+- **Hyper-V-isolated (xenon) `container` commands run UNELEVATED**. The xenon scratch is a blank.vhdx copy plus the
   VM-group ACE -- no host-side attach.
 - **Process-isolated (argon) containers are elevated at create/run**: the scratch attach
   succeeds unelevated but mounts NO volume (HcsGetLayerVhdMountPath returns empty), so
-  there is nothing to initialize or filter. The wclayer-era per-START elevation is gone --
-  a created argon needs elevation once, at create. `--scratch-size` additionally needs the
+  there is nothing to initialize or filter.
+  A created argon needs elevation once, at create. `--scratch-size` additionally needs the
   grantable `SeManageVolumePrivilege` ("Perform volume maintenance tasks").
 - `vm` commands are unelevated; membership of Hyper-V Administrators is enough.
 - `image pull`, `image ls`, `network ls|endpoints|inspect`, `guest` commands and `info` are
   unelevated.
 - **`cim create|merge|usage|verify|destroy` are unelevated** -- building and committing a CIM,
-  security descriptors included, needs no privilege (measured). `cim mount|unmount` are
-  elevated; the specific right is unidentified -- `SeManageVolumePrivilege` is not sufficient
-  (measured).
+  security descriptors included, needs no privilege. `cim mount|unmount` are
+  elevated; the specific right is unidentified -- `SeManageVolumePrivilege` is not sufficient.
 
 ## Container isolation
 

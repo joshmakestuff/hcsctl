@@ -77,7 +77,7 @@ type state struct {
 }
 
 // reservedLabelKeys are the field names a consumer sees when it flattens state.json or an
-// inspect document. A label may not shadow one. Grown alongside the structs in this file.
+// inspect document. A label may not shadow one. Kept in sync with the structs in this file.
 var reservedLabelKeys = map[string]bool{
 	"id": true, "baseVhdx": true, "diskPath": true, "copyOnWrite": true, "cpus": true,
 	"memoryMb": true, "serialPipe": true, "createdUtc": true, "labels": true,
@@ -101,7 +101,7 @@ const (
 
 // shutdownOptions is required by HcsShutDownComputeSystem on a VM: NULL
 // options fails 0x80070032 ERROR_NOT_SUPPORTED even with a live guest
-// (measured) -- the same code the missing-Services-section defect produces, so
+// -- the same code the missing-Services-section defect produces, so
 // it misdirects without this.
 const shutdownOptions = `{"Mechanism":"IntegrationService","Type":"Shutdown"}`
 
@@ -109,7 +109,7 @@ const shutdownOptions = `{"Mechanism":"IntegrationService","Type":"Shutdown"}`
 // computecore the shutdown/terminate operation completing is the REQUEST
 // landing; the exit can lag, and while this process holds a handle the system
 // stays queryable after it stops (destroyed on last close) -- so the exit
-// signal is Stopped:true, never properties-stops-answering (measured).
+// signal is Stopped:true, never properties-stops-answering.
 func waitStopped(sys *computecore.System, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	for {
@@ -697,8 +697,7 @@ func stopCmd(e cli.Emit) *cobra.Command {
 	var id *cli.GUIDFlag
 	var force bool
 	cmd := &cobra.Command{
-		// No --store: stop drives HCS by id alone. The flag it used to advertise was
-		// silently swallowed.
+		// No --store: stop drives HCS by id alone.
 		Use:   "stop --id <guid> [--force]",
 		Short: "shut down through the guest, or power off with --force",
 		Long: `Without --force, asks the guest through the shutdown integration service; a
@@ -1103,7 +1102,7 @@ func orDash(s string) string {
 
 // hcsState asks HCS for the live state, so ls reports that rather than what this tool last
 // wrote. "stopped" is a store-side reading, not an HCS one: HCS has no stopped state, it
-// destroys the compute system when it exits, so what is measured is its absence.
+// destroys the compute system when it exits, so its absence is the stopped signal.
 func hcsState(id string) string {
 	sys, err := computecore.Open(id)
 	if computecore.IsNotFound(err) {
