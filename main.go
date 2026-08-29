@@ -150,7 +150,7 @@ exit codes: 0 ok, 1 ran and failed, 64 bad arguments (nothing attempted)
 	// line is still reported in the requested shape. Declared here so cobra accepts and
 	// documents them.
 	pf.Bool("json", false, "one JSON document on stdout; progress on stderr")
-	pf.Bool("stream-json", false, "with --json: stderr becomes NDJSON, one object per line, so a consumer following a long exec can attribute every line -- {\"stream\":\"progress\"} is hcsctl, {\"stream\":\"stdout\"|\"stderr\"} is the guest, per line, live. The final document is unchanged")
+	pf.Bool("stream-json", false, "with --json: stderr becomes NDJSON, one object per line, so a consumer following a long exec can attribute every line -- {\"stream\":\"progress\"} is hcsctl, {\"stream\":\"stdout\"|\"stderr\"} is the guest, per line, live, and {\"stream\":\"exec\",\"event\":\"started\",\"pid\":N} marks the guest process existing, before any of its output. The final document is unchanged")
 	root.Flags().Bool("version", false, "the tool and contract versions")
 
 	root.AddCommand(

@@ -1,9 +1,23 @@
 package cli
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
+
+// The started record is the contract a consumer's pause gate latches on (hcsctl#98): stream
+// "exec", event "started", and the pid as a JSON number. A shape change here breaks AspireHcs.
+func TestExecStartedRecordShape(t *testing.T) {
+	b, err := json.Marshal(execStartedRecord(4242))
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	want := `{"event":"started","pid":4242,"stream":"exec"}`
+	if string(b) != want {
+		t.Fatalf("record = %s, want %s", b, want)
+	}
+}
 
 // The framer is exercised through Write/Close; emission goes to stderr, so these tests pin
 // the *buffering* semantics -- what constitutes a line -- by inspecting internal state and

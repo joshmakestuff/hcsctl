@@ -158,8 +158,9 @@ func ParseSize(s string) (uint64, error) {
 // With StreamJSON, everything on stderr is NDJSON -- one object per line -- so a consumer
 // following a long-running exec can attribute every line without matching on message text.
 // {"stream":"progress","msg":...} is hcsctl's own voice; guest output is framed as
-// {"stream":"stdout"|"stderr","data":...}. Takes effect only alongside JSON mode: without
-// --json human output stays human.
+// {"stream":"stdout"|"stderr","data":...}; {"stream":"exec","event":"started","pid":N} marks
+// the guest process existing, before any of its output. Takes effect only alongside JSON
+// mode: without --json human output stays human.
 type Emit struct {
 	JSON       bool
 	StreamJSON bool
@@ -170,7 +171,7 @@ func (e Emit) framing() bool { return e.JSON && e.StreamJSON }
 func (e Emit) Progress(format string, a ...any) {
 	msg := fmt.Sprintf(format, a...)
 	if e.framing() {
-		e.streamLine(map[string]string{"stream": "progress", "msg": msg})
+		e.streamLine(map[string]any{"stream": "progress", "msg": msg})
 		return
 	}
 	if e.JSON {
@@ -180,7 +181,7 @@ func (e Emit) Progress(format string, a ...any) {
 	}
 }
 
-func (e Emit) streamLine(obj map[string]string) {
+func (e Emit) streamLine(obj map[string]any) {
 	b, err := json.Marshal(obj)
 	if err != nil {
 		return
@@ -229,14 +230,30 @@ func (w *StreamWriter) Close() error {
 }
 
 func (w *StreamWriter) emit(line []byte) {
-	w.e.streamLine(map[string]string{"stream": w.stream, "data": strings.TrimSuffix(string(line), "\r")})
+	w.e.streamLine(map[string]any{"stream": w.stream, "data": strings.TrimSuffix(string(line), "\r")})
+}
+
+// execStartedRecord is the one lifecycle record in the stream contract: the guest process
+// exists, identified by pid. A consumer gating on process creation (pause, attach) latches
+// this instead of polling the guest process list, where a same-named process is a false match.
+func execStartedRecord(pid int) map[string]any {
+	return map[string]any{"stream": "exec", "event": "started", "pid": pid}
+}
+
+// StreamExecStarted emits the started record for an exec's guest process. Framed mode only:
+// the final document already carries the pid for consumers that wait for exit.
+func (e Emit) StreamExecStarted(pid int) {
+	if !e.framing() {
+		return
+	}
+	e.streamLine(execStartedRecord(pid))
 }
 
 // StreamLogLine frames one retained-log line (`container logs --follow`). The stream is
 // "log", not "stdout"/"stderr": primary.log merges the guest's two streams, so per-stream
 // attribution is not available once output is replayed from the file.
 func (e Emit) StreamLogLine(line string) {
-	e.streamLine(map[string]string{"stream": "log", "data": line})
+	e.streamLine(map[string]any{"stream": "log", "data": line})
 }
 
 // Result prints the command's single result: the document in JSON mode, human() otherwise.
