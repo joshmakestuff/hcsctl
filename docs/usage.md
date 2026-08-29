@@ -102,6 +102,14 @@ hcsctl vm ip     --id <guid>
 hcsctl guest exec --vmid <guid> --cmd "uname -a"
 ```
 
+`--disk` attaches additional data disks after the boot disk, at SCSI LUN 1 onward in the
+order given. They share the boot disk's copy-on-write policy: differencing children by
+default, the files themselves (mutated) under `--no-copy-on-write`:
+
+```
+hcsctl vm create --vhdx C:\images\os.vhdx --disk C:\images\data.vhdx
+```
+
 Build a CIM from a directory tree (unelevated), mount it (elevated), and clean up. The mount
 volume GUID derives deterministically from the CIM path, so `unmount` takes the same
 addressing `mount` did -- no need to have kept the volume path:

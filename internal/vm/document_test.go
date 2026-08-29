@@ -39,6 +39,44 @@ func TestBootEntryNamesAnAttachedDisk(t *testing.T) {
 	}
 }
 
+// Extra disks land on the same controller at LUN 1 onward, in declaration order, and the boot
+// entry keeps pointing at LUN 0. An extra disk that displaced the boot disk would boot the
+// wrong OS with no error anywhere.
+func TestExtraDisksAttachAfterTheBootDisk(t *testing.T) {
+	s := testSpec()
+	s.ExtraDisks = []string{`E:\vms\x\disk1.vhdx`, `E:\vms\x\disk2.vhdx`}
+	d := buildDocument(s)
+
+	controller := d.VirtualMachine.Devices.Scsi[scsiController0]
+	if len(controller.Attachments) != 3 {
+		t.Fatalf("want 3 attachments, got %v", controller.Attachments)
+	}
+	if controller.Attachments["0"].Path != s.DiskPath {
+		t.Errorf("LUN 0 is %q, want the boot disk %q", controller.Attachments["0"].Path, s.DiskPath)
+	}
+	for i, want := range s.ExtraDisks {
+		lun := strconv.Itoa(i + 1)
+		if got := controller.Attachments[lun].Path; got != want {
+			t.Errorf("LUN %s is %q, want %q", lun, got, want)
+		}
+	}
+}
+
+// Extra disks live in the store record and must survive into every rebuilt document, or a
+// stop/start cycle silently boots the VM without its data disks.
+func TestSpecForCarriesExtraDisksFromTheRecord(t *testing.T) {
+	record := state{
+		DiskPath: `E:\vms\x\disk.vhdx`, CPUs: 2, MemoryMB: 2048,
+		ExtraDisks: []extraDisk{
+			{Base: `E:\images\data.vhdx`, Path: `E:\vms\x\disk1.vhdx`},
+		},
+	}
+	s := specFor(record)
+	if len(s.ExtraDisks) != 1 || s.ExtraDisks[0] != `E:\vms\x\disk1.vhdx` {
+		t.Errorf("specFor dropped the extra disks: %+v", s)
+	}
+}
+
 // Services is NewInVersion 2.5. Below that HCS ignores the section silently and a later
 // shutdown fails ERROR_NOT_SUPPORTED, blaming the shutdown rather than the document.
 func TestSchemaVersionSupportsServices(t *testing.T) {

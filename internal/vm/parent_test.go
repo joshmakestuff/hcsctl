@@ -48,6 +48,46 @@ func TestChildrenOfFindsDependentVMs(t *testing.T) {
 	}
 }
 
+// A base attached via --disk has differencing children of its own, and booting it directly
+// corrupts them the same way booting a boot-disk parent would.
+func TestChildrenOfFindsDependentsViaExtraDisks(t *testing.T) {
+	s := newStore(t)
+	const base = `E:\images\data.vhdx`
+	if err := writeState(s, state{ID: "with-data", BaseVHDX: `E:\images\os.vhdx`, CopyOnWrite: true,
+		DiskPath:   filepath.Join(vmDir(s, "with-data"), "disk.vhdx"),
+		ExtraDisks: []extraDisk{{Base: base, Path: filepath.Join(vmDir(s, "with-data"), "disk1.vhdx")}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := childrenOf(s, base, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("got %v, want the VM whose extra disk is a child of the base", got)
+	}
+}
+
+// Every disk in the chain needs the VHDX grant -- children and, under copy-on-write, their
+// parents. A missing grant on any of them fails at start.
+func TestGrantPathsCoverEveryDiskInTheChain(t *testing.T) {
+	cow := state{CopyOnWrite: true,
+		BaseVHDX: `E:\images\os.vhdx`, DiskPath: `E:\vms\x\disk.vhdx`,
+		ExtraDisks: []extraDisk{{Base: `E:\images\data.vhdx`, Path: `E:\vms\x\disk1.vhdx`}},
+	}
+	if got := grantPaths(cow); len(got) != 4 {
+		t.Errorf("copy-on-write: got %v, want both children and both parents", got)
+	}
+	direct := state{CopyOnWrite: false,
+		BaseVHDX: `E:\images\os.vhdx`, DiskPath: `E:\images\os.vhdx`,
+		ExtraDisks: []extraDisk{{Base: `E:\images\data.vhdx`, Path: `E:\images\data.vhdx`}},
+	}
+	if got := grantPaths(direct); len(got) != 2 {
+		t.Errorf("direct: got %v, want the two images", got)
+	}
+}
+
 // Case and separators must not be a way past the guard: E:\Images\X.vhdx and e:\images\x.vhdx
 // are the same file on Windows.
 func TestChildrenOfComparesPathsCaseInsensitively(t *testing.T) {
