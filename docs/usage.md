@@ -9,7 +9,10 @@ agent, and worked examples.
 - `--json` puts exactly one JSON document on stdout. Progress goes to stderr.
 - `--stream-json` (with `--json`) makes stderr NDJSON, one object per line:
   `{"stream":"progress"}` is hcsctl, `{"stream":"stdout"|"stderr"}` is the guest process, live.
-  The final stdout document is unchanged.
+  `container exec` and `container run` additionally emit
+  `{"stream":"exec","event":"started","pid":N}` the moment the guest process exists, before any
+  of its output -- a consumer gating on process creation latches this instead of polling
+  `container ps`. The final stdout document is unchanged.
 - Exit codes: `0` ok, `1` ran and failed, `64` bad arguments with nothing attempted.
 - A guest process's own exit code is reported as `exitCode` in the result document, never as
   hcsctl's exit code.

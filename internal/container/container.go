@@ -1667,7 +1667,7 @@ func exec(o *execOptions, e cli.Emit) error {
 
 	out := &captured{json: e.JSON}
 	outSink, errSink, closeFraming := guestSinks(e, out)
-	res, err := execIn(c, e, o.cmd, o.cwd, o.user, env, timeout, outSink, errSink, nil, mode)
+	res, err := execIn(c, e, o.cmd, o.cwd, o.user, env, timeout, outSink, errSink, e.StreamExecStarted, mode)
 	closeFraming()
 	if err != nil {
 		return err
@@ -1822,7 +1822,7 @@ func run(o *runOptions, e cli.Emit) error {
 
 	out := &captured{json: e.JSON}
 	outSink, errSink, closeFraming := guestSinks(e, out)
-	res, execErr := execIn(c, e, cmdline, o.cwd, o.user, env, timeout, outSink, errSink, nil, execMode{})
+	res, execErr := execIn(c, e, cmdline, o.cwd, o.user, env, timeout, outSink, errSink, e.StreamExecStarted, execMode{})
 	closeFraming()
 	cleanup()
 	if execErr != nil {
