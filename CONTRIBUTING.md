@@ -17,8 +17,9 @@ process was elevated, and the exact command with `--json` output when it applies
   `contract.yml` runs the same on `windows-latest`.
 - Comments state what the code does and the HCS/HNS fact it depends on, not how the decision
   was reached. Measured behaviour goes in the issue, not the code.
-- Do not copy or vendor `hcsshim` internal packages. hcsctl binds `vmcompute.dll` and uses
-  hcsshim's public API only.
+- Do not copy or vendor `hcsshim` internal packages. Where hcsshim exports no public
+  equivalent, hcsctl binds the documented entry points in `computecore.dll` directly;
+  everything else uses hcsshim's public API only.
 - Windows-only. Tests that need Hyper-V, elevation or a real image are not part of `go test`;
   they live under `tools/` as smoke scripts.
 

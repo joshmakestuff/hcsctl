@@ -9,7 +9,7 @@
 //
 //	Public hcsshim packages only. pkg/*, the hcsshim root package, computestorage, osversion.
 //	Where hcsshim exports no public equivalent -- the v2 compute-system API that `vm` needs --
-//	bind the documented Windows entry point in vmcompute.dll directly. Copying or vendoring
+//	bind the documented Windows entry point in computecore.dll directly. Copying or vendoring
 //	hcsshim's internal/ source is out.
 //
 //	Every verb honours the same contract: --json puts exactly one document on stdout with
