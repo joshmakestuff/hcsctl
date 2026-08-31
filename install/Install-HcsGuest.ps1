@@ -17,7 +17,7 @@
     Local hcsguest.exe (or a .zip containing it). Exactly one of -Path / -Version.
 
 .PARAMETER Version
-    Release tag to download, e.g. v0.4.0. Exactly one of -Path / -Version. There is no "latest":
+    Release tag to download, e.g. v0.7.0. Exactly one of -Path / -Version. There is no "latest":
     use the tag of the host hcsctl.
 
 .PARAMETER Sha256
@@ -35,7 +35,7 @@
     ./Install-HcsGuest.ps1 -Path .\hcsguest.exe
 
 .EXAMPLE
-    ./Install-HcsGuest.ps1 -Version v0.4.0
+    ./Install-HcsGuest.ps1 -Version v0.7.0
 #>
 [CmdletBinding()]
 param(

@@ -3,7 +3,7 @@
 #
 # Usage:
 #   ./install-hcsguest.sh -p /path/to/hcsguest       # local artifact
-#   ./install-hcsguest.sh -v v0.4.0                  # download a pinned release
+#   ./install-hcsguest.sh -v v0.7.0                  # download a pinned release
 #   ./install-hcsguest.sh -p /path/to/hcsguest -s <sha256>
 #
 # Run as root inside a systemd-based guest. The download path needs curl and sha256sum. There is
