@@ -6,18 +6,18 @@ and start the agent; the VM owner supplies the operating system.
 ## Windows — elevated PowerShell
 
 ```powershell
-& ([scriptblock]::Create((New-Object System.Net.WebClient).DownloadString('https://raw.githubusercontent.com/joshmakestuff/hcsctl/v0.4.0/install/Install-HcsGuest.ps1'))) -Version v0.4.0
+& ([scriptblock]::Create((New-Object System.Net.WebClient).DownloadString('https://raw.githubusercontent.com/joshmakestuff/hcsctl/v0.7.0/install/Install-HcsGuest.ps1'))) -Version v0.7.0
 ```
 
 ## Linux — run as root
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/joshmakestuff/hcsctl/v0.4.0/install/install-hcsguest.sh | sh -s -- -v v0.4.0
+curl -fsSL https://raw.githubusercontent.com/joshmakestuff/hcsctl/v0.7.0/install/install-hcsguest.sh | sh -s -- -v v0.7.0
 ```
 
 ## Notes
 
-- **Pin the version.** Substitute `v0.4.0` with the tag you are pinning. It must be a release
+- **Pin the version.** Substitute `v0.7.0` with the tag you are pinning. It must be a release
   that ships the guest binaries (`hcsguest-windows-amd64.exe`, `hcsguest-linux-amd64`,
   `SHA256SUMS`). Use the same tag as the host `hcsctl`: the guest agent and
   the host share a wire protocol. There is no `latest` form.
