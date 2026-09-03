@@ -55,7 +55,7 @@ try {
     $probe = & $bin guest exec --vmid $id --cmd $probeCommand --timeout 20s --json | ConvertFrom-Json
     if ($LASTEXITCODE -ne 0 -or -not $probe.ok -or $probe.exitCode -ne 0) { throw "guest IP/DNS connectivity probe failed: $($probe | ConvertTo-Json -Compress)" }
 
-    & $bin vm stop --id $id --store $Store --force | Out-Null
+    & $bin vm stop --id $id --force | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'vm stop before restart failed' }
     $restarted = & $bin vm start --id $restartId --store $Store --json | ConvertFrom-Json
     if ($LASTEXITCODE -ne 0 -or -not $restarted.ok -or -not $restarted.recreated -or $null -eq $restarted.network) { throw 'restarted VM did not reapply and attest static networking' }

@@ -36,6 +36,9 @@ that need elevation say so in `hcsctl help`; nothing escalates on its own.
 - `vm` commands are unelevated; membership of Hyper-V Administrators is enough.
 - `image pull`, `image ls`, `network ls|endpoints|inspect`, `guest` commands and `info` are
   unelevated.
+- **`files prepare` and `files remove` are elevated**; they create or delete an SMB share, a
+  local user and a firewall rule. `files inspect` (and the exposure verbs) run unelevated, so
+  a consumer can check preparedness and name the elevated command to run once per host.
 - **`cim create|merge|usage|verify|destroy` are unelevated** -- building and committing a CIM,
   security descriptors included, needs no privilege. `cim mount|unmount` are
   elevated; the specific right is unidentified -- `SeManageVolumePrivilege` is not sufficient.
@@ -53,9 +56,16 @@ process-isolated (argon) containers. `--isolation hyperv` is the default.
 
 ## Guest agent
 
-`hcsguest` runs inside a VM as a service and answers `hcsctl guest info|exec|forward` and
-`hcsctl vm ip|netconfig` over a Hyper-V socket. The socket needs no NIC, no DHCP lease and no
+`hcsguest` runs inside a VM as a service and answers `hcsctl guest info|exec|forward|mount|unmount`
+and `hcsctl vm ip|netconfig` over a Hyper-V socket. The socket needs no NIC, no DHCP lease and no
 elevation on the host.
+
+`guest mount` attaches a host SMB share inside the guest: the agent mounts `\\<gateway>\<share>`
+over cifs on Linux, or connects the share and puts a directory symlink at the mount point on
+Windows. The credential comes from Windows Credential Manager (`--credential <target>`) or one
+line of stdin (`--user <u> --password-stdin`), never a command line. On Windows the mount belongs
+to the agent's logon session, so it serves the agent and `guest exec`, not an interactive RDP
+user. `guest unmount --path` detaches it.
 
 Release assets ship `hcsguest-windows-amd64.exe` and `hcsguest-linux-amd64`;
 [`install/`](../install/README.md) has the in-guest installer scripts and
