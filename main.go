@@ -27,6 +27,7 @@ import (
 	"github.com/joshmakestuff/hcsctl/internal/cim"
 	"github.com/joshmakestuff/hcsctl/internal/cli"
 	"github.com/joshmakestuff/hcsctl/internal/container"
+	"github.com/joshmakestuff/hcsctl/internal/files"
 	"github.com/joshmakestuff/hcsctl/internal/guest"
 	"github.com/joshmakestuff/hcsctl/internal/image"
 	"github.com/joshmakestuff/hcsctl/internal/layer"
@@ -162,6 +163,7 @@ exit codes: 0 ok, 1 ran and failed, 64 bad arguments (nothing attempted)
 		network.Command(e),
 		vm.Command(e),
 		guest.Command(e),
+		files.Command(e),
 		sysinfo.Command(e),
 		versionCommand(e),
 	)

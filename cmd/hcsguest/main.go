@@ -180,6 +180,20 @@ func handle(c net.Conn) {
 			return
 		}
 		writeJSON(c, doc)
+	case "mount":
+		doc, err := applyMount(req.Mount)
+		if err != nil {
+			writeFailure(c, err.Error())
+			return
+		}
+		writeJSON(c, doc)
+	case "unmount":
+		doc, err := applyUnmount(req.Unmount)
+		if err != nil {
+			writeFailure(c, err.Error())
+			return
+		}
+		writeJSON(c, doc)
 	default:
 		writeFailure(c, fmt.Sprintf("unknown verb %q", req.Verb))
 	}

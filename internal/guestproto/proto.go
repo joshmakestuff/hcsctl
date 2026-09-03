@@ -45,6 +45,58 @@ type Request struct {
 
 	// NetConfig is the netconfig verb's payload.
 	NetConfig *NetConfig `json:"netConfig,omitempty"`
+
+	// Mount is the mount verb's payload; Unmount is the unmount verb's.
+	Mount   *Mount   `json:"mount,omitempty"`
+	Unmount *Unmount `json:"unmount,omitempty"`
+}
+
+// Mount asks the agent to attach an SMB share at Path inside the guest. The host reaches its
+// own SMB server at the guest's gateway; the credential authenticates to it.
+//
+// UNC is the Windows spelling, `\\host\share\sub`. The Linux agent rewrites it to
+// `//host/share/sub` for cifs; the Windows agent connects the `\\host\share` root and puts a
+// directory symlink at Path pointing at the full UNC.
+//
+// The password travels the host-to-guest hvsocket, not a network. It never appears on a host
+// command line: hcsctl reads it from Windows Credential Manager (or stdin) and puts it here.
+type Mount struct {
+	UNC      string `json:"unc"`
+	Path     string `json:"path"`
+	User     string `json:"user"`
+	Password string `json:"password"`
+	ReadOnly bool   `json:"readOnly,omitempty"`
+	// UID and GID map ownership for the Linux cifs mount. Zero means the cifs default (the
+	// mounting user, root). Ignored on Windows.
+	UID int `json:"uid,omitempty"`
+	GID int `json:"gid,omitempty"`
+}
+
+// MountResult reports what the agent did. Applied names the mechanism: "cifs" on Linux,
+// "wnet+symlink" on Windows.
+type MountResult struct {
+	OK       bool   `json:"ok"`
+	Protocol int    `json:"protocol"`
+	Applied  string `json:"applied"`
+	Path     string `json:"path"`
+	UNC      string `json:"unc"`
+	ReadOnly bool   `json:"readOnly"`
+}
+
+// Unmount asks the agent to detach the mount at Path. Only the mount point is named; the
+// agent undoes whatever it did for that path.
+type Unmount struct {
+	Path string `json:"path"`
+}
+
+// UnmountResult reports what the agent undid. Applied is "umount" on Linux, "symlink" on
+// Windows (the directory symlink is removed; the share connection is left for the guest's
+// lifetime, shared with any sibling mount of the same share).
+type UnmountResult struct {
+	OK       bool   `json:"ok"`
+	Protocol int    `json:"protocol"`
+	Applied  string `json:"applied"`
+	Path     string `json:"path"`
 }
 
 // NetConfig asks the agent to program an interface with the addressing the host already

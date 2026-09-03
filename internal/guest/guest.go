@@ -28,7 +28,7 @@ import (
 // Command is `hcsctl guest`.
 func Command(e cli.Emit) *cobra.Command {
 	return cli.Group("guest", "reach a guest VM's agent over a Hyper-V socket",
-		infoCmd(e), execCmd(e), forwardCmd(e))
+		infoCmd(e), execCmd(e), forwardCmd(e), mountCmd(e), unmountCmd(e))
 }
 
 func infoCmd(e cli.Emit) *cobra.Command {

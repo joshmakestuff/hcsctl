@@ -13,3 +13,7 @@ examples/packer/**/output/
 examples/packer/**/.packer_cache/
 .packer.d/
 crash.log
+
+# stray build output (bare package name) and playwright scratch
+/hcsguest
+.playwright-cli/
