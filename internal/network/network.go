@@ -7,9 +7,9 @@
 // namespaces all work from a filtered token. `hcn.GetGlobals` is the one call that needs
 // elevation, so it is reported as optional detail.
 //
-// Writes are explicit commands, never side effects. Windows permits one NAT network per host;
-// hosts that run Docker already have it, and a second one can break Docker and WSL. Do not
-// run `create --type nat` on a development host that runs Docker or WSL.
+// Writes are explicit commands, never side effects. NAT subnets should not overlap
+// existing host or container networks or routes. HCN reports creation errors for
+// configurations it cannot support on the host.
 package network
 
 import (
@@ -88,9 +88,9 @@ func createCmd(e cli.Emit) *cobra.Command {
   create --name <name> --type private
       Create an isolated private network.
 
-Windows permits one NAT network per host; hosts that run Docker already have
-it, and a second one can break Docker and WSL. Do not create a NAT network on
-a development host that runs Docker or WSL.`,
+Choose a NAT subnet that does not overlap existing host or container networks
+or routes. Check the host's network configuration, including Docker and WSL
+networks, before creating it. HCN reports an error if creation fails.`,
 		Args: cli.NoExtraArgs,
 		RunE: func(*cobra.Command, []string) error {
 			network, err := newNetwork(name, kind, subnet, gateway)
