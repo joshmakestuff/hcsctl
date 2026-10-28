@@ -20,7 +20,7 @@ func TestWindowsShareRejectsInvalidSource(t *testing.T) {
 	}
 }
 func TestWindowsShareUnsupportedTransport(t *testing.T) {
-	cleanup, err := mountManagedShare(&guestproto.Share{Transport: "smb-tcp"})
+	cleanup, err := mountManagedShare(&guestproto.Share{Transport: "unknown"})
 	if !errors.Is(err, errShareNotImplemented) || cleanup != nil {
 		t.Fatalf("got %v", err)
 	}

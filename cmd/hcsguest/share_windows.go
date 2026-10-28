@@ -30,11 +30,15 @@ const vsmbRoot = `\\?\GLOBALROOT\Device\vmsmb\VSMB-{dcc079ae-60ba-4d07-847c-3493
 var vsmbState struct {
 	sync.Mutex
 	device windows.Handle
+	refs   int
 }
 
 func mountManagedShare(s *guestproto.Share) (func() error, error) {
 	if s == nil {
 		return nil, errors.New("nil share")
+	}
+	if s.Transport == "smb-tcp" {
+		return mountGlobalSMB(s)
 	}
 	if s.Transport != "vsmb" {
 		return nil, errShareNotImplemented
@@ -44,13 +48,18 @@ func mountManagedShare(s *guestproto.Share) (func() error, error) {
 	}
 	vsmbState.Lock()
 	defer vsmbState.Unlock()
+	defer func() {
+		if vsmbState.refs == 0 && vsmbState.device != 0 {
+			_ = windows.CloseHandle(vsmbState.device)
+			vsmbState.device = 0
+		}
+	}()
 	if vsmbState.device == 0 {
 		h, err := initVSMB()
 		if err != nil {
 			return nil, err
 		}
-		// The device is retained for the lifetime of this process. Redirector state is
-		// boot-scoped, so closing it between mounts can invalidate other mappings.
+		// Keep the device open while any mapping is active.
 		vsmbState.device = h
 	}
 	target := vsmbRoot + s.Source
@@ -86,6 +95,7 @@ func mountManagedShare(s *guestproto.Share) (func() error, error) {
 		}
 		return nil, err
 	}
+	vsmbState.refs++
 	var mu sync.Mutex
 	mapped := true
 	opened := true
@@ -103,6 +113,13 @@ func mountManagedShare(s *guestproto.Share) (func() error, error) {
 				return err
 			}
 			opened = false
+			vsmbState.Lock()
+			vsmbState.refs--
+			if vsmbState.refs == 0 {
+				_ = windows.CloseHandle(vsmbState.device)
+				vsmbState.device = 0
+			}
+			vsmbState.Unlock()
 		}
 		if created {
 			if err := os.Remove(s.Path); err != nil && !os.IsNotExist(err) {
