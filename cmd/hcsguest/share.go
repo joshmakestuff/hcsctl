@@ -31,9 +31,11 @@ type shareManager struct {
 	entries  map[string]*shareEntry
 	backend  shareBackend
 	bootTime func() time.Time
+	bootID   func() (string, error)
+	identity string // protected by mu and refreshed before each operation
 }
 
-var managedShares = &shareManager{backend: mountManagedShare, bootTime: func() time.Time {
+var managedShares = &shareManager{backend: mountManagedShare, bootID: readBootID, bootTime: func() time.Time {
 	info, err := gatherInfo()
 	if err != nil {
 		return time.Time{}
@@ -46,7 +48,18 @@ func (m *shareManager) result(id string, generation uint64, code string) guestpr
 	if m.bootTime != nil {
 		boot = m.bootTime()
 	}
-	return guestproto.ShareResult{OK: code == "", Protocol: guestproto.Protocol, ID: id, Generation: generation, State: "absent", BootTimeUTC: boot, ErrorCode: code}
+	return guestproto.ShareResult{OK: code == "", Protocol: guestproto.Protocol, ID: id, Generation: generation, State: "absent", BootID: m.identity, BootTimeUTC: boot, ErrorCode: code}
+}
+
+func (m *shareManager) bootIdentity() (string, error) {
+	if m.bootID == nil {
+		return "", errors.New("boot identity unavailable")
+	}
+	id, err := m.bootID()
+	if err != nil || !validBootID(id) {
+		return "", errors.New("boot identity unavailable")
+	}
+	return id, nil
 }
 
 func validShareID(id string) bool {
@@ -72,6 +85,10 @@ func sharePath(path string) string {
 func (m *shareManager) mount(s *guestproto.Share) guestproto.ShareResult {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	var err error
+	if m.identity, err = m.bootIdentity(); err != nil {
+		return m.result("", 0, "boot_id_unavailable")
+	}
 	if s == nil {
 		return m.result("", 0, "invalid_request")
 	}
@@ -140,6 +157,10 @@ func (m *shareManager) lookup(ref *guestproto.ShareRef) (*shareEntry, guestproto
 func (m *shareManager) status(ref *guestproto.ShareRef) guestproto.ShareResult {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	var err error
+	if m.identity, err = m.bootIdentity(); err != nil {
+		return m.result("", 0, "boot_id_unavailable")
+	}
 	_, r := m.lookup(ref)
 	return r
 }
@@ -147,6 +168,10 @@ func (m *shareManager) status(ref *guestproto.ShareRef) guestproto.ShareResult {
 func (m *shareManager) unmount(ref *guestproto.ShareRef) guestproto.ShareResult {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	var err error
+	if m.identity, err = m.bootIdentity(); err != nil {
+		return m.result("", 0, "boot_id_unavailable")
+	}
 	e, r := m.lookup(ref)
 	if e == nil || e.result.State == "absent" {
 		return r

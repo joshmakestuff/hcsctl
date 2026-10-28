@@ -12,7 +12,7 @@ import (
 func TestManagedShareLifecycle(t *testing.T) {
 	var mounts, unmounts int
 	busy := true
-	m := shareManager{bootTime: func() time.Time { return time.Unix(123, 0).UTC() }, backend: func(*guestproto.Share) (func() error, error) {
+	m := shareManager{bootID: func() (string, error) { return "12345678-1234-4123-8123-123456789abc", nil }, bootTime: func() time.Time { return time.Unix(123, 0).UTC() }, backend: func(*guestproto.Share) (func() error, error) {
 		mounts++
 		return func() error {
 			unmounts++
@@ -24,7 +24,7 @@ func TestManagedShareLifecycle(t *testing.T) {
 	}}
 	s := &guestproto.Share{ID: "one", Generation: 1, Transport: "cifs", Source: "source", Path: filepath.Join(t.TempDir(), "mount"), User: "user", Password: "secret"}
 	ref := &guestproto.ShareRef{ID: s.ID, Generation: 1}
-	if r := m.mount(s); !r.OK || r.State != "mounted" || r.BootTimeUTC.Unix() != 123 {
+	if r := m.mount(s); !r.OK || r.State != "mounted" || r.BootTimeUTC.Unix() != 123 || r.BootID != "12345678-1234-4123-8123-123456789abc" {
 		t.Fatalf("mount: %+v", r)
 	}
 	if r := m.mount(s); !r.OK || mounts != 1 {

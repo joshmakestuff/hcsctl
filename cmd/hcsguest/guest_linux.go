@@ -87,6 +87,10 @@ func applyNetConfig(nc *guestproto.NetConfig) (guestproto.NetConfigResult, error
 }
 
 func gatherInfo() (guestproto.Info, error) {
+	bootID, err := readBootID()
+	if err != nil {
+		return guestproto.Info{}, err
+	}
 	host, err := os.Hostname()
 	if err != nil {
 		return guestproto.Info{}, err
@@ -109,6 +113,7 @@ func gatherInfo() (guestproto.Info, error) {
 		OS:            "linux",
 		OSVersion:     readOSVersion(),
 		Hostname:      host,
+		BootID:        bootID,
 		BootTimeUTC:   time.Now().UTC().Add(-uptime),
 		UptimeSeconds: int64(uptime.Seconds()),
 		Addresses:     addrs,

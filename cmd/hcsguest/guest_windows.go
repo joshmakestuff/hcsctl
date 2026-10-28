@@ -169,6 +169,10 @@ func dadStates(ifIndex uint32) (map[netip.Addr]int32, error) {
 }
 
 func gatherInfo() (guestproto.Info, error) {
+	bootID, err := readBootID()
+	if err != nil {
+		return guestproto.Info{}, err
+	}
 	host, err := os.Hostname()
 	if err != nil {
 		return guestproto.Info{}, err
@@ -192,6 +196,7 @@ func gatherInfo() (guestproto.Info, error) {
 		OS:            "windows",
 		OSVersion:     formatVersion(v.MajorVersion, v.MinorVersion, v.BuildNumber),
 		Hostname:      host,
+		BootID:        bootID,
 		BootTimeUTC:   time.Now().UTC().Add(-uptime),
 		UptimeSeconds: int64(uptime.Seconds()),
 		Addresses:     addrs,

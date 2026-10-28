@@ -83,6 +83,7 @@ type ShareResult struct {
 	Path        string    `json:"path,omitempty"`
 	ReadOnly    bool      `json:"readOnly"`
 	State       string    `json:"state"`
+	BootID      string    `json:"bootId"`
 	BootTimeUTC time.Time `json:"bootTimeUtc"`
 	ErrorCode   string    `json:"errorCode,omitempty"`
 }
@@ -191,6 +192,7 @@ type Info struct {
 	OS            string    `json:"os"`
 	OSVersion     string    `json:"osVersion"`
 	Hostname      string    `json:"hostname"`
+	BootID        string    `json:"bootId"`
 	BootTimeUTC   time.Time `json:"bootTimeUtc"`
 	UptimeSeconds int64     `json:"uptimeSeconds"`
 	Addresses     []Address `json:"addresses"`
