@@ -32,19 +32,20 @@ type shareEntry struct {
 }
 
 type shareManager struct {
-	mu       sync.Mutex
-	entries  map[string]*shareEntry
-	backend  shareBackend
-	bootTime func() time.Time
-	bootID   func() (string, error)
-	identity string // protected by mu and refreshed before each operation
-	journal  shareJournal
-	loaded   bool
-	capture  func(*shareIntent) error
-	recover  func(shareIntent) (func() error, error)
+	mu          sync.Mutex
+	entries     map[string]*shareEntry
+	backend     shareBackend
+	mountIntent func(*guestproto.Share, *shareIntent, func() error) (func() error, error)
+	bootTime    func() time.Time
+	bootID      func() (string, error)
+	identity    string // protected by mu and refreshed before each operation
+	journal     shareJournal
+	loaded      bool
+	capture     func(*shareIntent) error
+	recover     func(shareIntent) (func() error, error)
 }
 
-var managedShares = &shareManager{backend: mountManagedShare, bootID: readBootID, journal: newShareJournal(), capture: captureShareIntent, recover: recoverShareIntent, bootTime: func() time.Time {
+var managedShares = &shareManager{backend: mountManagedShare, mountIntent: mountManagedShareIntent, bootID: readBootID, journal: newShareJournal(), capture: captureShareIntent, recover: recoverShareIntent, bootTime: func() time.Time {
 	info, err := gatherInfo()
 	if err != nil {
 		return time.Time{}
@@ -91,10 +92,15 @@ func (m *shareManager) prepare(expected string) error {
 			r.OK, r.ErrorCode, r.State = true, "", "absent"
 		}
 		e := &shareEntry{result: r, fingerprint: rec.Fingerprint, intent: rec}
-		if rec.State != "absent" && m.recover != nil {
-			e.cleanup, _ = m.recover(rec)
-		}
 		m.entries[rec.ID] = e
+	}
+	// Validate the entire journal before recovery opens any native resources.
+	if m.recover != nil {
+		for _, e := range m.entries {
+			if e.intent.State != "absent" {
+				e.cleanup, _ = m.recover(e.intent)
+			}
+		}
 	}
 	m.loaded = true
 	return nil
@@ -202,7 +208,16 @@ func (m *shareManager) mount(s *guestproto.Share) guestproto.ShareResult {
 	if err := m.persist(); err != nil {
 		return pending
 	}
-	cleanup, err := m.backend(s)
+	var cleanup func() error
+	var err error
+	if m.mountIntent != nil {
+		cleanup, err = m.mountIntent(s, &e.intent, m.persist)
+	} else {
+		cleanup, err = m.backend(s)
+	}
+	if errors.Is(err, errShareJournal) {
+		return pending
+	}
 	code := ""
 	switch {
 	case errors.Is(err, errShareNotImplemented):

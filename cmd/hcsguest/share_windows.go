@@ -33,6 +33,10 @@ var vsmbState struct {
 	refs   int
 }
 
+func mountManagedShareIntent(s *guestproto.Share, _ *shareIntent, _ func() error) (func() error, error) {
+	return mountManagedShare(s)
+}
+
 func mountManagedShare(s *guestproto.Share) (func() error, error) {
 	if s == nil {
 		return nil, errors.New("nil share")

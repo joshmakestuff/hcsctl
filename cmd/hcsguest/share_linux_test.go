@@ -221,6 +221,38 @@ func TestLinuxSMBVsockMountLifetime(t *testing.T) {
 	}
 }
 
+func TestLinuxRelayJournalPrecedesMount(t *testing.T) {
+	fakeMountIdentity(t)
+	oldMount, oldUnmount := shareMount, shareUnmount
+	t.Cleanup(func() { shareMount, shareUnmount = oldMount, oldUnmount })
+	intent := &shareIntent{}
+	persisted := false
+	shareMount = func(_, _, _ string, _ uintptr, options string) error {
+		if !persisted || intent.RelayPort == 0 || !strings.Contains(options, fmt.Sprintf("port=%d", intent.RelayPort)) {
+			t.Error("relay endpoint was not persisted before mount")
+		}
+		return nil
+	}
+	shareUnmount = func(string, int) error { return nil }
+	s := &guestproto.Share{Transport: "smb-hvsocket", Source: `\\server\share`, Port: 99, Path: t.TempDir()}
+	cleanup, err := mountManagedShareIntent(s, intent, func() error { persisted = true; return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cleanup(); err != nil {
+		t.Fatal(err)
+	}
+	persisted = false
+	shareMount = func(string, string, string, uintptr, string) error {
+		t.Fatal("mount after journal failure")
+		return nil
+	}
+	_, err = mountManagedShareIntent(s, &shareIntent{}, func() error { return errors.New("journal failure") })
+	if !errors.Is(err, errShareJournal) {
+		t.Fatalf("journal error: %v", err)
+	}
+}
+
 func TestLinuxRelayShutdown(t *testing.T) {
 	oldDial := shareRelayDial
 	t.Cleanup(func() { shareRelayDial = oldDial })

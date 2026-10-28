@@ -71,6 +71,23 @@ func recoverShareIntent(r shareIntent) (func() error, error) {
 	if r.State != "mounted" || r.MountID == 0 {
 		return nil, errors.New("mount identity not recorded")
 	}
+	fd, id, err := recoveryMount(r.Path)
+	if err != nil {
+		return nil, err
+	}
+	unix.Close(fd)
+	if id != r.MountID {
+		return nil, errors.New("mounted identity changed")
+	}
+	var relay *shareRelay
+	var relayErr error
+	if r.Transport == "smb-hvsocket" {
+		if r.RelayPort == 0 || r.Port == 0 {
+			relayErr = errors.New("relay endpoint not recorded")
+		} else {
+			relay, relayErr = newShareRelayAt(r.Port, r.RelayPort)
+		}
+	}
 	return func() error {
 		fd, id, err := recoveryMount(r.Path)
 		if err != nil {
@@ -87,6 +104,9 @@ func recoverShareIntent(r shareIntent) (func() error, error) {
 			}
 			return err
 		}
+		if relay != nil {
+			relay.close()
+		}
 		return nil
-	}, nil
+	}, relayErr
 }

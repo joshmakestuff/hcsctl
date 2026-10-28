@@ -104,6 +104,10 @@ func mountTarget(path string) (*os.File, error) {
 }
 
 func mountManagedShare(s *guestproto.Share) (func() error, error) {
+	return mountManagedShareIntent(s, nil, nil)
+}
+
+func mountManagedShareIntent(s *guestproto.Share, intent *shareIntent, persist func() error) (func() error, error) {
 	if s == nil || s.UID < 0 || s.GID < 0 {
 		return nil, errors.New("invalid share")
 	}
@@ -168,6 +172,13 @@ func mountManagedShare(s *guestproto.Share) (func() error, error) {
 			relay, err = newShareRelay(s.Port)
 			if err != nil {
 				return nil, err
+			}
+			if intent != nil {
+				intent.RelayPort = uint16(relay.port())
+				if err = persist(); err != nil {
+					relay.close()
+					return nil, errShareJournal
+				}
 			}
 			data += ",ip=127.0.0.1,port=" + strconv.Itoa(relay.port())
 		}
@@ -327,7 +338,10 @@ func dialRelayVSock(ctx context.Context, port uint32) (net.Conn, error) {
 }
 
 func newShareRelay(port uint32) (*shareRelay, error) {
-	l, err := net.Listen("tcp4", "127.0.0.1:0")
+	return newShareRelayAt(port, 0)
+}
+func newShareRelayAt(port uint32, localPort uint16) (*shareRelay, error) {
+	l, err := net.Listen("tcp4", net.JoinHostPort("127.0.0.1", strconv.Itoa(int(localPort))))
 	if err != nil {
 		return nil, err
 	}

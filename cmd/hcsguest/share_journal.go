@@ -20,6 +20,7 @@ type shareIntent struct {
 	UID         int      `json:"uid"`
 	GID         int      `json:"gid"`
 	MountID     uint64   `json:"mountId,omitempty"`
+	RelayPort   uint16   `json:"relayPort,omitempty"`
 	Fingerprint [32]byte `json:"fingerprint"`
 	State       string   `json:"state"`
 }
