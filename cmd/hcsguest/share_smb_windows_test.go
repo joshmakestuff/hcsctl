@@ -5,6 +5,7 @@ package main
 import (
 	"errors"
 	"github.com/joshmakestuff/hcsctl/internal/guestproto"
+	"strings"
 	"testing"
 )
 
@@ -84,5 +85,77 @@ func TestGlobalLifecycle(t *testing.T) {
 				t.Fatalf("retry: %v %d %d", err, unlinks, removes)
 			}
 		})
+	}
+}
+
+func TestGlobalAmbiguousCreationRetainsOwnership(t *testing.T) {
+	var owned globalRequest
+	exists := false
+	calls := 0
+	m := globalManager{ops: globalOps{
+		command: func(r globalRequest) error {
+			calls++
+			if r.Op == "add" {
+				owned = r
+				exists = true
+				return errors.New("ambiguous timeout or stderr")
+			}
+			if r.Token != owned.Token || r.Key != owned.Key || r.Remote != owned.Remote || r.User != owned.User || r.Port != owned.Port {
+				return errors.New("ownership mismatch")
+			}
+			exists = false
+			return nil
+		},
+		link: func(_, _ string) error { return nil }, removeLink: func(_, _ string) error { return nil },
+	}}
+	s := &guestproto.Share{Source: `\\server\share`, Path: `C:\x`, User: "guest", Password: "secret", Port: 445}
+	if _, err := m.mount(s); err == nil || !exists {
+		t.Fatal("ambiguous creation not retained")
+	}
+	e := m.entries[strings.ToLower(s.Source)]
+	if e == nil || !e.pending || e.owner.Token == "" || e.owner.Password != "" {
+		t.Fatal("ownership not retained safely")
+	}
+	// A second mount reconciles the previous owned mapping before creating anew.
+	cleanup, err := m.mount(s)
+	if err == nil || cleanup != nil || calls != 3 {
+		t.Fatalf("expected second ambiguous add after reconcile: %v %d", err, calls)
+	}
+}
+
+func TestGlobalReconcileRefusesMismatchAndRetriesAbsent(t *testing.T) {
+	var owner globalRequest
+	exists, mismatch := false, false
+	removeCalls := 0
+	m := globalManager{ops: globalOps{
+		command: func(r globalRequest) error {
+			if r.Op == "add" {
+				owner = r
+				exists = true
+				return nil
+			}
+			removeCalls++
+			if r.Token != owner.Token || mismatch {
+				return errors.New("mismatched mapping")
+			}
+			if exists {
+				exists = false
+			}
+			return nil
+		}, link: func(_, _ string) error { return nil }, removeLink: func(_, _ string) error { return nil },
+	}}
+	s := &guestproto.Share{Source: `\\server\share`, Path: `C:\x`, User: "user", Password: "secret"}
+	cleanup, err := m.mount(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mismatch = true
+	if err = cleanup(); !errors.Is(err, errShareBusy) || !exists {
+		t.Fatal("mismatch should preserve mapping")
+	}
+	mismatch = false
+	exists = false // External removal before retry is idempotent.
+	if err = cleanup(); err != nil || removeCalls != 2 {
+		t.Fatalf("absent retry: %v calls=%d", err, removeCalls)
 	}
 }
