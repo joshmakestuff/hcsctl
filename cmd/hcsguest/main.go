@@ -104,6 +104,9 @@ func serve() error {
 
 // acceptLoop serves until stop is closed, or forever if stop is nil.
 func acceptLoop(stop <-chan struct{}) error {
+	if err := managedShares.recoverAtStartup(); err != nil {
+		fmt.Fprintln(os.Stderr, "share recovery unavailable")
+	}
 	l, err := listen()
 	if err != nil {
 		return fmt.Errorf("listen: %w", err)

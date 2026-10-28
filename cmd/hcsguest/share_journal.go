@@ -9,20 +9,25 @@ import (
 // shareIntent deliberately excludes credentials. A pending record is not proof
 // that any native operation completed or that a pathname is safe to remove.
 type shareIntent struct {
-	BootID      string   `json:"bootId"`
-	ID          string   `json:"id"`
-	Generation  uint64   `json:"generation"`
-	Path        string   `json:"path"`
-	Source      string   `json:"source"`
-	Transport   string   `json:"transport"`
-	ReadOnly    bool     `json:"readOnly"`
-	Port        uint32   `json:"port"`
-	UID         int      `json:"uid"`
-	GID         int      `json:"gid"`
-	MountID     uint64   `json:"mountId,omitempty"`
-	RelayPort   uint16   `json:"relayPort,omitempty"`
-	Fingerprint [32]byte `json:"fingerprint"`
-	State       string   `json:"state"`
+	BootID             string   `json:"bootId"`
+	ID                 string   `json:"id"`
+	Generation         uint64   `json:"generation"`
+	Path               string   `json:"path"`
+	Source             string   `json:"source"`
+	Transport          string   `json:"transport"`
+	ReadOnly           bool     `json:"readOnly"`
+	Port               uint32   `json:"port"`
+	UID                int      `json:"uid"`
+	GID                int      `json:"gid"`
+	MountID            uint64   `json:"mountId,omitempty"`
+	RelayPort          uint16   `json:"relayPort,omitempty"`
+	LinkVolume         uint32   `json:"linkVolume,omitempty"`
+	LinkIndex          uint64   `json:"linkIndex,omitempty"`
+	MappingKey         string   `json:"mappingKey,omitempty"`
+	MappingToken       string   `json:"mappingToken,omitempty"`
+	MappingFingerprint [32]byte `json:"mappingFingerprint,omitempty"`
+	Fingerprint        [32]byte `json:"fingerprint"`
+	State              string   `json:"state"`
 }
 
 type shareJournal interface {

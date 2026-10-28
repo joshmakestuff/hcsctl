@@ -33,7 +33,10 @@ var vsmbState struct {
 	refs   int
 }
 
-func mountManagedShareIntent(s *guestproto.Share, _ *shareIntent, _ func() error) (func() error, error) {
+func mountManagedShareIntent(s *guestproto.Share, intent *shareIntent, persist func() error) (func() error, error) {
+	if s != nil && s.Transport == "smb-tcp" {
+		return globalSMB.mountIntent(s, intent, persist)
+	}
 	return mountManagedShare(s)
 }
 

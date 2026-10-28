@@ -32,20 +32,21 @@ type shareEntry struct {
 }
 
 type shareManager struct {
-	mu          sync.Mutex
-	entries     map[string]*shareEntry
-	backend     shareBackend
-	mountIntent func(*guestproto.Share, *shareIntent, func() error) (func() error, error)
-	bootTime    func() time.Time
-	bootID      func() (string, error)
-	identity    string // protected by mu and refreshed before each operation
-	journal     shareJournal
-	loaded      bool
-	capture     func(*shareIntent) error
-	recover     func(shareIntent) (func() error, error)
+	mu           sync.Mutex
+	entries      map[string]*shareEntry
+	backend      shareBackend
+	mountIntent  func(*guestproto.Share, *shareIntent, func() error) (func() error, error)
+	bootTime     func() time.Time
+	bootID       func() (string, error)
+	identity     string // protected by mu and refreshed before each operation
+	journal      shareJournal
+	loaded       bool
+	capture      func(*shareIntent) error
+	recover      func(shareIntent) (func() error, error)
+	recoverBatch func(map[string]*shareEntry)
 }
 
-var managedShares = &shareManager{backend: mountManagedShare, mountIntent: mountManagedShareIntent, bootID: readBootID, journal: newShareJournal(), capture: captureShareIntent, recover: recoverShareIntent, bootTime: func() time.Time {
+var managedShares = &shareManager{backend: mountManagedShare, mountIntent: mountManagedShareIntent, bootID: readBootID, journal: newShareJournal(), capture: captureShareIntent, recoverBatch: recoverShareBatch, bootTime: func() time.Time {
 	info, err := gatherInfo()
 	if err != nil {
 		return time.Time{}
@@ -95,7 +96,9 @@ func (m *shareManager) prepare(expected string) error {
 		m.entries[rec.ID] = e
 	}
 	// Validate the entire journal before recovery opens any native resources.
-	if m.recover != nil {
+	if m.recoverBatch != nil {
+		m.recoverBatch(m.entries)
+	} else if m.recover != nil {
 		for _, e := range m.entries {
 			if e.intent.State != "absent" {
 				e.cleanup, _ = m.recover(e.intent)
@@ -104,6 +107,17 @@ func (m *shareManager) prepare(expected string) error {
 	}
 	m.loaded = true
 	return nil
+}
+
+// recoverAtStartup uses the local boot identity, not a client-supplied value.
+func (m *shareManager) recoverAtStartup() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	id, err := m.bootIdentity()
+	if err != nil {
+		return err
+	}
+	return m.prepare(id)
 }
 
 func (m *shareManager) prepareFailure(id string, generation uint64, err error) guestproto.ShareResult {
@@ -218,6 +232,9 @@ func (m *shareManager) mount(s *guestproto.Share) guestproto.ShareResult {
 	if errors.Is(err, errShareJournal) {
 		return pending
 	}
+	if cleanup != nil {
+		e.cleanup = cleanup
+	}
 	code := ""
 	switch {
 	case errors.Is(err, errShareNotImplemented):
@@ -241,7 +258,6 @@ func (m *shareManager) mount(s *guestproto.Share) guestproto.ShareResult {
 	}
 	r := m.result(s.ID, s.Generation, "")
 	r.State, r.Transport, r.Path, r.ReadOnly = "mounted", s.Transport, s.Path, s.ReadOnly
-	e.cleanup = cleanup
 	if m.capture != nil {
 		if err := m.capture(&e.intent); err != nil {
 			return pending

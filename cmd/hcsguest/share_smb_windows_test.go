@@ -159,3 +159,42 @@ func TestGlobalReconcileRefusesMismatchAndRetriesAbsent(t *testing.T) {
 		t.Fatalf("absent retry: %v calls=%d", err, removeCalls)
 	}
 }
+
+func TestGlobalIntentPersistedBeforeEffects(t *testing.T) {
+	intent := &shareIntent{}
+	persisted, effects := false, 0
+	m := globalManager{ops: globalOps{
+		command: func(r globalRequest) error {
+			if r.Op == "add" {
+				effects++
+				if !persisted || intent.MappingToken != r.Token || intent.MappingKey != r.Key {
+					t.Error("owner not journaled before mapping")
+				}
+			}
+			return nil
+		},
+		link: func(_, _ string) error {
+			effects++
+			if !persisted {
+				t.Error("owner not journaled before link")
+			}
+			return nil
+		},
+		linkIdentity:   func(_, _ string) (uint32, uint64, error) { return 4, 5, nil },
+		verify:         func(globalRequest) error { return nil },
+		removeIdentity: func(string, string, uint32, uint64) error { return nil },
+	}}
+	s := &guestproto.Share{Source: `\\server\share`, Path: `C:\x`, User: "guest", Password: "secret"}
+	cleanup, err := m.mountIntent(s, intent, func() error { persisted = true; return nil })
+	if err != nil || effects != 2 || intent.LinkVolume != 4 || intent.LinkIndex != 5 {
+		t.Fatalf("mount: %v effects=%d intent=%+v", err, effects, intent)
+	}
+	if err := cleanup(); err != nil {
+		t.Fatal(err)
+	}
+	effects = 0
+	_, err = m.mountIntent(s, &shareIntent{}, func() error { return errors.New("journal") })
+	if !errors.Is(err, errShareJournal) || effects != 0 {
+		t.Fatalf("journal failure: %v effects=%d", err, effects)
+	}
+}

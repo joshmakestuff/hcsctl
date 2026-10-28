@@ -20,7 +20,11 @@ import (
 func fakeMountIdentity(t *testing.T) {
 	t.Helper()
 	oldID, oldTrust := shareMountID, shareTrustedDirectory
-	t.Cleanup(func() { shareMountID, shareTrustedDirectory = oldID, oldTrust })
+	oldPortStart := shareUnprivilegedPortStart
+	t.Cleanup(func() {
+		shareMountID, shareTrustedDirectory, shareUnprivilegedPortStart = oldID, oldTrust, oldPortStart
+	})
+	shareUnprivilegedPortStart = func() (uint32, error) { return 1024, nil }
 	shareTrustedDirectory = func(int) error { return nil }
 	shareMountID = func(fd int) (uint64, error) {
 		flags, err := unix.FcntlInt(uintptr(fd), unix.F_GETFL, 0)
@@ -250,6 +254,33 @@ func TestLinuxRelayJournalPrecedesMount(t *testing.T) {
 	_, err = mountManagedShareIntent(s, &shareIntent{}, func() error { return errors.New("journal failure") })
 	if !errors.Is(err, errShareJournal) {
 		t.Fatalf("journal error: %v", err)
+	}
+}
+
+func TestLinuxRelayPortDurableBeforeMount(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("journal requires root ownership")
+	}
+	fakeMountIdentity(t)
+	oldMount, oldUnmount := shareMount, shareUnmount
+	t.Cleanup(func() { shareMount, shareUnmount = oldMount, oldUnmount })
+	j := fileShareJournal{dir: filepath.Join(t.TempDir(), "journal")}
+	const boot = "12345678-1234-4123-8123-123456789abc"
+	m := shareManager{journal: j, bootID: func() (string, error) { return boot, nil }, mountIntent: mountManagedShareIntent, capture: func(r *shareIntent) error { r.MountID = 2; return nil }}
+	shareMount = func(_, _, _ string, _ uintptr, options string) error {
+		records, err := j.load()
+		if err != nil || len(records) != 1 || records[0].State != "pending" || records[0].RelayPort == 0 || !strings.Contains(options, fmt.Sprintf("port=%d", records[0].RelayPort)) {
+			t.Errorf("durable endpoint before mount: %v %+v", err, records)
+		}
+		return nil
+	}
+	shareUnmount = func(string, int) error { return nil }
+	s := &guestproto.Share{ID: "test", Generation: 1, BootID: boot, Transport: "smb-hvsocket", Source: `\\server\share`, Port: 99, Path: t.TempDir()}
+	if result := m.mount(s); !result.OK {
+		t.Fatalf("mount: %+v", result)
+	}
+	if result := m.unmount(&guestproto.ShareRef{ID: s.ID, Generation: s.Generation, BootID: boot}); !result.OK {
+		t.Fatalf("unmount: %+v", result)
 	}
 }
 

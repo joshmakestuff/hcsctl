@@ -5,6 +5,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -65,6 +66,18 @@ func captureShareIntent(r *shareIntent) error {
 	unix.Close(fd)
 	r.MountID = id
 	return nil
+}
+
+func recoverShareBatch(entries map[string]*shareEntry) {
+	for _, e := range entries {
+		if e.intent.State != "absent" {
+			var err error
+			e.cleanup, err = recoverShareIntent(e.intent)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "share recovery requires reconciliation")
+			}
+		}
+	}
 }
 
 func recoverShareIntent(r shareIntent) (func() error, error) {

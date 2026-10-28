@@ -84,3 +84,13 @@ func TestShareIntentWriteFailureBlocksMount(t *testing.T) {
 		t.Fatalf("mount: %+v called=%v", r, called)
 	}
 }
+
+func TestStartupRecoveryUsesLocalBootIdentity(t *testing.T) {
+	const boot = "12345678-1234-4123-8123-123456789abc"
+	recovered := false
+	j := &memoryShareJournal{records: []shareIntent{{BootID: boot, ID: "share", Generation: 1, Path: filepath.Join(t.TempDir(), "share"), Source: "source", Transport: "test", State: "mounted"}}}
+	m := shareManager{journal: j, bootID: func() (string, error) { return boot, nil }, recover: func(shareIntent) (func() error, error) { recovered = true; return func() error { return nil }, nil }}
+	if err := m.recoverAtStartup(); err != nil || !recovered || !m.loaded {
+		t.Fatalf("startup recovery: %v recovered=%v", err, recovered)
+	}
+}

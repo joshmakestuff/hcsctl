@@ -50,7 +50,10 @@ try {
    $created = @(Get-SmbGlobalMapping | Where-Object { $_.RemotePath -ieq $p.remote })
    if ($created.Count -ne 1 -or $created[0].LocalPath -or ($p.port -ne 0 -and [int]$created[0].TcpPort -ne [int]$p.port)) { throw 'created mapping mismatch' }
   } finally { if ($secure) { $secure.Dispose() }; $cred=$null; $p.password=$null }
- } elseif ($p.op -eq 'remove') {
+  } elseif ($p.op -eq 'check') {
+   if (!$intent -or $intent.GetValue('Token') -cne $p.token -or $intent.GetValue('Remote') -ine $p.remote -or $intent.GetValue('User') -cne $p.user -or [int]$intent.GetValue('Port') -ne [int]$p.port) { throw 'intent mismatch' }
+   if ($matches.Count -ne 1 -or $matches[0].LocalPath -or ($p.port -ne 0 -and [int]$matches[0].TcpPort -ne [int]$p.port)) { throw 'mapping mismatch' }
+  } elseif ($p.op -eq 'remove') {
   if (!$intent) { if ($matches.Count -ne 0) { throw 'unowned mapping' }; exit 0 }
   if ($intent.GetValue('Token') -cne $p.token -or $intent.GetValue('Remote') -ine $p.remote -or $intent.GetValue('User') -cne $p.user -or [int]$intent.GetValue('Port') -ne [int]$p.port) { throw 'intent mismatch' }
   if ($matches.Count -gt 1) { throw 'multiple mappings' }
@@ -75,15 +78,19 @@ type globalRequest struct {
 	Port     uint32 `json:"port,omitempty"`
 }
 type globalOps struct {
-	command    func(globalRequest) error
-	link       func(string, string) error
-	removeLink func(string, string) error
+	command        func(globalRequest) error
+	link           func(string, string) error
+	removeLink     func(string, string) error
+	linkIdentity   func(string, string) (uint32, uint64, error)
+	removeIdentity func(string, string, uint32, uint64) error
+	verify         func(globalRequest) error
 }
 type globalEntry struct {
 	refs        int
 	fingerprint [32]byte
 	pending     bool
 	owner       globalRequest
+	blocked     bool
 }
 type globalManager struct {
 	mu      sync.Mutex
@@ -91,7 +98,12 @@ type globalManager struct {
 	ops     globalOps
 }
 
-var globalSMB = globalManager{ops: globalOps{command: runGlobalSMB, link: os.Symlink, removeLink: removeOwnedLink}}
+var globalSMB = globalManager{ops: globalOps{command: runGlobalSMB, link: os.Symlink, removeLink: removeOwnedLink, linkIdentity: ownedLinkIdentity, removeIdentity: removeIdentifiedLink, verify: verifyGlobalSMB}}
+
+func verifyGlobalSMB(owner globalRequest) error {
+	owner.Op = "check"
+	return runGlobalSMB(owner)
+}
 
 func runGlobalSMB(req globalRequest) error {
 	digest := sha256.Sum256([]byte(strings.ToLower(req.Remote)))
@@ -133,6 +145,9 @@ func removeOwnedLink(path, target string) error {
 }
 func mountGlobalSMB(s *guestproto.Share) (func() error, error) { return globalSMB.mount(s) }
 func (m *globalManager) mount(s *guestproto.Share) (func() error, error) {
+	return m.mountIntent(s, nil, nil)
+}
+func (m *globalManager) mountIntent(s *guestproto.Share, intent *shareIntent, persist func() error) (func() error, error) {
 	// Do not retain the request or its credentials in cleanup closures.
 	source, path := s.Source, s.Path
 	parts := strings.Split(strings.TrimPrefix(s.Source, `\\`), `\`)
@@ -150,6 +165,9 @@ func (m *globalManager) mount(s *guestproto.Share) (func() error, error) {
 		m.entries = make(map[string]*globalEntry)
 	}
 	e := m.entries[key]
+	if e != nil && e.blocked {
+		return nil, errors.New("global mapping recovery required")
+	}
 	if e != nil && e.pending {
 		if err := m.ops.command(e.owner); err != nil {
 			return nil, errors.New("pending global mapping cleanup failed")
@@ -160,7 +178,8 @@ func (m *globalManager) mount(s *guestproto.Share) (func() error, error) {
 	if e != nil && e.fingerprint != fingerprint {
 		return nil, errors.New("global mapping credentials conflict")
 	}
-	if e == nil {
+	created := e == nil
+	if created {
 		var token [16]byte
 		if _, err := rand.Read(token[:]); err != nil {
 			return nil, errors.New("global mapping ownership unavailable")
@@ -169,15 +188,33 @@ func (m *globalManager) mount(s *guestproto.Share) (func() error, error) {
 		owner := globalRequest{Op: "remove", Key: hex.EncodeToString(digest[:]), Token: hex.EncodeToString(token[:]), Remote: source, User: s.User, Port: s.Port}
 		e = &globalEntry{fingerprint: fingerprint, owner: owner, pending: true}
 		m.entries[key] = e
-		add := owner
+	}
+	if intent != nil {
+		intent.MappingKey, intent.MappingToken, intent.MappingFingerprint = e.owner.Key, e.owner.Token, fingerprint
+		if err := persist(); err != nil {
+			if created {
+				delete(m.entries, key)
+			}
+			return nil, errShareJournal
+		}
+	}
+	if created {
+		add := e.owner
 		add.Op = "add"
 		add.Password = s.Password
 		if err := m.ops.command(add); err != nil {
+			if intent != nil {
+				e.blocked = true
+			}
 			return nil, errors.New("global mapping creation failed; cleanup pending")
 		}
 		e.pending = false
 	}
 	if err := m.ops.link(s.Source, s.Path); err != nil {
+		if intent != nil {
+			e.blocked = true
+			return nil, errors.New("global mapping link creation uncertain")
+		}
 		if e.refs == 0 {
 			if m.ops.command(e.owner) != nil {
 				e.pending = true
@@ -188,13 +225,36 @@ func (m *globalManager) mount(s *guestproto.Share) (func() error, error) {
 		return nil, errors.New("global mapping link creation failed")
 	}
 	e.refs++
+	cleanup := m.cleanup(key, e, path, source, intent)
+	if intent != nil {
+		volume, index, err := m.ops.linkIdentity(path, source)
+		if err != nil {
+			e.blocked = true
+			return cleanup, err
+		}
+		intent.LinkVolume, intent.LinkIndex = volume, index
+	}
+	return cleanup, nil
+}
+
+func (m *globalManager) cleanup(key string, e *globalEntry, path, source string, intent *shareIntent) func() error {
 	linked := true
 	released := false
 	return func() error {
 		m.mu.Lock()
 		defer m.mu.Unlock()
+		if e.blocked {
+			return errors.New("global mapping recovery required")
+		}
 		if linked {
-			if err := m.ops.removeLink(path, source); err != nil {
+			if intent != nil {
+				if intent.LinkIndex == 0 || m.ops.verify(e.owner) != nil {
+					return errors.New("global mapping ownership changed")
+				}
+				if err := m.ops.removeIdentity(path, source, intent.LinkVolume, intent.LinkIndex); err != nil {
+					return errors.New("global mapping link removal failed")
+				}
+			} else if err := m.ops.removeLink(path, source); err != nil {
 				return errors.New("global mapping link removal failed")
 			}
 			linked = false
@@ -211,7 +271,7 @@ func (m *globalManager) mount(s *guestproto.Share) (func() error, error) {
 		e.refs--
 		released = true
 		return nil
-	}, nil
+	}
 }
 
 // recoverGlobalSMBOwnership is the coordinator seam for an ownership record
