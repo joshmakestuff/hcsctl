@@ -140,6 +140,39 @@ func TestLinuxPlan9Descriptor(t *testing.T) {
 	}
 }
 
+func TestLinuxMountAvailability(t *testing.T) {
+	fakeMountIdentity(t)
+	oldMount, oldDial := shareMount, shareDial
+	t.Cleanup(func() { shareMount, shareDial = oldMount, oldDial })
+	for _, tc := range []struct {
+		name    string
+		failure error
+		missing bool
+	}{
+		{"missing filesystem", unix.ENODEV, true},
+		{"permission", unix.EPERM, false},
+		{"access", unix.EACCES, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pair, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_STREAM, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer unix.Close(pair[1])
+			var f *os.File
+			shareDial = func(uint32) (*os.File, error) { f = os.NewFile(uintptr(pair[0]), "test"); return f, nil }
+			shareMount = func(string, string, string, uintptr, string) error { return fmt.Errorf("native: %w", tc.failure) }
+			_, err = mountManagedShare(&guestproto.Share{Transport: "plan9", Source: "share", Port: 44, Path: t.TempDir()})
+			if errors.Is(err, errSharePrerequisiteMissing) != tc.missing || !errors.Is(err, tc.failure) {
+				t.Fatalf("classification: %v", err)
+			}
+			if _, err := f.Stat(); !errors.Is(err, os.ErrClosed) {
+				t.Fatalf("socket not closed: %v", err)
+			}
+		})
+	}
+}
+
 func TestLinuxSMBVsockMountLifetime(t *testing.T) {
 	fakeMountIdentity(t)
 	oldMount, oldUnmount := shareMount, shareUnmount

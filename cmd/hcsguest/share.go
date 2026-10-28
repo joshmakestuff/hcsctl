@@ -18,6 +18,8 @@ import (
 type shareBackend func(*guestproto.Share) (func() error, error)
 
 var errShareNotImplemented = errors.New("managed shares not implemented")
+var errSharePrerequisiteMissing = errors.New("share prerequisite missing")
+var errShareTransportUnavailable = errors.New("share transport unavailable")
 var errShareBusy = errors.New("managed share is busy")
 var errShareJournal = errors.New("share journal unavailable")
 var errBootMismatch = errors.New("boot identity mismatch")
@@ -201,14 +203,23 @@ func (m *shareManager) mount(s *guestproto.Share) guestproto.ShareResult {
 		return pending
 	}
 	cleanup, err := m.backend(s)
-	if errors.Is(err, errShareNotImplemented) {
+	code := ""
+	switch {
+	case errors.Is(err, errShareNotImplemented):
+		code = "not_implemented"
+	case errors.Is(err, errSharePrerequisiteMissing):
+		code = "missing_prerequisite"
+	case errors.Is(err, errShareTransportUnavailable):
+		code = "transport_unavailable"
+	}
+	if code != "" && cleanup == nil {
 		e.intent.State = "absent"
 		if err := m.persist(); err != nil {
 			e.intent.State = "pending"
 			return pending
 		}
 		e.result = m.result(s.ID, s.Generation, "")
-		return m.result(s.ID, s.Generation, "not_implemented")
+		return m.result(s.ID, s.Generation, code)
 	}
 	if err != nil || cleanup == nil {
 		return m.result(s.ID, s.Generation, "mount_failed")

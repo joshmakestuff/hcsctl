@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -64,6 +65,55 @@ func TestManagedShareLifecycle(t *testing.T) {
 	if r := m.mount(s); !r.OK || mounts != 2 {
 		t.Fatalf("new generation: %+v", r)
 	}
+}
+
+type failTombstoneJournal struct{ memoryShareJournal }
+
+func (j *failTombstoneJournal) save(records []shareIntent) error {
+	if len(records) != 0 && records[0].State == "absent" {
+		return errors.New("write failed")
+	}
+	return j.memoryShareJournal.save(records)
+}
+
+func TestShareAvailabilityTombstones(t *testing.T) {
+	const boot = "12345678-1234-4123-8123-123456789abc"
+	for _, tc := range []struct {
+		name   string
+		err    error
+		code   string
+		absent bool
+	}{
+		{"missing prerequisite", fmt.Errorf("wrapped: %w", errSharePrerequisiteMissing), "missing_prerequisite", true},
+		{"unavailable transport", fmt.Errorf("wrapped: %w", errShareTransportUnavailable), "transport_unavailable", true},
+		{"authentication", errors.New("access denied"), "mount_failed", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			j := &memoryShareJournal{}
+			m := shareManager{journal: j, bootID: func() (string, error) { return boot, nil }, backend: func(*guestproto.Share) (func() error, error) { return nil, tc.err }}
+			s := &guestproto.Share{ID: "s", Generation: 1, BootID: boot, Transport: "test", Source: "source", Path: filepath.Join(t.TempDir(), "mount")}
+			if r := m.mount(s); r.ErrorCode != tc.code {
+				t.Fatalf("mount: %+v", r)
+			}
+			if len(j.records) != 1 || (j.records[0].State == "absent") != tc.absent {
+				t.Fatalf("journal: %+v", j.records)
+			}
+		})
+	}
+	t.Run("tombstone persistence failure", func(t *testing.T) {
+		j := &failTombstoneJournal{}
+		m := shareManager{journal: j, bootID: func() (string, error) { return boot, nil }, backend: func(*guestproto.Share) (func() error, error) { return nil, errSharePrerequisiteMissing }}
+		s := &guestproto.Share{ID: "s", Generation: 1, BootID: boot, Transport: "test", Source: "source", Path: filepath.Join(t.TempDir(), "mount")}
+		if r := m.mount(s); r.ErrorCode != "recovery_required" {
+			t.Fatalf("mount: %+v", r)
+		}
+		if len(j.records) != 1 || j.records[0].State != "pending" {
+			t.Fatalf("journal: %+v", j.records)
+		}
+		if r := m.status(&guestproto.ShareRef{ID: "s", Generation: 1, BootID: boot}); r.ErrorCode != "recovery_required" {
+			t.Fatalf("status: %+v", r)
+		}
+	})
 }
 
 func TestShareBootPrecondition(t *testing.T) {

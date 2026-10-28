@@ -46,6 +46,9 @@ func mountManagedShare(s *guestproto.Share) (func() error, error) {
 	if s.Source == "" || strings.ContainsAny(s.Source, `\/:`+"\x00") || s.Source == "." || s.Source == ".." {
 		return nil, errors.New("invalid VSMB share name")
 	}
+	if err := checkBindVSMB(); err != nil {
+		return nil, err
+	}
 	vsmbState.Lock()
 	defer vsmbState.Unlock()
 	defer func() {
@@ -129,6 +132,23 @@ func mountManagedShare(s *guestproto.Share) (func() error, error) {
 		}
 		return nil
 	}, nil
+}
+
+func checkBindVSMB() error {
+	dll := windows.NewLazySystemDLL("bindfltapi.dll")
+	for _, name := range []string{"BfSetupFilter", "BfRemoveMapping"} {
+		if err := dll.NewProc(name).Find(); err != nil {
+			return classifyBindAvailability(err)
+		}
+	}
+	return nil
+}
+
+func classifyBindAvailability(err error) error {
+	if errors.Is(err, windows.ERROR_MOD_NOT_FOUND) || errors.Is(err, windows.ERROR_PROC_NOT_FOUND) {
+		return fmt.Errorf("%w: bindflt API: %w", errShareTransportUnavailable, err)
+	}
+	return fmt.Errorf("bindflt API: %w", err)
 }
 
 func bindVSMB(path, target string, add bool) error {

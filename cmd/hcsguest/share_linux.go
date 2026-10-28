@@ -189,7 +189,12 @@ func mountManagedShare(s *guestproto.Share) (func() error, error) {
 			relay.close()
 		}
 		if socket != nil {
-			socket.Close()
+			if closeErr := socket.Close(); closeErr != nil {
+				return nil, fmt.Errorf("mount and socket cleanup: %w", errors.Join(err, closeErr))
+			}
+		}
+		if errors.Is(err, unix.ENODEV) {
+			return nil, fmt.Errorf("%w: mount filesystem: %w", errSharePrerequisiteMissing, err)
 		}
 		return nil, fmt.Errorf("mount share: %w", err)
 	}
