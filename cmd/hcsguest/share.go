@@ -327,6 +327,11 @@ func (m *shareManager) unmount(ref *guestproto.ShareRef) guestproto.ShareResult 
 		return r
 	}
 	if e.cleanup == nil {
+		// Cleanup completed in this process, but its final journal write failed.
+		if e.intent.State == "absent" && m.persist() == nil {
+			e.result.OK, e.result.ErrorCode, e.result.State = true, "", "absent"
+			return e.result
+		}
 		return r
 	}
 	// Once teardown starts, a later reused kernel mount ID must not authorize

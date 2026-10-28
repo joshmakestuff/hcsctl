@@ -94,3 +94,38 @@ func TestStartupRecoveryUsesLocalBootIdentity(t *testing.T) {
 		t.Fatalf("startup recovery: %v recovered=%v", err, recovered)
 	}
 }
+
+func TestUnmountRetriesFinalJournalWrite(t *testing.T) {
+	const boot = "12345678-1234-4123-8123-123456789abc"
+	j := &memoryShareJournal{}
+	cleanups := 0
+	m := shareManager{journal: j, bootID: func() (string, error) { return boot, nil }, backend: func(*guestproto.Share) (func() error, error) {
+		return func() error {
+			cleanups++
+			j.fail = true // The pending write has succeeded; fail the final write.
+			return nil
+		}, nil
+	}}
+	s := &guestproto.Share{ID: "share", Generation: 1, BootID: boot, Path: filepath.Join(t.TempDir(), "mount"), Transport: "test", Source: "source"}
+	if r := m.mount(s); !r.OK {
+		t.Fatalf("mount: %+v", r)
+	}
+	ref := &guestproto.ShareRef{ID: s.ID, Generation: s.Generation, BootID: boot}
+	if r := m.unmount(ref); r.OK || r.State != "recovery_required" || cleanups != 1 {
+		t.Fatalf("final write failure: %+v, cleanups=%d", r, cleanups)
+	}
+	if len(j.records) != 1 || j.records[0].State != "pending" {
+		t.Fatalf("durable state: %+v", j.records)
+	}
+	if r := m.unmount(ref); r.OK || r.State != "recovery_required" || cleanups != 1 {
+		t.Fatalf("failed retry: %+v, cleanups=%d", r, cleanups)
+	}
+	j.fail = false
+	if r := m.unmount(ref); !r.OK || r.State != "absent" || cleanups != 1 {
+		t.Fatalf("retry: %+v, cleanups=%d", r, cleanups)
+	}
+	restarted := shareManager{journal: j, bootID: m.bootID}
+	if r := restarted.status(ref); !r.OK || r.State != "absent" {
+		t.Fatalf("reloaded: %+v", r)
+	}
+}
