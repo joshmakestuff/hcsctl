@@ -8,9 +8,27 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
+
+func TestCurrentLogonIdentityNative(t *testing.T) {
+	var stats wnetTokenStatistics
+	if unsafe.Sizeof(stats) != 56 || unsafe.Offsetof(stats.AuthenticationID) != 8 || unsafe.Offsetof(stats.ModifiedID) != 48 {
+		t.Fatal("TOKEN_STATISTICS layout mismatch")
+	}
+	first, err := currentLogonIdentity()
+	if err != nil || len(first) != 16 {
+		t.Fatalf("current logon identity: %q: %v", first, err)
+	}
+	for i := 0; i < 100; i++ {
+		got, err := currentLogonIdentity()
+		if err != nil || got != first {
+			t.Fatalf("query %d: %q: %v", i, got, err)
+		}
+	}
+}
 
 type fakeWNetStore struct {
 	records    map[string]wnetRecord

@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"sync"
@@ -139,7 +140,7 @@ func (m *globalManager) mountIntent(s *guestproto.Share, intent *shareIntent, pe
 					}
 					delete(m.entries, key)
 					return nil
-				}, errors.New("connection creation failed; cleanup pending")
+				}, fmt.Errorf("connection creation failed; cleanup pending: %w", err)
 			}
 			return nil, errors.New("global mapping creation failed; cleanup pending")
 		}

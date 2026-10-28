@@ -4,6 +4,7 @@ package main
 
 import (
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -61,11 +62,11 @@ func (b wnetBackend) run(r globalRequest) error {
 	}
 	boot, logon, err := b.identity()
 	if err != nil {
-		return err
+		return fmt.Errorf("connection identity: %w", err)
 	}
 	rec, exists, err := b.store.get(r.Key)
 	if err != nil {
-		return err
+		return fmt.Errorf("connection record lookup: %w", err)
 	}
 	if r.Op == "add" {
 		if exists {
@@ -73,7 +74,7 @@ func (b wnetBackend) run(r globalRequest) error {
 		}
 		_, connected, err := b.api.user(r.Remote)
 		if err != nil {
-			return err
+			return fmt.Errorf("connection preflight: %w", err)
 		}
 		if connected {
 			return errors.New("pre-existing connection is unowned")
@@ -82,10 +83,10 @@ func (b wnetBackend) run(r globalRequest) error {
 		rec.Owner.Password = ""
 		rec.Owner.Op = "remove"
 		if err = b.store.put(rec); err != nil {
-			return err
+			return fmt.Errorf("connection intent persistence: %w", err)
 		}
 		if err = b.api.add(r.Remote, r.User, r.Password); err != nil {
-			return err
+			return fmt.Errorf("connection add: %w", err)
 		}
 		user, connected, err := b.api.user(r.Remote)
 		if err != nil {
@@ -174,7 +175,7 @@ func runGlobalSMB(r globalRequest) error {
 		return err
 	}
 	mutex, err := windows.CreateMutex(nil, false, name)
-	if err != nil {
+	if err != nil && !errors.Is(err, windows.ERROR_ALREADY_EXISTS) {
 		return err
 	}
 	defer windows.CloseHandle(mutex)
@@ -192,23 +193,43 @@ func runGlobalSMB(r globalRequest) error {
 func wnetIdentity() (string, string, error) {
 	boot, err := readBootID()
 	if err != nil {
-		return "", "", err
+		return "", "", fmt.Errorf("boot identity: %w", err)
 	}
+	logon, err := currentLogonIdentity()
+	if err != nil {
+		return "", "", fmt.Errorf("logon identity: %w", err)
+	}
+	return boot, logon, nil
+}
+
+// TOKEN_STATISTICS has 64-bit alignment and a fixed 56-byte native layout.
+type wnetTokenStatistics struct {
+	TokenID, AuthenticationID        windows.LUID
+	ExpirationTime                   int64
+	TokenType, ImpersonationLevel    uint32
+	DynamicCharged, DynamicAvailable uint32
+	GroupCount, PrivilegeCount       uint32
+	ModifiedID                       windows.LUID
+}
+
+func currentLogonIdentity() (string, error) {
 	var token windows.Token
-	if err = windows.OpenProcessToken(windows.CurrentProcess(), windows.TOKEN_QUERY, &token); err != nil {
-		return "", "", err
+	if err := windows.OpenProcessToken(windows.CurrentProcess(), windows.TOKEN_QUERY, &token); err != nil {
+		return "", fmt.Errorf("open process token: %w", err)
 	}
 	defer token.Close()
-	// TOKEN_STATISTICS starts with TokenId and AuthenticationId, both LUIDs.
-	var stats [64]byte
+	var stats wnetTokenStatistics
 	var n uint32
-	if err = windows.GetTokenInformation(token, windows.TokenStatistics, &stats[0], uint32(len(stats)), &n); err != nil {
-		return "", "", err
+	if err := windows.GetTokenInformation(token, windows.TokenStatistics, (*byte)(unsafe.Pointer(&stats)), uint32(unsafe.Sizeof(stats)), &n); err != nil {
+		return "", fmt.Errorf("query token statistics: %w", err)
 	}
-	if n < 16 {
-		return "", "", errors.New("logon identity unavailable")
+	if n != uint32(unsafe.Sizeof(stats)) {
+		return "", errors.New("unexpected token statistics size")
 	}
-	return boot, hex.EncodeToString(stats[8:16]), nil
+	var luid [8]byte
+	binary.LittleEndian.PutUint32(luid[:4], stats.AuthenticationID.LowPart)
+	binary.LittleEndian.PutUint32(luid[4:], uint32(stats.AuthenticationID.HighPart))
+	return hex.EncodeToString(luid[:]), nil
 }
 func (nativeWNet) user(remote string) (string, bool, error) {
 	p, err := windows.UTF16PtrFromString(remote)
