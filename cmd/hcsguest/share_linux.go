@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -12,14 +13,30 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/joshmakestuff/hcsctl/internal/guestproto"
+	"github.com/mdlayher/socket"
+	"github.com/mdlayher/vsock"
 	"golang.org/x/sys/unix"
 )
 
 var shareMount = unix.Mount
 var shareUnmount = unix.Unmount
 var shareDial = dialShareVSock
+var shareRelayDial = dialRelayVSock
+var shareMountID = mountID
+
+func mountID(path string) (uint64, error) {
+	var st unix.Statx_t
+	if err := unix.Statx(unix.AT_FDCWD, path, 0, unix.STATX_MNT_ID, &st); err != nil {
+		return 0, err
+	}
+	if st.Mask&unix.STATX_MNT_ID == 0 {
+		return 0, errors.New("mount identity unavailable")
+	}
+	return st.Mnt_id, nil
+}
 
 // mountTarget opens each component without following symbolic links. The final
 // directory must already exist and be empty; the backend never removes it.
@@ -73,6 +90,18 @@ func mountManagedShare(s *guestproto.Share) (func() error, error) {
 		return nil, err
 	}
 	defer target.Close()
+	parentFD, err := unix.Openat(int(target.Fd()), "..", unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, err
+	}
+	parent := os.NewFile(uintptr(parentFD), "share-parent")
+	keepParent := false
+	defer func() {
+		if !keepParent {
+			parent.Close()
+		}
+	}()
+	anchoredPath := fmt.Sprintf("/proc/self/fd/%d/%s", parent.Fd(), filepath.Base(s.Path))
 	// Mount through the verified directory descriptor rather than re-resolving
 	// an attacker-controlled pathname during the mount syscall.
 	mountPath := fmt.Sprintf("/proc/self/fd/%d", target.Fd())
@@ -90,13 +119,12 @@ func mountManagedShare(s *guestproto.Share) (func() error, error) {
 		if len(parts) != 4 || parts[0] != "" || parts[1] != "" || parts[2] == "" || parts[3] == "" || strings.ContainsAny(source, ",\x00\n\r") {
 			return nil, errors.New("invalid SMB source")
 		}
-		// The kernel's comma-separated mount parser cannot safely represent all
-		// credential strings. Reject ambiguous values rather than inject options.
-		if strings.ContainsAny(s.User, ",\x00\n\r") || strings.ContainsAny(s.Password, ",\x00\n\r") {
+		if strings.ContainsAny(s.User, "\x00\n\r") || strings.ContainsAny(s.Password, "\x00\n\r") {
 			return nil, errors.New("invalid SMB credential")
 		}
 		fs = "cifs"
-		data = fmt.Sprintf("username=%s,password=%s,uid=%d,gid=%d", s.User, s.Password, s.UID, s.GID)
+		// CIFS's monolithic mount parser interprets doubled commas as one.
+		data = fmt.Sprintf("username=%s,password=%s,uid=%d,gid=%d", strings.ReplaceAll(s.User, ",", ",,"), strings.ReplaceAll(s.Password, ",", ",,"), s.UID, s.GID)
 		if s.Transport == "smb-hvsocket" {
 			if s.Port == 0 {
 				return nil, errors.New("invalid vsock port")
@@ -117,9 +145,6 @@ func mountManagedShare(s *guestproto.Share) (func() error, error) {
 		}
 		fs, source = "9p", mountPath
 		data = fmt.Sprintf("trans=fd,rfdno=%d,wfdno=%d,msize=65536,aname=%s", socket.Fd(), socket.Fd(), s.Source)
-		if s.ReadOnly {
-			data += ",noload"
-		}
 	default:
 		return nil, errShareNotImplemented
 	}
@@ -132,8 +157,20 @@ func mountManagedShare(s *guestproto.Share) (func() error, error) {
 		}
 		return nil, fmt.Errorf("mount share: %w", err)
 	}
+	id, identityErr := shareMountID(anchoredPath)
+	keepParent = true
 	return func() error {
-		if err := shareUnmount(s.Path, 0); err != nil {
+		if identityErr != nil {
+			return fmt.Errorf("mounted identity unavailable: %w", identityErr)
+		}
+		current, err := shareMountID(anchoredPath)
+		if err != nil {
+			return err
+		}
+		if current != id {
+			return errors.New("mounted identity changed")
+		}
+		if err := shareUnmount(anchoredPath, 0); err != nil {
 			if errors.Is(err, unix.EBUSY) {
 				return fmt.Errorf("%w: %v", errShareBusy, err)
 			}
@@ -145,6 +182,7 @@ func mountManagedShare(s *guestproto.Share) (func() error, error) {
 		if socket != nil {
 			socket.Close()
 		}
+		parent.Close()
 		return nil
 	}, nil
 }
@@ -189,6 +227,29 @@ type shareRelay struct {
 	wg          sync.WaitGroup
 	limit       chan struct{}
 	vsockPort   uint32
+	ctx         context.Context
+	cancel      context.CancelFunc
+}
+
+// mdlayher/vsock v1.3.0 Dial uses context.Background internally. Its socket
+// package supplies the same pollable transport with cancellable Connect.
+type relayVSockConn struct {
+	*socket.Conn
+	remote net.Addr
+}
+
+func (c *relayVSockConn) LocalAddr() net.Addr  { return &vsock.Addr{} }
+func (c *relayVSockConn) RemoteAddr() net.Addr { return c.remote }
+func dialRelayVSock(ctx context.Context, port uint32) (net.Conn, error) {
+	c, err := socket.Socket(unix.AF_VSOCK, unix.SOCK_STREAM, 0, "vsock", nil)
+	if err != nil {
+		return nil, err
+	}
+	if _, err = c.Connect(ctx, &unix.SockaddrVM{CID: vsock.Host, Port: port}); err != nil {
+		c.Close()
+		return nil, err
+	}
+	return &relayVSockConn{Conn: c, remote: &vsock.Addr{ContextID: vsock.Host, Port: port}}, nil
 }
 
 func newShareRelay(port uint32) (*shareRelay, error) {
@@ -196,7 +257,8 @@ func newShareRelay(port uint32) (*shareRelay, error) {
 	if err != nil {
 		return nil, err
 	}
-	r := &shareRelay{listener: l, connections: make(map[net.Conn]struct{}), limit: make(chan struct{}, 16), vsockPort: port}
+	ctx, cancel := context.WithCancel(context.Background())
+	r := &shareRelay{listener: l, connections: make(map[net.Conn]struct{}), limit: make(chan struct{}, 16), vsockPort: port, ctx: ctx, cancel: cancel}
 	r.wg.Add(1)
 	go r.serve()
 	return r, nil
@@ -240,12 +302,9 @@ func (r *shareRelay) serve() {
 			defer r.wg.Done()
 			defer func() { <-r.limit }()
 			defer r.untrack(c)
-			f, err := shareDial(r.vsockPort)
-			if err != nil {
-				return
-			}
-			peer, err := net.FileConn(f)
-			f.Close()
+			ctx, cancel := context.WithTimeout(r.ctx, 3*time.Second)
+			peer, err := shareRelayDial(ctx, r.vsockPort)
+			cancel()
 			if err != nil {
 				return
 			}
@@ -265,6 +324,7 @@ func (r *shareRelay) serve() {
 func (r *shareRelay) close() {
 	r.mu.Lock()
 	r.closed = true
+	r.cancel()
 	r.listener.Close()
 	for c := range r.connections {
 		c.Close()

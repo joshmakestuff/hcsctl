@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -54,8 +55,12 @@ func TestLinuxShareMount(t *testing.T) {
 		t.Fatal(err)
 	}
 	s.Password = "bad,ro"
-	if _, err := mountManagedShare(s); err == nil {
-		t.Fatal("accepted ambiguous credential")
+	cleanup, err = mountManagedShare(s)
+	if err != nil || !strings.Contains(options, "password=bad,,ro,") {
+		t.Fatal("CIFS comma escaping failed")
+	}
+	if err := cleanup(); err != nil {
+		t.Fatal(err)
 	}
 	s.Password = "secret"
 	s.Path = "/"
@@ -98,7 +103,7 @@ func TestLinuxPlan9Descriptor(t *testing.T) {
 	}
 	shareMount = func(_, _, fs string, flags uintptr, data string) error {
 		want := fmt.Sprintf("trans=fd,rfdno=%d,wfdno=%d,msize=65536,aname=access", f.Fd(), f.Fd())
-		if fs != "9p" || !strings.Contains(data, want) || flags&unix.MS_RDONLY == 0 {
+		if fs != "9p" || !strings.Contains(data, want) || strings.Contains(data, "noload") || flags&unix.MS_RDONLY == 0 {
 			t.Errorf("bad 9p options: %s", data)
 		}
 		return nil
@@ -164,26 +169,16 @@ func TestLinuxSMBVsockMountLifetime(t *testing.T) {
 }
 
 func TestLinuxRelayShutdown(t *testing.T) {
-	oldDial := shareDial
-	t.Cleanup(func() { shareDial = oldDial })
+	oldDial := shareRelayDial
+	t.Cleanup(func() { shareRelayDial = oldDial })
 	peer := make(chan net.Conn, 1)
-	shareDial = func(port uint32) (*os.File, error) {
+	shareRelayDial = func(_ context.Context, port uint32) (net.Conn, error) {
 		if port != 123 {
 			t.Errorf("wrong port %d", port)
 		}
-		pair, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_STREAM, 0)
-		if err != nil {
-			return nil, err
-		}
-		f := os.NewFile(uintptr(pair[1]), "peer")
-		conn, err := net.FileConn(f)
-		f.Close()
-		if err != nil {
-			unix.Close(pair[0])
-			return nil, err
-		}
-		peer <- conn
-		return os.NewFile(uintptr(pair[0]), "dial"), nil
+		local, remote := net.Pipe()
+		peer <- remote
+		return local, nil
 	}
 	r, err := newShareRelay(123)
 	if err != nil {
@@ -210,5 +205,55 @@ func TestLinuxRelayShutdown(t *testing.T) {
 	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("relay did not stop")
+	}
+}
+
+func TestLinuxUnmountIdentityMismatch(t *testing.T) {
+	oldMount, oldUnmount, oldID := shareMount, shareUnmount, shareMountID
+	t.Cleanup(func() { shareMount, shareUnmount, shareMountID = oldMount, oldUnmount, oldID })
+	shareMount = func(string, string, string, uintptr, string) error { return nil }
+	called := false
+	shareUnmount = func(string, int) error { called = true; return nil }
+	id := uint64(10)
+	shareMountID = func(string) (uint64, error) { return id, nil }
+	cleanup, err := mountManagedShare(&guestproto.Share{Transport: "smb-tcp", Source: `\\server\share`, Path: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id = 11
+	if err := cleanup(); err == nil || called {
+		t.Fatal("unmounted changed mount")
+	}
+	id = 10
+	if err := cleanup(); err != nil || !called {
+		t.Fatalf("retry: %v", err)
+	}
+}
+
+func TestLinuxRelayCancelsDial(t *testing.T) {
+	oldDial := shareRelayDial
+	t.Cleanup(func() { shareRelayDial = oldDial })
+	started := make(chan struct{})
+	shareRelayDial = func(ctx context.Context, _ uint32) (net.Conn, error) {
+		close(started)
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	r, err := newShareRelay(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := net.Dial("tcp4", fmt.Sprintf("127.0.0.1:%d", r.port()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	<-started
+	done := make(chan struct{})
+	go func() { r.close(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("dial was not cancelled")
 	}
 }
