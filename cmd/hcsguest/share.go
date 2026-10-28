@@ -22,6 +22,7 @@ var errSharePrerequisiteMissing = errors.New("share prerequisite missing")
 var errShareTransportUnavailable = errors.New("share transport unavailable")
 var errShareBusy = errors.New("managed share is busy")
 var errShareJournal = errors.New("share journal unavailable")
+var errShareConflict = errors.New("share conflict before effects")
 var errBootMismatch = errors.New("boot identity mismatch")
 
 type shareEntry struct {
@@ -32,21 +33,22 @@ type shareEntry struct {
 }
 
 type shareManager struct {
-	mu           sync.Mutex
-	entries      map[string]*shareEntry
-	backend      shareBackend
-	mountIntent  func(*guestproto.Share, *shareIntent, func() error) (func() error, error)
-	bootTime     func() time.Time
-	bootID       func() (string, error)
-	identity     string // protected by mu and refreshed before each operation
-	journal      shareJournal
-	loaded       bool
-	capture      func(*shareIntent) error
-	recover      func(shareIntent) (func() error, error)
-	recoverBatch func(map[string]*shareEntry)
+	mu                  sync.Mutex
+	entries             map[string]*shareEntry
+	backend             shareBackend
+	mountIntent         func(*guestproto.Share, *shareIntent, func() error) (func() error, error)
+	bootTime            func() time.Time
+	bootID              func() (string, error)
+	identity            string // protected by mu and refreshed before each operation
+	journal             shareJournal
+	loaded              bool
+	capture             func(*shareIntent) error
+	recover             func(shareIntent) (func() error, error)
+	recoverBatch        func(map[string]*shareEntry)
+	recoverPreviousBoot func(shareIntent) error
 }
 
-var managedShares = &shareManager{backend: mountManagedShare, mountIntent: mountManagedShareIntent, bootID: readBootID, journal: newShareJournal(), capture: captureShareIntent, recoverBatch: recoverShareBatch, bootTime: func() time.Time {
+var managedShares = &shareManager{backend: mountManagedShare, mountIntent: mountManagedShareIntent, bootID: readBootID, journal: newShareJournal(), capture: captureShareIntent, recoverBatch: recoverShareBatch, recoverPreviousBoot: recoverPreviousBootShare, bootTime: func() time.Time {
 	info, err := gatherInfo()
 	if err != nil {
 		return time.Time{}
@@ -81,7 +83,7 @@ func (m *shareManager) prepare(expected string) error {
 	}
 	m.entries = make(map[string]*shareEntry)
 	for _, rec := range records {
-		if rec.BootID != id {
+		if rec.BootID != id && m.recoverPreviousBoot == nil {
 			continue
 		}
 		if !rec.valid() || m.entries[rec.ID] != nil {
@@ -95,12 +97,30 @@ func (m *shareManager) prepare(expected string) error {
 		e := &shareEntry{result: r, fingerprint: rec.Fingerprint, intent: rec}
 		m.entries[rec.ID] = e
 	}
+	// Reconcile only after validating every record, and retain failures so that
+	// neither a reused ID nor an overlapping path can claim an unknown link.
+	changed := false
+	for key, e := range m.entries {
+		if e.intent.BootID != id && (e.intent.State == "absent" || m.recoverPreviousBoot(e.intent) == nil) {
+			delete(m.entries, key)
+			changed = true
+		}
+	}
+	if changed && m.persist() != nil {
+		return errShareJournal
+	}
 	// Validate the entire journal before recovery opens any native resources.
 	if m.recoverBatch != nil {
-		m.recoverBatch(m.entries)
+		current := make(map[string]*shareEntry)
+		for key, e := range m.entries {
+			if e.intent.BootID == id {
+				current[key] = e
+			}
+		}
+		m.recoverBatch(current)
 	} else if m.recover != nil {
 		for _, e := range m.entries {
-			if e.intent.State != "absent" {
+			if e.intent.BootID == id && e.intent.State != "absent" {
 				e.cleanup, _ = m.recover(e.intent)
 			}
 		}
@@ -237,6 +257,8 @@ func (m *shareManager) mount(s *guestproto.Share) guestproto.ShareResult {
 	}
 	code := ""
 	switch {
+	case errors.Is(err, errShareConflict):
+		code = "conflict"
 	case errors.Is(err, errShareNotImplemented):
 		code = "not_implemented"
 	case errors.Is(err, errSharePrerequisiteMissing):

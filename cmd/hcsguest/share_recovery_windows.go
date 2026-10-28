@@ -101,6 +101,67 @@ func removeIdentifiedLink(path, target string, volume uint32, index uint64) erro
 	return windows.SetFileInformationByHandle(h, windows.FileDispositionInfo, &disposition, 1)
 }
 
+// A reboot destroys the logon-session mapping, but not the filesystem link.
+// Never use a stale mapping token to authorize a native mapping operation.
+var previousBootOwner = (registryWNetStore{}).get
+var forgetPreviousBootOwner = recoverGlobalSMBOwnership
+
+// The backend checks absence while holding its native ownership mutex. An
+// intent with an extant connection is uncertain and cannot be cancelled.
+func cleanupFailedConnection(r shareIntent) error {
+	if r.State != "pending" || r.MappingKey == "" || r.MappingToken == "" {
+		return errors.New("failed connection ownership uncertain")
+	}
+	rec, exists, err := previousBootOwner(r.MappingKey)
+	if err != nil || !exists || rec.Boot != r.BootID || rec.Phase != "intent" || rec.Owner.Key != r.MappingKey || rec.Owner.Token != r.MappingToken || !strings.EqualFold(rec.Owner.Remote, r.Source) || rec.Owner.Port != r.Port {
+		return errors.New("failed connection ownership uncertain")
+	}
+	if r.LinkPhase != "" || r.StagePath != "" || r.LinkIndex != 0 {
+		if err := removeJournalLinks(r); err != nil {
+			return err
+		}
+	}
+	return forgetPreviousBootOwner(rec.Owner)
+}
+
+func recoverPreviousBootShare(r shareIntent) error {
+	if r.Transport != "smb-tcp" {
+		return errors.New("unsupported previous boot share")
+	}
+	if err := removeJournalLinks(r); err != nil {
+		return err
+	}
+	if r.MappingKey == "" && r.MappingToken == "" {
+		return nil
+	}
+	rec, exists, err := previousBootOwner(r.MappingKey)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return nil
+	}
+	if rec.Boot != r.BootID || rec.Owner.Token != r.MappingToken || !strings.EqualFold(rec.Owner.Remote, r.Source) || rec.Owner.Port != r.Port {
+		return errors.New("previous boot mapping ownership changed")
+	}
+	return forgetPreviousBootOwner(rec.Owner)
+}
+
+func removeJournalLinks(r shareIntent) error {
+	_, err := os.Lstat(r.Path)
+	if err == nil {
+		if r.LinkIndex == 0 {
+			return errors.New("link ownership unavailable")
+		}
+		if err := removeIdentifiedLink(r.Path, r.Source, r.LinkVolume, r.LinkIndex); err != nil {
+			return err
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return removeStage(r)
+}
+
 func captureShareIntent(r *shareIntent) error {
 	if r.Transport == "smb-tcp" && (r.LinkIndex == 0 || r.MappingToken == "" || r.MappingKey == "") {
 		return errors.New("SMB ownership not captured")
@@ -128,6 +189,12 @@ func (m *globalManager) recoverBatch(entries map[string]*shareEntry, owners func
 	}
 	groups := make(map[string][]*shareEntry)
 	for _, e := range entries {
+		// The manager persists the mapping token before any native effect. A
+		// pending record without one therefore owns no native resources.
+		if e.intent.Transport == "smb-tcp" && e.intent.State == "pending" && e.intent.MappingKey == "" && e.intent.MappingToken == "" && e.intent.LinkPhase == "" && e.intent.StagePath == "" && e.intent.LinkIndex == 0 {
+			e.cleanup = func() error { return nil }
+			continue
+		}
 		if e.intent.Transport == "smb-tcp" && e.intent.State != "absent" {
 			key := strings.ToLower(e.intent.Source)
 			groups[key] = append(groups[key], e)
@@ -140,6 +207,30 @@ func (m *globalManager) recoverBatch(entries map[string]*shareEntry, owners func
 	}
 	records, err := owners()
 	for key, group := range groups {
+		if len(group) == 1 {
+			e := group[0]
+			r := e.intent
+			var rec wnetRecord
+			var exists bool
+			var recordErr error
+			if r.State == "pending" && r.MappingKey != "" && r.MappingToken != "" {
+				rec, exists, recordErr = previousBootOwner(r.MappingKey)
+			}
+			if recordErr == nil && exists && rec.Phase == "intent" && rec.Boot == r.BootID && rec.Owner.Token == r.MappingToken && strings.EqualFold(rec.Owner.Remote, r.Source) && rec.Owner.Port == r.Port {
+				ge := &globalEntry{blocked: true}
+				m.entries[key] = ge
+				e.cleanup = func() error {
+					m.mu.Lock()
+					defer m.mu.Unlock()
+					if err := cleanupFailedConnection(e.intent); err != nil {
+						return err
+					}
+					delete(m.entries, key)
+					return nil
+				}
+				continue
+			}
+		}
 		blocked := err != nil
 		first := group[0].intent
 		var owner globalRequest
@@ -155,12 +246,16 @@ func (m *globalManager) recoverBatch(entries map[string]*shareEntry, owners func
 		}
 		for _, e := range group {
 			r := e.intent
-			if r.State != "mounted" || r.LinkIndex == 0 || r.MappingKey != first.MappingKey || r.MappingToken != first.MappingToken || r.MappingFingerprint != first.MappingFingerprint || r.Port != first.Port {
+			if (r.State != "mounted" && !(r.State == "pending" && r.LinkPhase != "")) || (r.LinkIndex == 0 && r.LinkPhase == "") || r.MappingKey != first.MappingKey || r.MappingToken != first.MappingToken || r.MappingFingerprint != first.MappingFingerprint || r.Port != first.Port {
 				blocked = true
 				continue
 			}
-			volume, index, linkErr := m.ops.linkIdentity(r.Path, r.Source)
-			if linkErr != nil || volume != r.LinkVolume || index != r.LinkIndex {
+			if r.LinkPhase == "" || r.State == "mounted" {
+				volume, index, linkErr := m.ops.linkIdentity(r.Path, r.Source)
+				if linkErr != nil || volume != r.LinkVolume || index != r.LinkIndex {
+					blocked = true
+				}
+			} else if r.StagePath != "" && !validStage(r) {
 				blocked = true
 			}
 			for _, other := range entries {

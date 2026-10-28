@@ -5,18 +5,13 @@ package main
 import (
 	"errors"
 	"strings"
-
-	"golang.org/x/sys/windows"
-	"golang.org/x/sys/windows/registry"
 )
 
-// listGlobalSMBOwnership exposes boot-scoped intent to the future coordinator.
-// An incomplete or tampered record is an error, never permission to remove.
+// Connection records are only candidates; verifyGlobalSMB must also verify the
+// current boot, logon session, phase and connected identity.
 func listGlobalSMBOwnership() ([]globalRequest, error) {
-	base, err := registry.OpenKey(registry.LOCAL_MACHINE, `SOFTWARE\hcsctl\GuestSMB`, registry.ENUMERATE_SUB_KEYS|registry.QUERY_VALUE)
-	if errors.Is(err, windows.ERROR_FILE_NOT_FOUND) {
-		return nil, nil
-	}
+	store := registryWNetStore{}
+	base, err := store.root()
 	if err != nil {
 		return nil, err
 	}
@@ -25,21 +20,23 @@ func listGlobalSMBOwnership() ([]globalRequest, error) {
 	if err != nil {
 		return nil, err
 	}
+	return filterGlobalSMBOwnership(names, store.get)
+}
+
+func filterGlobalSMBOwnership(names []string, get func(string) (wnetRecord, bool, error)) ([]globalRequest, error) {
 	result := make([]globalRequest, 0, len(names))
 	for _, name := range names {
-		k, e := registry.OpenKey(base, name, registry.QUERY_VALUE)
-		if e != nil {
-			return nil, e
+		rec, exists, err := get(name)
+		if err != nil {
+			return nil, err
 		}
-		token, _, e1 := k.GetStringValue("Token")
-		remote, _, e2 := k.GetStringValue("Remote")
-		user, _, e3 := k.GetStringValue("User")
-		port, _, e4 := k.GetIntegerValue("Port")
-		k.Close()
-		if e1 != nil || e2 != nil || e3 != nil || e4 != nil || len(name) != 64 || len(token) != 32 || remote == "" || user == "" || port > 65535 || strings.ContainsAny(name+token, `\/`) {
+		if !exists {
+			continue
+		}
+		if len(name) != 64 || len(rec.Owner.Token) != 32 || rec.Owner.Remote == "" || rec.Owner.User == "" || rec.Owner.Port > 65535 || strings.ContainsAny(name+rec.Owner.Token, `\/`) {
 			return nil, errors.New("incomplete global mapping ownership record")
 		}
-		result = append(result, globalRequest{Op: "remove", Key: name, Token: token, Remote: remote, User: user, Port: uint32(port)})
+		result = append(result, rec.Owner)
 	}
 	return result, nil
 }

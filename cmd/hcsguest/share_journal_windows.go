@@ -14,10 +14,26 @@ type registryShareJournal struct{}
 
 func newShareJournal() shareJournal { return registryShareJournal{} }
 
-// BootIdentity creation establishes this volatile parent in HKLM\HARDWARE.
+// The durable journal must not inherit read access for ordinary users: it
+// contains ownership tokens and credential-derived fingerprints.
 func (registryShareJournal) key(access uint32) (registry.Key, error) {
-	k, _, err := registry.CreateKey(registry.LOCAL_MACHINE, `HARDWARE\hcsctl\hcsguest`, access)
-	return k, err
+	k, _, err := registry.CreateKey(registry.LOCAL_MACHINE, `SOFTWARE\hcsctl\GuestShareJournal`, access|windows.WRITE_DAC)
+	if err != nil {
+		return 0, err
+	}
+	sd, err := windows.SecurityDescriptorFromString("D:P(A;;KA;;;SY)(A;;KA;;;BA)")
+	if err == nil {
+		var dacl *windows.ACL
+		dacl, _, err = sd.DACL()
+		if err == nil {
+			err = windows.SetSecurityInfo(windows.Handle(k), windows.SE_REGISTRY_KEY, windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, dacl, nil)
+		}
+	}
+	if err != nil {
+		k.Close()
+		return 0, err
+	}
+	return k, nil
 }
 func (j registryShareJournal) load() ([]shareIntent, error) {
 	k, err := j.key(registry.QUERY_VALUE)
@@ -48,5 +64,18 @@ func (j registryShareJournal) save(records []shareIntent) error {
 		return err
 	}
 	defer k.Close()
-	return k.SetBinaryValue("ShareJournal", b)
+	if err := k.SetBinaryValue("ShareJournal", b); err != nil {
+		return err
+	}
+	return flushShareJournal(k)
+}
+
+var regFlushKey = windows.NewLazySystemDLL("advapi32.dll").NewProc("RegFlushKey")
+
+func flushShareJournal(k registry.Key) error {
+	r, _, _ := regFlushKey.Call(uintptr(k))
+	if r != 0 {
+		return windows.Errno(r)
+	}
+	return nil
 }

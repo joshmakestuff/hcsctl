@@ -3,71 +3,17 @@
 package main
 
 import (
-	"bytes"
-	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
-	"path/filepath"
-
 	"encoding/json"
 	"errors"
-	"golang.org/x/sys/windows"
 	"os"
-	"os/exec"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/joshmakestuff/hcsctl/internal/guestproto"
 )
-
-// Fixed script: all data, including credentials, arrives only through stdin.
-const globalSMBScript = `$ErrorActionPreference = 'Stop'
-$mutex = $null; $locked = $false; $base = $null; $intent = $null
-try {
- $p = [Console]::In.ReadToEnd() | ConvertFrom-Json
- $port = [uint16]$p.port
- $mutex = [Threading.Mutex]::new($false, 'Global\hcsctl-guest-smb-mapping-v1')
- try { $locked = $mutex.WaitOne(35000) } catch [Threading.AbandonedMutexException] { $locked = $true }
- if (!$locked) { throw 'mutex timeout' }
- $base = [Microsoft.Win32.Registry]::LocalMachine.CreateSubKey('SOFTWARE\hcsctl\GuestSMB')
- $intent = $base.OpenSubKey($p.key, $true)
- $matches = @(Get-SmbGlobalMapping | Where-Object { $_.RemotePath -ieq $p.remote })
- if ($p.op -eq 'add') {
-  if ($intent -or $matches.Count -ne 0) { throw 'existing mapping or intent' }
-  $intent = $base.CreateSubKey($p.key, [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadWriteSubTree, [Microsoft.Win32.RegistryOptions]::Volatile)
-  $intent.SetValue('Token', [string]$p.token)
-  $intent.SetValue('Remote', [string]$p.remote)
-  $intent.SetValue('User', [string]$p.user)
-  $intent.SetValue('Port', [int]$port, [Microsoft.Win32.RegistryValueKind]::DWord)
-  $intent.Flush()
-  $secure = ConvertTo-SecureString -String $p.password -AsPlainText -Force
-  try {
-   $cred = [System.Management.Automation.PSCredential]::new($p.user, $secure)
-   $args = @{ RemotePath=$p.remote; Credential=$cred; Persistent=$false; ErrorAction='Stop'; TransportType='TCP' }
-   if ($port -ne 0) { $args.TcpPort = $port }
-   New-SmbGlobalMapping @args | Out-Null
-   $created = @(Get-SmbGlobalMapping | Where-Object { $_.RemotePath -ieq $p.remote })
-   if ($created.Count -ne 1 -or $created[0].LocalPath -or ($port -ne 0 -and [int]$created[0].TcpPort -ne [int]$port)) { throw 'created mapping mismatch' }
-  } finally { if ($secure) { $secure.Dispose() }; $cred=$null; $p.password=$null }
-  } elseif ($p.op -eq 'check') {
-   if (!$intent -or $intent.GetValue('Token') -cne $p.token -or $intent.GetValue('Remote') -ine $p.remote -or $intent.GetValue('User') -cne $p.user -or [int]$intent.GetValue('Port') -ne [int]$port) { throw 'intent mismatch' }
-   if ($matches.Count -ne 1 -or $matches[0].LocalPath -or ($port -ne 0 -and [int]$matches[0].TcpPort -ne [int]$port)) { throw 'mapping mismatch' }
-  } elseif ($p.op -eq 'remove') {
-  if (!$intent) { if ($matches.Count -ne 0) { throw 'unowned mapping' }; exit 0 }
-  if ($intent.GetValue('Token') -cne $p.token -or $intent.GetValue('Remote') -ine $p.remote -or $intent.GetValue('User') -cne $p.user -or [int]$intent.GetValue('Port') -ne [int]$port) { throw 'intent mismatch' }
-  if ($matches.Count -gt 1) { throw 'multiple mappings' }
-  if ($matches.Count -eq 1) {
-   $mapping = $matches[0]
-   if ($mapping.LocalPath -or ($port -ne 0 -and [int]$mapping.TcpPort -ne [int]$port)) { throw 'mapping mismatch' }
-   Remove-SmbGlobalMapping -InputObject $mapping -Confirm:$false -ErrorAction Stop
-  }
-  $intent.Close(); $intent = $null
-  $base.DeleteSubKey($p.key, $false)
- } else { throw 'invalid operation' }
-} catch { [Console]::Error.WriteLine('global mapping operation failed'); exit 1 }
-finally { if ($intent) { $intent.Close() }; if ($base) { $base.Close() }; if ($locked) { $mutex.ReleaseMutex() }; if ($mutex) { $mutex.Dispose() } }`
 
 type globalRequest struct {
 	Op       string `json:"op"`
@@ -85,6 +31,7 @@ type globalOps struct {
 	linkIdentity   func(string, string) (uint32, uint64, error)
 	removeIdentity func(string, string, uint32, uint64) error
 	verify         func(globalRequest) error
+	stage          func(*shareIntent, func() error) error
 }
 type globalEntry struct {
 	refs        int
@@ -99,41 +46,13 @@ type globalManager struct {
 	ops     globalOps
 }
 
-var globalSMB = globalManager{ops: globalOps{command: runGlobalSMB, link: os.Symlink, removeLink: removeOwnedLink, linkIdentity: ownedLinkIdentity, removeIdentity: removeIdentifiedLink, verify: verifyGlobalSMB}}
+var globalSMB = globalManager{ops: globalOps{command: runGlobalSMB, link: os.Symlink, removeLink: removeOwnedLink, linkIdentity: ownedLinkIdentity, removeIdentity: removeIdentifiedLink, verify: verifyGlobalSMB, stage: publishStagedLink}}
 
 func verifyGlobalSMB(owner globalRequest) error {
 	owner.Op = "check"
 	return runGlobalSMB(owner)
 }
 
-func runGlobalSMB(req globalRequest) error {
-	digest := sha256.Sum256([]byte(strings.ToLower(req.Remote)))
-	if req.Key != hex.EncodeToString(digest[:]) || len(req.Token) != 32 {
-		return errors.New("invalid global mapping ownership")
-	}
-	if _, err := hex.DecodeString(req.Token); err != nil {
-		return errors.New("invalid global mapping ownership")
-	}
-	data, err := json.Marshal(req)
-	if err != nil {
-		return errors.New("global mapping input failed")
-	}
-	defer clear(data)
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
-	defer cancel()
-	systemDir, err := windows.GetSystemDirectory()
-	if err != nil {
-		return errors.New("system directory unavailable")
-	}
-	cmd := exec.CommandContext(ctx, filepath.Join(systemDir, "WindowsPowerShell", "v1.0", "powershell.exe"), "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", globalSMBScript)
-	cmd.Stdin = bytes.NewReader(data)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	if err = cmd.Run(); err != nil || stderr.Len() != 0 {
-		return errors.New("global mapping command failed")
-	}
-	return nil
-}
 func removeOwnedLink(path, target string) error {
 	got, err := os.Readlink(path)
 	if err != nil {
@@ -152,7 +71,7 @@ func (m *globalManager) mountIntent(s *guestproto.Share, intent *shareIntent, pe
 	// Do not retain the request or its credentials in cleanup closures.
 	source, path := s.Source, s.Path
 	parts := strings.Split(strings.TrimPrefix(s.Source, `\\`), `\`)
-	if !strings.HasPrefix(s.Source, `\\`) || len(parts) != 2 || parts[0] == "" || parts[1] == "" || strings.ContainsAny(s.Source, "/\x00") || s.User == "" || s.Port > 65535 {
+	if !strings.HasPrefix(s.Source, `\\`) || len(parts) != 2 || parts[0] == "" || parts[1] == "" || strings.ContainsAny(s.Source, "/\x00") || s.User == "" || (s.Port != 0 && s.Port != 445) {
 		return nil, errors.New("invalid SMB mapping")
 	}
 	key := strings.ToLower(s.Source)
@@ -177,7 +96,13 @@ func (m *globalManager) mountIntent(s *guestproto.Share, intent *shareIntent, pe
 		e = nil
 	}
 	if e != nil && e.fingerprint != fingerprint {
-		return nil, errors.New("global mapping credentials conflict")
+		return nil, errShareConflict
+	}
+	if e != nil && m.ops.verify != nil {
+		if err := m.ops.verify(e.owner); err != nil {
+			e.blocked = true
+			return nil, errors.New("connection ownership uncertain")
+		}
 	}
 	created := e == nil
 	if created {
@@ -206,15 +131,34 @@ func (m *globalManager) mountIntent(s *guestproto.Share, intent *shareIntent, pe
 		if err := m.ops.command(add); err != nil {
 			if intent != nil {
 				e.blocked = true
+				return func() error {
+					m.mu.Lock()
+					defer m.mu.Unlock()
+					if err := cleanupFailedConnection(*intent); err != nil {
+						return err
+					}
+					delete(m.entries, key)
+					return nil
+				}, errors.New("connection creation failed; cleanup pending")
 			}
 			return nil, errors.New("global mapping creation failed; cleanup pending")
 		}
 		e.pending = false
 	}
-	if err := m.ops.link(s.Source, s.Path); err != nil {
+	var linkErr error
+	if intent != nil {
+		if m.ops.stage == nil {
+			linkErr = errors.New("staged link unavailable")
+		} else {
+			linkErr = m.ops.stage(intent, persist)
+		}
+	} else {
+		linkErr = m.ops.link(s.Source, s.Path)
+	}
+	if linkErr != nil {
 		if intent != nil {
 			e.blocked = true
-			return nil, errors.New("global mapping link creation uncertain")
+			return nil, errors.Join(errors.New("global mapping link creation uncertain"), linkErr)
 		}
 		if e.refs == 0 {
 			if m.ops.command(e.owner) != nil {
@@ -227,14 +171,6 @@ func (m *globalManager) mountIntent(s *guestproto.Share, intent *shareIntent, pe
 	}
 	e.refs++
 	cleanup := m.cleanup(key, e, path, source, intent)
-	if intent != nil {
-		volume, index, err := m.ops.linkIdentity(path, source)
-		if err != nil {
-			e.blocked = true
-			return cleanup, err
-		}
-		intent.LinkVolume, intent.LinkIndex = volume, index
-	}
 	return cleanup, nil
 }
 
@@ -249,10 +185,18 @@ func (m *globalManager) cleanup(key string, e *globalEntry, path, source string,
 		}
 		if linked {
 			if intent != nil {
-				if intent.LinkIndex == 0 || m.ops.verify(e.owner) != nil {
+				if m.ops.verify(e.owner) != nil {
 					return errors.New("global mapping ownership changed")
 				}
-				if err := m.ops.removeIdentity(path, source, intent.LinkVolume, intent.LinkIndex); err != nil {
+				var err error
+				if intent.LinkPhase != "" {
+					err = removeJournalLinks(*intent)
+				} else if intent.LinkIndex == 0 {
+					err = errors.New("link identity unavailable")
+				} else {
+					err = m.ops.removeIdentity(path, source, intent.LinkVolume, intent.LinkIndex)
+				}
+				if err != nil {
 					return errors.New("global mapping link removal failed")
 				}
 			} else if err := m.ops.removeLink(path, source); err != nil {
@@ -276,7 +220,7 @@ func (m *globalManager) cleanup(key string, e *globalEntry, path, source string,
 }
 
 // recoverGlobalSMBOwnership is the coordinator seam for an ownership record
-// recovered from the volatile registry; it never removes by UNC alone.
+// recovered from the durable registry; it never removes by UNC alone.
 func recoverGlobalSMBOwnership(owner globalRequest) error {
 	if owner.Key == "" || owner.Token == "" || owner.Remote == "" || owner.User == "" {
 		return errors.New("incomplete global mapping ownership")

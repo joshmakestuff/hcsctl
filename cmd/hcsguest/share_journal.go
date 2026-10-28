@@ -23,6 +23,10 @@ type shareIntent struct {
 	RelayPort          uint16   `json:"relayPort,omitempty"`
 	LinkVolume         uint32   `json:"linkVolume,omitempty"`
 	LinkIndex          uint64   `json:"linkIndex,omitempty"`
+	StagePath          string   `json:"stagePath,omitempty"`
+	StageVolume        uint32   `json:"stageVolume,omitempty"`
+	StageIndex         uint64   `json:"stageIndex,omitempty"`
+	LinkPhase          string   `json:"linkPhase,omitempty"`
 	MappingKey         string   `json:"mappingKey,omitempty"`
 	MappingToken       string   `json:"mappingToken,omitempty"`
 	MappingFingerprint [32]byte `json:"mappingFingerprint,omitempty"`

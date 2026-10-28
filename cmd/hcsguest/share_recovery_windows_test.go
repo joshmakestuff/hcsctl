@@ -13,6 +13,46 @@ import (
 	"github.com/joshmakestuff/hcsctl/internal/guestproto"
 )
 
+func TestPreviousBootRejectsUnownedPath(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "share")
+	r := shareIntent{Transport: "smb-tcp", Path: path, Source: `\\server\share`}
+	if err := recoverPreviousBootShare(r); err != nil {
+		t.Fatalf("missing link: %v", err)
+	}
+	if err := os.WriteFile(path, []byte("unowned"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := recoverPreviousBootShare(r); err == nil {
+		t.Fatal("accepted unowned path")
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("unowned path removed: %v", err)
+	}
+}
+
+func TestPreviousBootForgetsOnlyMatchingOwner(t *testing.T) {
+	oldGet, oldForget := previousBootOwner, forgetPreviousBootOwner
+	t.Cleanup(func() { previousBootOwner, forgetPreviousBootOwner = oldGet, oldForget })
+	r := shareIntent{BootID: "old", Transport: "smb-tcp", Path: filepath.Join(t.TempDir(), "absent"), Source: `\\server\share`, MappingKey: "key", MappingToken: "token", Port: 445}
+	owner := globalRequest{Key: "key", Token: "token", Remote: r.Source, User: "guest", Port: 445}
+	previousBootOwner = func(string) (wnetRecord, bool, error) { return wnetRecord{Boot: "old", Owner: owner}, true, nil }
+	calls := 0
+	forgetPreviousBootOwner = func(got globalRequest) error {
+		calls++
+		if got != owner {
+			t.Fatal("owner changed")
+		}
+		return nil
+	}
+	if err := recoverPreviousBootShare(r); err != nil || calls != 1 {
+		t.Fatalf("recovery: %v calls=%d", err, calls)
+	}
+	owner.Token = "replacement"
+	if err := recoverPreviousBootShare(r); err == nil || calls != 1 {
+		t.Fatal("forgot unowned record")
+	}
+}
+
 func TestRecoveredGlobalMappingReferences(t *testing.T) {
 	owner := globalRequest{Key: "key", Token: "token", Remote: `\\server\share`, User: "guest", Port: 445}
 	for _, tc := range []struct {
@@ -89,6 +129,7 @@ func TestSMBJournalRestartSharedCleanup(t *testing.T) {
 		},
 		link:           func(string, string) error { return nil },
 		linkIdentity:   func(string, string) (uint32, uint64, error) { return 10, 20, nil },
+		stage:          func(r *shareIntent, persist func() error) error { r.LinkVolume, r.LinkIndex = 10, 20; return persist() },
 		removeIdentity: func(string, string, uint32, uint64) error { return nil },
 		verify: func(r globalRequest) error {
 			if r.Token != owner.Token || r.Key != owner.Key {
@@ -106,7 +147,14 @@ func TestSMBJournalRestartSharedCleanup(t *testing.T) {
 			t.Fatalf("mount %s: %+v", id, r)
 		}
 	}
+	conflict := &guestproto.Share{ID: "different", Generation: 1, BootID: boot, Path: filepath.Join(t.TempDir(), "different"), Transport: "smb-tcp", Source: `\\server\share`, User: "private-user", Password: "wrong", Port: 445}
+	if r := m.mount(conflict); r.ErrorCode != "conflict" {
+		t.Fatalf("credential conflict: %+v", r)
+	}
 	for _, r := range j.records {
+		if r.ID == "different" && r.State == "absent" {
+			continue
+		}
 		if r.State != "mounted" || r.LinkIndex != 20 || r.MappingToken != owner.Token {
 			t.Fatalf("incomplete durable record: %+v", r)
 		}
@@ -127,6 +175,71 @@ func TestSMBJournalRestartSharedCleanup(t *testing.T) {
 		if !r.OK || removals != i {
 			t.Fatalf("unmount %s: %+v removals=%d", id, r, removals)
 		}
+	}
+}
+
+func TestFailedConnectionCleanup(t *testing.T) {
+	const boot = "12345678-1234-4123-8123-123456789abc"
+	oldGet, oldForget := previousBootOwner, forgetPreviousBootOwner
+	t.Cleanup(func() { previousBootOwner, forgetPreviousBootOwner = oldGet, oldForget })
+	var record wnetRecord
+	connected := true
+	previousBootOwner = func(string) (wnetRecord, bool, error) { return record, true, nil }
+	forgetPreviousBootOwner = func(owner globalRequest) error {
+		if owner != record.Owner || connected {
+			return errors.New("connection uncertain")
+		}
+		return nil
+	}
+	ops := globalOps{command: func(owner globalRequest) error {
+		owner.Password, owner.Op = "", "remove"
+		record = wnetRecord{Owner: owner, Boot: boot, Phase: "intent"}
+		return errors.New("add failed")
+	}}
+	j := &memoryShareJournal{}
+	backend := &globalManager{ops: ops}
+	m := shareManager{journal: j, bootID: func() (string, error) { return boot, nil }, mountIntent: backend.mountIntent}
+	s := &guestproto.Share{ID: "failed", Generation: 1, BootID: boot, Path: filepath.Join(t.TempDir(), "mount"), Transport: "smb-tcp", Source: `\\server\share`, User: "user", Password: "bad"}
+	if r := m.mount(s); r.ErrorCode != "mount_failed" {
+		t.Fatalf("mount: %+v", r)
+	}
+	ref := &guestproto.ShareRef{ID: s.ID, Generation: s.Generation, BootID: boot}
+	if r := m.unmount(ref); r.OK {
+		t.Fatal("removed uncertain connected intent")
+	}
+	connected = false
+	if r := m.unmount(ref); !r.OK || r.State != "absent" {
+		t.Fatalf("unmount: %+v", r)
+	}
+}
+
+func TestRecoveredFailedConnectionCleanup(t *testing.T) {
+	const boot = "12345678-1234-4123-8123-123456789abc"
+	oldGet, oldForget := previousBootOwner, forgetPreviousBootOwner
+	t.Cleanup(func() { previousBootOwner, forgetPreviousBootOwner = oldGet, oldForget })
+	owner := globalRequest{Key: "key", Token: "token", Remote: `\\server\share`, User: "user"}
+	record := wnetRecord{Owner: owner, Boot: boot, Phase: "intent"}
+	previousBootOwner = func(string) (wnetRecord, bool, error) { return record, true, nil }
+	connected := true
+	forgetPreviousBootOwner = func(globalRequest) error {
+		if connected {
+			return errors.New("uncertain")
+		}
+		return nil
+	}
+	r := shareIntent{BootID: boot, ID: "failed", Generation: 1, Path: filepath.Join(t.TempDir(), "mount"), Source: owner.Remote, Transport: "smb-tcp", State: "pending", MappingKey: owner.Key, MappingToken: owner.Token}
+	j := &memoryShareJournal{records: []shareIntent{r}}
+	backend := &globalManager{}
+	m := shareManager{journal: j, bootID: func() (string, error) { return boot, nil }, recoverBatch: func(e map[string]*shareEntry) {
+		backend.recoverBatch(e, func() ([]globalRequest, error) { return []globalRequest{owner}, nil })
+	}}
+	ref := &guestproto.ShareRef{ID: r.ID, Generation: 1, BootID: boot}
+	if result := m.unmount(ref); result.OK {
+		t.Fatal("removed uncertain connection")
+	}
+	connected = false
+	if result := m.unmount(ref); !result.OK || result.State != "absent" {
+		t.Fatalf("cleanup: %+v", result)
 	}
 }
 

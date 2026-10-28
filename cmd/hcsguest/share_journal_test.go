@@ -71,6 +71,42 @@ func TestShareIntentRestart(t *testing.T) {
 	}
 }
 
+func TestPreviousBootReconciliation(t *testing.T) {
+	const oldBoot = "12345678-1234-4123-8123-123456789abc"
+	const boot = "abcdefab-1234-4123-8123-123456789abc"
+	for _, fail := range []bool{false, true} {
+		t.Run(map[bool]string{false: "cleaned", true: "unowned"}[fail], func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "mount")
+			j := &memoryShareJournal{records: []shareIntent{{BootID: oldBoot, ID: "share", Generation: 1, Path: path, Source: "source", Transport: "smb-tcp", State: "mounted"}}}
+			called := 0
+			m := shareManager{journal: j, bootID: func() (string, error) { return boot, nil }, recoverPreviousBoot: func(r shareIntent) error {
+				called++
+				if fail {
+					return errors.New("unowned")
+				}
+				return nil
+			}, recoverBatch: func(entries map[string]*shareEntry) {
+				if len(entries) != 0 {
+					t.Fatal("old mapping passed to current boot recovery")
+				}
+			}}
+			if err := m.recoverAtStartup(); err != nil {
+				t.Fatal(err)
+			}
+			if called != 1 {
+				t.Fatalf("cleanup calls = %d", called)
+			}
+			if fail {
+				if len(j.records) != 1 || m.entries["share"] == nil {
+					t.Fatal("unowned intent discarded")
+				}
+			} else if len(j.records) != 0 || len(m.entries) != 0 {
+				t.Fatal("cleaned intent retained")
+			}
+		})
+	}
+}
+
 func TestShareIntentWriteFailureBlocksMount(t *testing.T) {
 	j := &memoryShareJournal{}
 	called := false
