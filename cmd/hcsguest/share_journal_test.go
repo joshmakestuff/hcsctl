@@ -121,6 +121,22 @@ func TestShareIntentWriteFailureBlocksMount(t *testing.T) {
 	}
 }
 
+func TestShareDefiniteMountFailureReleasesPath(t *testing.T) {
+	const boot = "12345678-1234-4123-8123-123456789abc"
+	j := &memoryShareJournal{}
+	m := shareManager{journal: j, bootID: func() (string, error) { return boot, nil }, mountIntent: func(*guestproto.Share, *shareIntent, func() error) (func() error, error) {
+		return nil, errors.Join(errShareNoEffect, errors.New("denied"))
+	}}
+	s := &guestproto.Share{ID: "share", Generation: 1, BootID: boot, Path: filepath.Join(t.TempDir(), "mount"), Transport: "virtiofs", Source: "tag"}
+	if r := m.mount(s); r.ErrorCode != "mount_failed" || len(j.records) != 1 || j.records[0].State != "absent" {
+		t.Fatalf("failure: %+v journal=%+v", r, j.records)
+	}
+	s.Generation++
+	if r := m.mount(s); r.ErrorCode != "mount_failed" {
+		t.Fatalf("retry blocked: %+v", r)
+	}
+}
+
 func TestStartupRecoveryUsesLocalBootIdentity(t *testing.T) {
 	const boot = "12345678-1234-4123-8123-123456789abc"
 	recovered := false
@@ -163,5 +179,47 @@ func TestUnmountRetriesFinalJournalWrite(t *testing.T) {
 	restarted := shareManager{journal: j, bootID: m.bootID}
 	if r := restarted.status(ref); !r.OK || r.State != "absent" {
 		t.Fatalf("reloaded: %+v", r)
+	}
+}
+
+func TestVirtioFSInterruptedBoundaries(t *testing.T) {
+	const boot = "12345678-1234-4123-8123-123456789abc"
+	for _, boundary := range []string{"mount-before-journal", "unmount-before-journal"} {
+		t.Run(boundary, func(t *testing.T) {
+			j := &memoryShareJournal{}
+			mounts, unmounts := 0, 0
+			m := shareManager{journal: j, bootID: func() (string, error) { return boot, nil }}
+			m.backend = func(*guestproto.Share) (func() error, error) {
+				mounts++
+				if boundary == "mount-before-journal" {
+					j.fail = true
+				}
+				return func() error { unmounts++; j.fail = true; return nil }, nil
+			}
+			m.capture = func(r *shareIntent) error { r.MountID = 42; return nil }
+			s := &guestproto.Share{ID: "share", Generation: 3, BootID: boot, Path: filepath.Join(t.TempDir(), "share"), Transport: "virtiofs", Source: "tag", ReadOnly: true}
+			ref := &guestproto.ShareRef{ID: s.ID, Generation: s.Generation, BootID: boot}
+			r := m.mount(s)
+			if boundary == "unmount-before-journal" {
+				if !r.OK {
+					t.Fatalf("mount: %+v", r)
+				}
+				r = m.unmount(ref)
+			}
+			if r.ErrorCode != "recovery_required" || mounts != 1 || len(j.records) != 1 || j.records[0].State != "pending" {
+				t.Fatalf("boundary: %+v records=%+v", r, j.records)
+			}
+			j.fail = false
+			restarted := shareManager{journal: j, bootID: m.bootID, recover: recoverShareIntent}
+			if err := restarted.recoverAtStartup(); err != nil {
+				t.Fatal(err)
+			}
+			if r := restarted.unmount(ref); r.ErrorCode != "recovery_required" {
+				t.Fatalf("uncertain ownership adopted: %+v", r)
+			}
+			if boundary == "mount-before-journal" && unmounts != 0 || boundary == "unmount-before-journal" && unmounts != 1 {
+				t.Fatalf("unexpected cleanup: %d", unmounts)
+			}
+		})
 	}
 }

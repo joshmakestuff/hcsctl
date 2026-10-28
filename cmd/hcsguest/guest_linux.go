@@ -15,6 +15,7 @@ import (
 
 	"github.com/joshmakestuff/hcsctl/internal/guestproto"
 	"github.com/mdlayher/vsock"
+	"golang.org/x/sys/unix"
 )
 
 // listen binds AF_VSOCK. A Linux guest has no service GUID: the host maps a VSOCK port into
@@ -117,7 +118,51 @@ func gatherInfo() (guestproto.Info, error) {
 		BootTimeUTC:   time.Now().UTC().Add(-uptime),
 		UptimeSeconds: int64(uptime.Seconds()),
 		Addresses:     addrs,
+		Capabilities:  linuxCapabilities(os.ReadFile, probeVirtioFSManaged),
 	}, nil
+}
+
+func linuxCapabilities(read func(string) ([]byte, error), probe func() bool) *guestproto.Capabilities {
+	c := &guestproto.Capabilities{Version: 1}
+	if b, err := read("/proc/filesystems"); err == nil {
+		for _, line := range strings.Split(string(b), "\n") {
+			fields := strings.Fields(line)
+			if len(fields) > 0 && fields[len(fields)-1] == "virtiofs" {
+				c.VirtioFS = true
+			}
+		}
+	}
+	if c.VirtioFS {
+		c.VirtioFSManaged = probe()
+	}
+	base, e1 := read("/sys/bus/vmbus/drivers/hv_pci/swiotlb_base")
+	size, e2 := read("/sys/bus/vmbus/drivers/hv_pci/swiotlb_size")
+	if e1 == nil && e2 == nil {
+		b, e1 := strconv.ParseUint(strings.TrimSpace(string(base)), 0, 64)
+		s, e2 := strconv.ParseUint(strings.TrimSpace(string(size)), 0, 64)
+		if e1 == nil && e2 == nil {
+			c.HvPciSwiotlb = &guestproto.SwiotlbPool{Base: b, Size: s}
+		}
+	}
+	return c
+}
+
+// This probes prerequisites only; it does not create or attach a mount and
+// cannot guarantee later fsconfig, fsmount or move_mount authorization.
+func probeVirtioFSManaged() bool {
+	root, err := unix.Open("/", unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return false
+	}
+	defer unix.Close(root)
+	if _, err := uniqueMountID(root); err != nil {
+		return false
+	}
+	fd, err := fsOpen("virtiofs", unix.FSOPEN_CLOEXEC)
+	if err != nil {
+		return false
+	}
+	return unix.Close(fd) == nil
 }
 
 // readUptime reads /proc/uptime, which does not depend on the guest's clock; a freshly booted

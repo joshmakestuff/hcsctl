@@ -190,14 +190,28 @@ type Info struct {
 	AgentVersion string `json:"agentVersion"`
 	// AgentCommit is the hcsctl commit the agent was built from: which agent a guest is
 	// actually running.
-	AgentCommit   string    `json:"agentCommit"`
-	OS            string    `json:"os"`
-	OSVersion     string    `json:"osVersion"`
-	Hostname      string    `json:"hostname"`
-	BootID        string    `json:"bootId"`
-	BootTimeUTC   time.Time `json:"bootTimeUtc"`
-	UptimeSeconds int64     `json:"uptimeSeconds"`
-	Addresses     []Address `json:"addresses"`
+	AgentCommit   string        `json:"agentCommit"`
+	OS            string        `json:"os"`
+	OSVersion     string        `json:"osVersion"`
+	Hostname      string        `json:"hostname"`
+	BootID        string        `json:"bootId"`
+	BootTimeUTC   time.Time     `json:"bootTimeUtc"`
+	UptimeSeconds int64         `json:"uptimeSeconds"`
+	Addresses     []Address     `json:"addresses"`
+	Capabilities  *Capabilities `json:"capabilities,omitempty"`
+}
+
+// Capabilities is a versioned extension; a missing extension is not support.
+type Capabilities struct {
+	Version         int          `json:"version"`
+	VirtioFS        bool         `json:"virtiofs"`
+	VirtioFSManaged bool         `json:"virtiofsManaged"`
+	HvPciSwiotlb    *SwiotlbPool `json:"hvPciSwiotlb,omitempty"`
+}
+
+type SwiotlbPool struct {
+	Base uint64 `json:"base"`
+	Size uint64 `json:"size"`
 }
 
 // Failure is what the agent returns instead of a verb's document. It carries ok:false so a

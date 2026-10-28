@@ -17,6 +17,28 @@ curl -fsSL https://raw.githubusercontent.com/joshmakestuff/hcsctl/v0.7.0/install
 
 ## Notes
 
+### Managed VirtioFS with hcsd
+
+Use an agent build with `virtiofsManaged` capability support; the older pinned
+release examples above do not supply it. The Linux guest needs VirtioFS and
+Hyper-V PCI support, root mount privileges, and the detached-mount APIs used by
+the agent (`fsopen`, `fsmount`, and `move_mount`), plus `statx` unique mount IDs
+(`STATX_MNT_ID_UNIQUE`). Load the required kernel modules before starting the agent.
+
+The kernel must expose a nonzero Hyper-V PCI SWIOTLB allocation through
+`/sys/bus/vmbus/drivers/hv_pci/swiotlb_base` and `swiotlb_size`. Where required,
+add `hv_pci_swiotlb=67108864` to the guest boot command line. The parameter alone
+does not establish that an allocation succeeded.
+
+Prepare mount targets beneath trusted, root-owned directories on every boot.
+The agent journals boot-scoped ownership in `/run/hcsguest`; it does not persist
+mount requests across guest boots. hcsd retains the requested mount intent and
+restores it when the targets exist. Restarting hcsd requires a VM stop/start to
+restore VirtioFS sharing; restarting only the guest agent cannot restore the
+host backend. Pause/resume is supported; saving a VM with VirtioFS exports is not.
+
+### Installation versions and downloads
+
 - **Pin the version.** Substitute `v0.7.0` with the tag you are pinning. It must be a release
   that ships the guest binaries (`hcsguest-windows-amd64.exe`, `hcsguest-linux-amd64`,
   `SHA256SUMS`). Use the same tag as the host `hcsctl`: the guest agent and

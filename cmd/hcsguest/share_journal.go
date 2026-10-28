@@ -20,6 +20,11 @@ type shareIntent struct {
 	UID                int      `json:"uid"`
 	GID                int      `json:"gid"`
 	MountID            uint64   `json:"mountId,omitempty"`
+	MountUniqueID      uint64   `json:"mountUniqueId,omitempty"`
+	TargetDevice       uint64   `json:"targetDevice,omitempty"`
+	TargetInode        uint64   `json:"targetInode,omitempty"`
+	TargetMountID      uint64   `json:"targetMountId,omitempty"`
+	MountPhase         string   `json:"mountPhase,omitempty"`
 	RelayPort          uint16   `json:"relayPort,omitempty"`
 	LinkVolume         uint32   `json:"linkVolume,omitempty"`
 	LinkIndex          uint64   `json:"linkIndex,omitempty"`
@@ -40,7 +45,11 @@ type shareJournal interface {
 }
 
 func newShareIntent(s *guestproto.Share, bootID string, fingerprint [32]byte) shareIntent {
-	return shareIntent{BootID: bootID, ID: s.ID, Generation: s.Generation, Path: s.Path, Source: s.Source, Transport: s.Transport, ReadOnly: s.ReadOnly, Port: s.Port, UID: s.UID, GID: s.GID, Fingerprint: fingerprint, State: "pending"}
+	r := shareIntent{BootID: bootID, ID: s.ID, Generation: s.Generation, Path: s.Path, Source: s.Source, Transport: s.Transport, ReadOnly: s.ReadOnly, Port: s.Port, UID: s.UID, GID: s.GID, Fingerprint: fingerprint, State: "pending"}
+	if s.Transport == "virtiofs" {
+		r.MountPhase = "preparing"
+	}
+	return r
 }
 
 func (r shareIntent) valid() bool {

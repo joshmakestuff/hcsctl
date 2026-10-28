@@ -29,6 +29,49 @@ var shareMountID = mountID
 var shareTrustedDirectory = trustedShareDirectory
 var shareUnprivilegedPortStart = readUnprivilegedPortStart
 var shareRelayListen = net.Listen
+var shareVirtioFSDiscovery = waitVirtioFSTag
+
+// Newer kernels publish probed virtiofs instances here. Older kernels do not;
+// absence of the interface is unknown, not evidence that the tag is absent.
+func virtioFSTagPresent(dir, tag string) (bool, bool, error) {
+	entries, err := os.ReadDir(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, false, nil
+	}
+	if err != nil {
+		return false, false, err
+	}
+	for _, entry := range entries {
+		data, err := os.ReadFile(filepath.Join(dir, entry.Name(), "tag"))
+		if errors.Is(err, os.ErrNotExist) {
+			continue // Device disappeared during enumeration.
+		}
+		if err != nil {
+			return false, true, err
+		}
+		if strings.TrimSuffix(string(data), "\n") == tag {
+			return true, true, nil
+		}
+	}
+	return false, true, nil
+}
+
+func waitVirtioFSTag(tag string) error {
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		present, known, err := virtioFSTagPresent("/sys/fs/virtiofs", tag)
+		if err != nil {
+			return fmt.Errorf("virtiofs discovery: %w", err)
+		}
+		if present || !known {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("%w: virtiofs tag not discovered", errShareTransportUnavailable)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
 
 func trustedShareDirectory(fd int) error {
 	var st unix.Stat_t
@@ -131,7 +174,16 @@ func mountManagedShare(s *guestproto.Share) (func() error, error) {
 	return mountManagedShareIntent(s, nil, nil)
 }
 
-func mountManagedShareIntent(s *guestproto.Share, intent *shareIntent, persist func() error) (func() error, error) {
+func mountManagedShareIntent(s *guestproto.Share, intent *shareIntent, persist func() error) (cleanup func() error, resultErr error) {
+	if s != nil && s.Transport == "virtiofs" {
+		defer func() {
+			// A successful move followed by failed verification returns a journal
+			// error; every other error leaves no attached mount.
+			if resultErr != nil && !errors.Is(resultErr, errShareJournal) {
+				resultErr = errors.Join(errShareNoEffect, resultErr)
+			}
+		}()
+	}
 	if s == nil || s.UID < 0 || s.GID < 0 {
 		return nil, errors.New("invalid share")
 	}
@@ -165,6 +217,18 @@ func mountManagedShareIntent(s *guestproto.Share, intent *shareIntent, persist f
 	oldID, err := shareMountID(int(target.Fd()))
 	if err != nil {
 		return nil, err
+	}
+	if s.Transport == "virtiofs" {
+		if !validShareID(s.Source) || s.Port != 0 || s.UID != 0 || s.GID != 0 || s.User != "" || s.Password != "" {
+			return nil, errors.New("invalid virtiofs share")
+		}
+		if intent == nil || persist == nil {
+			return nil, fmt.Errorf("%w: virtiofs journal required", errSharePrerequisiteMissing)
+		}
+		if err := shareVirtioFSDiscovery(s.Source); err != nil {
+			return nil, err
+		}
+		return mountVirtioFSDetached(s, intent, persist, int(target.Fd()), original, oldID)
 	}
 	// Mount through the verified directory descriptor rather than re-resolving
 	// an attacker-controlled pathname during the mount syscall.
@@ -219,7 +283,8 @@ func mountManagedShareIntent(s *guestproto.Share, intent *shareIntent, persist f
 	default:
 		return nil, errShareNotImplemented
 	}
-	if err = shareMount(source, mountPath, fs, flags, data); err != nil {
+	err = shareMount(source, mountPath, fs, flags, data)
+	if err != nil {
 		if relay != nil {
 			relay.close()
 		}

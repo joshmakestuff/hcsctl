@@ -23,6 +23,7 @@ var errShareTransportUnavailable = errors.New("share transport unavailable")
 var errShareBusy = errors.New("managed share is busy")
 var errShareJournal = errors.New("share journal unavailable")
 var errShareConflict = errors.New("share conflict before effects")
+var errShareNoEffect = errors.New("share operation had no mount effect")
 var errBootMismatch = errors.New("boot identity mismatch")
 
 type shareEntry struct {
@@ -118,6 +119,9 @@ func (m *shareManager) prepare(expected string) error {
 			}
 		}
 		m.recoverBatch(current)
+		if m.persist() != nil {
+			return errShareJournal
+		}
 	} else if m.recover != nil {
 		for _, e := range m.entries {
 			if e.intent.BootID == id && e.intent.State != "absent" {
@@ -266,13 +270,16 @@ func (m *shareManager) mount(s *guestproto.Share) guestproto.ShareResult {
 	case errors.Is(err, errShareTransportUnavailable):
 		code = "transport_unavailable"
 	}
-	if code != "" && cleanup == nil {
+	if cleanup == nil && (code != "" || errors.Is(err, errShareNoEffect)) {
 		e.intent.State = "absent"
 		if err := m.persist(); err != nil {
 			e.intent.State = "pending"
 			return pending
 		}
 		e.result = m.result(s.ID, s.Generation, "")
+		if code == "" {
+			code = "mount_failed"
+		}
 		return m.result(s.ID, s.Generation, code)
 	}
 	if err != nil || cleanup == nil {
@@ -359,6 +366,9 @@ func (m *shareManager) unmount(ref *guestproto.ShareRef) guestproto.ShareResult 
 	// Once teardown starts, a later reused kernel mount ID must not authorize
 	// cleanup after a crash between unmount and the final journal update.
 	e.intent.State = "pending"
+	if e.intent.Transport == "virtiofs" && e.intent.MountUniqueID != 0 {
+		e.intent.MountPhase = "detaching"
+	}
 	if err := m.persist(); err != nil {
 		r.OK, r.ErrorCode, r.State = false, "recovery_required", "recovery_required"
 		return r
