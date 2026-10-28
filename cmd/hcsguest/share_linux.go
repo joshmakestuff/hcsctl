@@ -28,6 +28,7 @@ var shareRelayDial = dialRelayVSock
 var shareMountID = mountID
 var shareTrustedDirectory = trustedShareDirectory
 var shareUnprivilegedPortStart = readUnprivilegedPortStart
+var shareRelayListen = net.Listen
 
 func trustedShareDirectory(fd int) error {
 	var st unix.Stat_t
@@ -348,6 +349,11 @@ func newShareRelay(port uint32) (*shareRelay, error) {
 		if err == nil {
 			return r, nil
 		}
+		if !errors.Is(err, unix.EADDRINUSE) {
+			// Permission and other setup failures must not become availability
+			// errors that authorize switching to a different transport.
+			return nil, err
+		}
 	}
 	return nil, fmt.Errorf("%w: protected relay ports unavailable", errSharePrerequisiteMissing)
 }
@@ -367,7 +373,7 @@ func readUnprivilegedPortStart() (uint32, error) {
 	return uint32(n), err
 }
 func listenShareRelay(port uint32, localPort uint16) (*shareRelay, error) {
-	l, err := net.Listen("tcp4", net.JoinHostPort("127.0.0.1", strconv.Itoa(int(localPort))))
+	l, err := shareRelayListen("tcp4", net.JoinHostPort("127.0.0.1", strconv.Itoa(int(localPort))))
 	if err != nil {
 		return nil, err
 	}

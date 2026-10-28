@@ -38,6 +38,21 @@ func fakeMountIdentity(t *testing.T) {
 	}
 }
 
+func TestShareRelayPermissionFailureIsNotAvailability(t *testing.T) {
+	oldStart, oldListen := shareUnprivilegedPortStart, shareRelayListen
+	t.Cleanup(func() { shareUnprivilegedPortStart, shareRelayListen = oldStart, oldListen })
+	shareUnprivilegedPortStart = func() (uint32, error) { return 1024, nil }
+	calls := 0
+	shareRelayListen = func(string, string) (net.Listener, error) {
+		calls++
+		return nil, &net.OpError{Op: "listen", Err: unix.EACCES}
+	}
+	_, err := newShareRelay(1234)
+	if calls != 1 || !errors.Is(err, unix.EACCES) || errors.Is(err, errSharePrerequisiteMissing) || errors.Is(err, errShareTransportUnavailable) {
+		t.Fatalf("permission failure changed transport eligibility: calls=%d error=%v", calls, err)
+	}
+}
+
 func TestLinuxShareMount(t *testing.T) {
 	fakeMountIdentity(t)
 	oldMount, oldUnmount, oldDial := shareMount, shareUnmount, shareDial
