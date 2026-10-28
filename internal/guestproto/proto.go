@@ -47,8 +47,47 @@ type Request struct {
 	NetConfig *NetConfig `json:"netConfig,omitempty"`
 
 	// Mount is the mount verb's payload; Unmount is the unmount verb's.
-	Mount   *Mount   `json:"mount,omitempty"`
-	Unmount *Unmount `json:"unmount,omitempty"`
+	Mount    *Mount    `json:"mount,omitempty"`
+	Unmount  *Unmount  `json:"unmount,omitempty"`
+	Share    *Share    `json:"share,omitempty"`
+	ShareRef *ShareRef `json:"shareRef,omitempty"`
+}
+
+// Share describes a managed guest share. Credentials are request-only and must
+// not be returned in results or persisted by the manager.
+type Share struct {
+	ID         string `json:"id"`
+	Generation uint64 `json:"generation"`
+	BootID     string `json:"bootId"`
+	Transport  string `json:"transport"`
+	Source     string `json:"source"`
+	Path       string `json:"path"`
+	ReadOnly   bool   `json:"readOnly"`
+	User       string `json:"user,omitempty"`
+	Password   string `json:"password,omitempty"`
+	Port       uint32 `json:"port,omitempty"`
+	UID        int    `json:"uid,omitempty"`
+	GID        int    `json:"gid,omitempty"`
+}
+
+type ShareRef struct {
+	ID         string `json:"id"`
+	Generation uint64 `json:"generation"`
+	BootID     string `json:"bootId"`
+}
+
+type ShareResult struct {
+	OK          bool      `json:"ok"`
+	Protocol    int       `json:"protocol"`
+	ID          string    `json:"id"`
+	Generation  uint64    `json:"generation"`
+	Transport   string    `json:"transport,omitempty"`
+	Path        string    `json:"path,omitempty"`
+	ReadOnly    bool      `json:"readOnly"`
+	State       string    `json:"state"`
+	BootID      string    `json:"bootId"`
+	BootTimeUTC time.Time `json:"bootTimeUtc"`
+	ErrorCode   string    `json:"errorCode,omitempty"`
 }
 
 // Mount asks the agent to attach an SMB share at Path inside the guest. The host reaches its
@@ -151,13 +190,28 @@ type Info struct {
 	AgentVersion string `json:"agentVersion"`
 	// AgentCommit is the hcsctl commit the agent was built from: which agent a guest is
 	// actually running.
-	AgentCommit   string    `json:"agentCommit"`
-	OS            string    `json:"os"`
-	OSVersion     string    `json:"osVersion"`
-	Hostname      string    `json:"hostname"`
-	BootTimeUTC   time.Time `json:"bootTimeUtc"`
-	UptimeSeconds int64     `json:"uptimeSeconds"`
-	Addresses     []Address `json:"addresses"`
+	AgentCommit   string        `json:"agentCommit"`
+	OS            string        `json:"os"`
+	OSVersion     string        `json:"osVersion"`
+	Hostname      string        `json:"hostname"`
+	BootID        string        `json:"bootId"`
+	BootTimeUTC   time.Time     `json:"bootTimeUtc"`
+	UptimeSeconds int64         `json:"uptimeSeconds"`
+	Addresses     []Address     `json:"addresses"`
+	Capabilities  *Capabilities `json:"capabilities,omitempty"`
+}
+
+// Capabilities is a versioned extension; a missing extension is not support.
+type Capabilities struct {
+	Version         int          `json:"version"`
+	VirtioFS        bool         `json:"virtiofs"`
+	VirtioFSManaged bool         `json:"virtiofsManaged"`
+	HvPciSwiotlb    *SwiotlbPool `json:"hvPciSwiotlb,omitempty"`
+}
+
+type SwiotlbPool struct {
+	Base uint64 `json:"base"`
+	Size uint64 `json:"size"`
 }
 
 // Failure is what the agent returns instead of a verb's document. It carries ok:false so a

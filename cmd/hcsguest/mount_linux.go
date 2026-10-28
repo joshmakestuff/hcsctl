@@ -41,16 +41,12 @@ func applyMount(m *guestproto.Mount) (guestproto.MountResult, error) {
 	}, nil
 }
 
-// applyUnmount detaches the mount. A lazy detach handles a mount still busy: the mount point
-// leaves the namespace at once and the filesystem is released when the last user lets go.
+// applyUnmount leaves busy mounts in place so the caller can retry after users release them.
 func applyUnmount(u *guestproto.Unmount) (guestproto.UnmountResult, error) {
 	if err := validateUnmount(u); err != nil {
 		return guestproto.UnmountResult{}, err
 	}
 	err := unix.Unmount(u.Path, 0)
-	if err == unix.EBUSY {
-		err = unix.Unmount(u.Path, unix.MNT_DETACH)
-	}
 	if err != nil {
 		return guestproto.UnmountResult{}, fmt.Errorf("unmount %s: %w", u.Path, err)
 	}

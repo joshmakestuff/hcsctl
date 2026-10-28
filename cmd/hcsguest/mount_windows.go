@@ -48,6 +48,11 @@ func applyMount(m *guestproto.Mount) (guestproto.MountResult, error) {
 	if err := validateMount(m); err != nil {
 		return guestproto.MountResult{}, err
 	}
+	// WNet and a symlink do not enforce read-only access. The server must enforce
+	// that policy; this legacy request cannot verify it.
+	if m.ReadOnly {
+		return guestproto.MountResult{}, fmt.Errorf("read-only SMB mapping is not supported by the guest")
+	}
 	if !filepath.IsAbs(m.Path) {
 		return guestproto.MountResult{}, fmt.Errorf("guest path %q must be absolute", m.Path)
 	}

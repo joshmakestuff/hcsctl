@@ -1,0 +1,225 @@
+package main
+
+import (
+	"encoding/json"
+	"errors"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/joshmakestuff/hcsctl/internal/guestproto"
+)
+
+type memoryShareJournal struct {
+	records []shareIntent
+	fail    bool
+}
+
+func (j *memoryShareJournal) load() ([]shareIntent, error) {
+	if j.fail {
+		return nil, errors.New("failed")
+	}
+	return append([]shareIntent(nil), j.records...), nil
+}
+func (j *memoryShareJournal) save(r []shareIntent) error {
+	if j.fail {
+		return errors.New("failed")
+	}
+	j.records = append([]shareIntent(nil), r...)
+	return nil
+}
+
+func TestShareIntentRestart(t *testing.T) {
+	const boot = "12345678-1234-4123-8123-123456789abc"
+	j := &memoryShareJournal{}
+	called := false
+	m := shareManager{journal: j, bootID: func() (string, error) { return boot, nil }, backend: func(s *guestproto.Share) (func() error, error) {
+		called = true
+		if len(j.records) != 1 || j.records[0].State != "pending" {
+			t.Fatal("intent not saved before mount")
+		}
+		return func() error { return nil }, nil
+	}}
+	s := &guestproto.Share{ID: "share", Generation: 1, BootID: boot, Path: filepath.Join(t.TempDir(), "mount"), Transport: "smb-tcp", Source: "source", User: "secret-user", Password: "secret-password"}
+	if r := m.mount(s); !r.OK || !called {
+		t.Fatalf("mount: %+v", r)
+	}
+	b, err := json.Marshal(j.records)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), s.User) || strings.Contains(string(b), s.Password) {
+		t.Fatalf("credentials in journal: %s", b)
+	}
+	restarted := shareManager{journal: j, bootID: m.bootID}
+	ref := &guestproto.ShareRef{ID: s.ID, Generation: s.Generation, BootID: boot}
+	if r := restarted.status(ref); r.OK || r.ErrorCode != "recovery_required" || r.State != "recovery_required" {
+		t.Fatalf("restart: %+v", r)
+	}
+	if r := restarted.unmount(ref); r.OK || r.ErrorCode != "recovery_required" {
+		t.Fatalf("unverified cleanup: %+v", r)
+	}
+	j.records[0].State = "pending"
+	restarted = shareManager{journal: j, bootID: m.bootID}
+	if r := restarted.status(ref); r.OK || r.ErrorCode != "recovery_required" {
+		t.Fatalf("pending: %+v", r)
+	}
+	restarted = shareManager{journal: j, bootID: func() (string, error) { return "abcdefab-1234-4123-8123-123456789abc", nil }}
+	ref.BootID = "abcdefab-1234-4123-8123-123456789abc"
+	if r := restarted.status(ref); r.ErrorCode != "not_found" {
+		t.Fatalf("wrong boot: %+v", r)
+	}
+}
+
+func TestPreviousBootReconciliation(t *testing.T) {
+	const oldBoot = "12345678-1234-4123-8123-123456789abc"
+	const boot = "abcdefab-1234-4123-8123-123456789abc"
+	for _, fail := range []bool{false, true} {
+		t.Run(map[bool]string{false: "cleaned", true: "unowned"}[fail], func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "mount")
+			j := &memoryShareJournal{records: []shareIntent{{BootID: oldBoot, ID: "share", Generation: 1, Path: path, Source: "source", Transport: "smb-tcp", State: "mounted"}}}
+			called := 0
+			m := shareManager{journal: j, bootID: func() (string, error) { return boot, nil }, recoverPreviousBoot: func(r shareIntent) error {
+				called++
+				if fail {
+					return errors.New("unowned")
+				}
+				return nil
+			}, recoverBatch: func(entries map[string]*shareEntry) {
+				if len(entries) != 0 {
+					t.Fatal("old mapping passed to current boot recovery")
+				}
+			}}
+			if err := m.recoverAtStartup(); err != nil {
+				t.Fatal(err)
+			}
+			if called != 1 {
+				t.Fatalf("cleanup calls = %d", called)
+			}
+			if fail {
+				if len(j.records) != 1 || m.entries["share"] == nil {
+					t.Fatal("unowned intent discarded")
+				}
+			} else if len(j.records) != 0 || len(m.entries) != 0 {
+				t.Fatal("cleaned intent retained")
+			}
+		})
+	}
+}
+
+func TestShareIntentWriteFailureBlocksMount(t *testing.T) {
+	j := &memoryShareJournal{}
+	called := false
+	m := shareManager{journal: j, bootID: func() (string, error) { return "12345678-1234-4123-8123-123456789abc", nil }, backend: func(*guestproto.Share) (func() error, error) { called = true; return nil, nil }}
+	if err := m.prepare("12345678-1234-4123-8123-123456789abc"); err != nil {
+		t.Fatal(err)
+	}
+	j.fail = true
+	r := m.mount(&guestproto.Share{ID: "share", Generation: 1, BootID: "12345678-1234-4123-8123-123456789abc", Path: filepath.Join(t.TempDir(), "mount"), Transport: "smb-tcp", Source: "source"})
+	if called || r.ErrorCode != "recovery_required" {
+		t.Fatalf("mount: %+v called=%v", r, called)
+	}
+}
+
+func TestShareDefiniteMountFailureReleasesPath(t *testing.T) {
+	const boot = "12345678-1234-4123-8123-123456789abc"
+	j := &memoryShareJournal{}
+	m := shareManager{journal: j, bootID: func() (string, error) { return boot, nil }, mountIntent: func(*guestproto.Share, *shareIntent, func() error) (func() error, error) {
+		return nil, errors.Join(errShareNoEffect, errors.New("denied"))
+	}}
+	s := &guestproto.Share{ID: "share", Generation: 1, BootID: boot, Path: filepath.Join(t.TempDir(), "mount"), Transport: "virtiofs", Source: "tag"}
+	if r := m.mount(s); r.ErrorCode != "mount_failed" || len(j.records) != 1 || j.records[0].State != "absent" {
+		t.Fatalf("failure: %+v journal=%+v", r, j.records)
+	}
+	s.Generation++
+	if r := m.mount(s); r.ErrorCode != "mount_failed" {
+		t.Fatalf("retry blocked: %+v", r)
+	}
+}
+
+func TestStartupRecoveryUsesLocalBootIdentity(t *testing.T) {
+	const boot = "12345678-1234-4123-8123-123456789abc"
+	recovered := false
+	j := &memoryShareJournal{records: []shareIntent{{BootID: boot, ID: "share", Generation: 1, Path: filepath.Join(t.TempDir(), "share"), Source: "source", Transport: "test", State: "mounted"}}}
+	m := shareManager{journal: j, bootID: func() (string, error) { return boot, nil }, recover: func(shareIntent) (func() error, error) { recovered = true; return func() error { return nil }, nil }}
+	if err := m.recoverAtStartup(); err != nil || !recovered || !m.loaded {
+		t.Fatalf("startup recovery: %v recovered=%v", err, recovered)
+	}
+}
+
+func TestUnmountRetriesFinalJournalWrite(t *testing.T) {
+	const boot = "12345678-1234-4123-8123-123456789abc"
+	j := &memoryShareJournal{}
+	cleanups := 0
+	m := shareManager{journal: j, bootID: func() (string, error) { return boot, nil }, backend: func(*guestproto.Share) (func() error, error) {
+		return func() error {
+			cleanups++
+			j.fail = true // The pending write has succeeded; fail the final write.
+			return nil
+		}, nil
+	}}
+	s := &guestproto.Share{ID: "share", Generation: 1, BootID: boot, Path: filepath.Join(t.TempDir(), "mount"), Transport: "test", Source: "source"}
+	if r := m.mount(s); !r.OK {
+		t.Fatalf("mount: %+v", r)
+	}
+	ref := &guestproto.ShareRef{ID: s.ID, Generation: s.Generation, BootID: boot}
+	if r := m.unmount(ref); r.OK || r.State != "recovery_required" || cleanups != 1 {
+		t.Fatalf("final write failure: %+v, cleanups=%d", r, cleanups)
+	}
+	if len(j.records) != 1 || j.records[0].State != "pending" {
+		t.Fatalf("durable state: %+v", j.records)
+	}
+	if r := m.unmount(ref); r.OK || r.State != "recovery_required" || cleanups != 1 {
+		t.Fatalf("failed retry: %+v, cleanups=%d", r, cleanups)
+	}
+	j.fail = false
+	if r := m.unmount(ref); !r.OK || r.State != "absent" || cleanups != 1 {
+		t.Fatalf("retry: %+v, cleanups=%d", r, cleanups)
+	}
+	restarted := shareManager{journal: j, bootID: m.bootID}
+	if r := restarted.status(ref); !r.OK || r.State != "absent" {
+		t.Fatalf("reloaded: %+v", r)
+	}
+}
+
+func TestVirtioFSInterruptedBoundaries(t *testing.T) {
+	const boot = "12345678-1234-4123-8123-123456789abc"
+	for _, boundary := range []string{"mount-before-journal", "unmount-before-journal"} {
+		t.Run(boundary, func(t *testing.T) {
+			j := &memoryShareJournal{}
+			mounts, unmounts := 0, 0
+			m := shareManager{journal: j, bootID: func() (string, error) { return boot, nil }}
+			m.backend = func(*guestproto.Share) (func() error, error) {
+				mounts++
+				if boundary == "mount-before-journal" {
+					j.fail = true
+				}
+				return func() error { unmounts++; j.fail = true; return nil }, nil
+			}
+			m.capture = func(r *shareIntent) error { r.MountID = 42; return nil }
+			s := &guestproto.Share{ID: "share", Generation: 3, BootID: boot, Path: filepath.Join(t.TempDir(), "share"), Transport: "virtiofs", Source: "tag", ReadOnly: true}
+			ref := &guestproto.ShareRef{ID: s.ID, Generation: s.Generation, BootID: boot}
+			r := m.mount(s)
+			if boundary == "unmount-before-journal" {
+				if !r.OK {
+					t.Fatalf("mount: %+v", r)
+				}
+				r = m.unmount(ref)
+			}
+			if r.ErrorCode != "recovery_required" || mounts != 1 || len(j.records) != 1 || j.records[0].State != "pending" {
+				t.Fatalf("boundary: %+v records=%+v", r, j.records)
+			}
+			j.fail = false
+			restarted := shareManager{journal: j, bootID: m.bootID, recover: recoverShareIntent}
+			if err := restarted.recoverAtStartup(); err != nil {
+				t.Fatal(err)
+			}
+			if r := restarted.unmount(ref); r.ErrorCode != "recovery_required" {
+				t.Fatalf("uncertain ownership adopted: %+v", r)
+			}
+			if boundary == "mount-before-journal" && unmounts != 0 || boundary == "unmount-before-journal" && unmounts != 1 {
+				t.Fatalf("unexpected cleanup: %d", unmounts)
+			}
+		})
+	}
+}

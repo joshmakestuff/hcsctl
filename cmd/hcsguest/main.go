@@ -104,6 +104,9 @@ func serve() error {
 
 // acceptLoop serves until stop is closed, or forever if stop is nil.
 func acceptLoop(stop <-chan struct{}) error {
+	if err := managedShares.recoverAtStartup(); err != nil {
+		fmt.Fprintln(os.Stderr, "share recovery unavailable")
+	}
 	l, err := listen()
 	if err != nil {
 		return fmt.Errorf("listen: %w", err)
@@ -180,6 +183,12 @@ func handle(c net.Conn) {
 			return
 		}
 		writeJSON(c, doc)
+	case "share-mount":
+		writeJSON(c, managedShares.mount(req.Share))
+	case "share-status":
+		writeJSON(c, managedShares.status(req.ShareRef))
+	case "share-unmount":
+		writeJSON(c, managedShares.unmount(req.ShareRef))
 	case "mount":
 		doc, err := applyMount(req.Mount)
 		if err != nil {
