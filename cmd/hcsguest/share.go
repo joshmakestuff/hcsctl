@@ -19,11 +19,13 @@ type shareBackend func(*guestproto.Share) (func() error, error)
 
 var errShareNotImplemented = errors.New("managed shares not implemented")
 var errShareBusy = errors.New("managed share is busy")
+var errShareJournal = errors.New("share journal unavailable")
 
 type shareEntry struct {
 	result      guestproto.ShareResult
 	fingerprint [32]byte
 	cleanup     func() error
+	intent      shareIntent
 }
 
 type shareManager struct {
@@ -33,9 +35,13 @@ type shareManager struct {
 	bootTime func() time.Time
 	bootID   func() (string, error)
 	identity string // protected by mu and refreshed before each operation
+	journal  shareJournal
+	loaded   bool
+	capture  func(*shareIntent) error
+	recover  func(shareIntent) (func() error, error)
 }
 
-var managedShares = &shareManager{backend: mountManagedShare, bootID: readBootID, bootTime: func() time.Time {
+var managedShares = &shareManager{backend: mountManagedShare, bootID: readBootID, journal: newShareJournal(), capture: captureShareIntent, recover: recoverShareIntent, bootTime: func() time.Time {
 	info, err := gatherInfo()
 	if err != nil {
 		return time.Time{}
@@ -49,6 +55,60 @@ func (m *shareManager) result(id string, generation uint64, code string) guestpr
 		boot = m.bootTime()
 	}
 	return guestproto.ShareResult{OK: code == "", Protocol: guestproto.Protocol, ID: id, Generation: generation, State: "absent", BootID: m.identity, BootTimeUTC: boot, ErrorCode: code}
+}
+
+func (m *shareManager) prepare() error {
+	id, err := m.bootIdentity()
+	if err != nil {
+		return err
+	}
+	m.identity = id
+	if m.loaded || m.journal == nil {
+		return nil
+	}
+	records, err := m.journal.load()
+	if err != nil {
+		return errShareJournal
+	}
+	m.entries = make(map[string]*shareEntry)
+	for _, rec := range records {
+		if rec.BootID != id {
+			continue
+		}
+		if !rec.valid() || m.entries[rec.ID] != nil {
+			return errShareJournal
+		}
+		r := m.result(rec.ID, rec.Generation, "recovery_required")
+		r.State, r.Path, r.Transport, r.ReadOnly = "recovery_required", rec.Path, rec.Transport, rec.ReadOnly
+		if rec.State == "absent" {
+			r.OK, r.ErrorCode, r.State = true, "", "absent"
+		}
+		e := &shareEntry{result: r, fingerprint: rec.Fingerprint, intent: rec}
+		if rec.State != "absent" && m.recover != nil {
+			e.cleanup, _ = m.recover(rec)
+		}
+		m.entries[rec.ID] = e
+	}
+	m.loaded = true
+	return nil
+}
+
+func (m *shareManager) prepareFailure(err error) guestproto.ShareResult {
+	if errors.Is(err, errShareJournal) {
+		return m.result("", 0, "recovery_required")
+	}
+	return m.result("", 0, "boot_id_unavailable")
+}
+
+func (m *shareManager) persist() error {
+	if m.journal == nil {
+		return nil
+	}
+	records := make([]shareIntent, 0, len(m.entries))
+	for _, e := range m.entries {
+		records = append(records, e.intent)
+	}
+	return m.journal.save(records)
 }
 
 func (m *shareManager) bootIdentity() (string, error) {
@@ -86,8 +146,8 @@ func (m *shareManager) mount(s *guestproto.Share) guestproto.ShareResult {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	var err error
-	if m.identity, err = m.bootIdentity(); err != nil {
-		return m.result("", 0, "boot_id_unavailable")
+	if err = m.prepare(); err != nil {
+		return m.prepareFailure(err)
 	}
 	if s == nil {
 		return m.result("", 0, "invalid_request")
@@ -97,10 +157,14 @@ func (m *shareManager) mount(s *guestproto.Share) guestproto.ShareResult {
 	}
 	b, _ := json.Marshal(s)
 	fingerprint := sha256.Sum256(b)
+	clear(b)
 	if m.entries == nil {
 		m.entries = make(map[string]*shareEntry)
 	}
 	if old := m.entries[s.ID]; old != nil {
+		if old.result.State == "recovery_required" {
+			return old.result
+		}
 		if s.Generation < old.result.Generation || (s.Generation == old.result.Generation && old.result.State == "absent") {
 			return m.result(s.ID, s.Generation, "stale_generation")
 		}
@@ -112,9 +176,17 @@ func (m *shareManager) mount(s *guestproto.Share) guestproto.ShareResult {
 		}
 	}
 	for _, e := range m.entries {
-		if e.result.State == "mounted" && pathsOverlap(sharePath(e.result.Path), sharePath(s.Path)) {
+		if (e.result.State == "mounted" || e.result.State == "recovery_required") && pathsOverlap(sharePath(e.result.Path), sharePath(s.Path)) {
 			return m.result(s.ID, s.Generation, "path_in_use")
 		}
+	}
+	intent := newShareIntent(s, m.identity, fingerprint)
+	pending := m.result(s.ID, s.Generation, "recovery_required")
+	pending.State, pending.Path, pending.Transport, pending.ReadOnly = "recovery_required", s.Path, s.Transport, s.ReadOnly
+	e := &shareEntry{result: pending, fingerprint: fingerprint, intent: intent}
+	m.entries[s.ID] = e
+	if err := m.persist(); err != nil {
+		return pending
 	}
 	cleanup, err := m.backend(s)
 	if errors.Is(err, errShareNotImplemented) {
@@ -125,7 +197,17 @@ func (m *shareManager) mount(s *guestproto.Share) guestproto.ShareResult {
 	}
 	r := m.result(s.ID, s.Generation, "")
 	r.State, r.Transport, r.Path, r.ReadOnly = "mounted", s.Transport, s.Path, s.ReadOnly
-	m.entries[s.ID] = &shareEntry{result: r, fingerprint: fingerprint, cleanup: cleanup}
+	e.cleanup = cleanup
+	if m.capture != nil {
+		if err := m.capture(&e.intent); err != nil {
+			return pending
+		}
+	}
+	e.intent.State = "mounted"
+	if err := m.persist(); err != nil {
+		return pending
+	}
+	e.result = r
 	return r
 }
 
@@ -158,8 +240,8 @@ func (m *shareManager) status(ref *guestproto.ShareRef) guestproto.ShareResult {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	var err error
-	if m.identity, err = m.bootIdentity(); err != nil {
-		return m.result("", 0, "boot_id_unavailable")
+	if err = m.prepare(); err != nil {
+		return m.prepareFailure(err)
 	}
 	_, r := m.lookup(ref)
 	return r
@@ -169,16 +251,29 @@ func (m *shareManager) unmount(ref *guestproto.ShareRef) guestproto.ShareResult 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	var err error
-	if m.identity, err = m.bootIdentity(); err != nil {
-		return m.result("", 0, "boot_id_unavailable")
+	if err = m.prepare(); err != nil {
+		return m.prepareFailure(err)
 	}
 	e, r := m.lookup(ref)
 	if e == nil || e.result.State == "absent" {
 		return r
 	}
+	if e.cleanup == nil {
+		return r
+	}
+	// Once teardown starts, a later reused kernel mount ID must not authorize
+	// cleanup after a crash between unmount and the final journal update.
+	e.intent.State = "pending"
+	if err := m.persist(); err != nil {
+		r.OK, r.ErrorCode, r.State = false, "recovery_required", "recovery_required"
+		return r
+	}
 	if err := e.cleanup(); err != nil {
 		r.OK = false
 		r.ErrorCode = "unmount_failed"
+		if e.result.State == "recovery_required" {
+			r.ErrorCode = "recovery_required"
+		}
 		if errors.Is(err, errShareBusy) {
 			r.ErrorCode = "busy"
 		}
@@ -186,5 +281,12 @@ func (m *shareManager) unmount(ref *guestproto.ShareRef) guestproto.ShareResult 
 	}
 	e.cleanup = nil
 	e.result.State = "absent"
+	e.result.OK, e.result.ErrorCode = true, ""
+	e.intent.State = "absent"
+	if err := m.persist(); err != nil {
+		e.result.OK = false
+		e.result.State = "recovery_required"
+		e.result.ErrorCode = "recovery_required"
+	}
 	return e.result
 }
