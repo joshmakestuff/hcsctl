@@ -27,6 +27,7 @@ const globalSMBScript = `$ErrorActionPreference = 'Stop'
 $mutex = $null; $locked = $false; $base = $null; $intent = $null
 try {
  $p = [Console]::In.ReadToEnd() | ConvertFrom-Json
+ $port = [uint16]$p.port
  $mutex = [Threading.Mutex]::new($false, 'Global\hcsctl-guest-smb-mapping-v1')
  try { $locked = $mutex.WaitOne(35000) } catch [Threading.AbandonedMutexException] { $locked = $true }
  if (!$locked) { throw 'mutex timeout' }
@@ -39,27 +40,27 @@ try {
   $intent.SetValue('Token', [string]$p.token)
   $intent.SetValue('Remote', [string]$p.remote)
   $intent.SetValue('User', [string]$p.user)
-  $intent.SetValue('Port', [int]$p.port, [Microsoft.Win32.RegistryValueKind]::DWord)
+  $intent.SetValue('Port', [int]$port, [Microsoft.Win32.RegistryValueKind]::DWord)
   $intent.Flush()
   $secure = ConvertTo-SecureString -String $p.password -AsPlainText -Force
   try {
    $cred = [System.Management.Automation.PSCredential]::new($p.user, $secure)
-   $args = @{ RemotePath=$p.remote; Credential=$cred; Persistent=$false; ErrorAction='Stop' }
-   if ($p.port -ne 0) { $args.TcpPort = [uint16]$p.port }
+   $args = @{ RemotePath=$p.remote; Credential=$cred; Persistent=$false; ErrorAction='Stop'; TransportType='TCP' }
+   if ($port -ne 0) { $args.TcpPort = $port }
    New-SmbGlobalMapping @args | Out-Null
    $created = @(Get-SmbGlobalMapping | Where-Object { $_.RemotePath -ieq $p.remote })
-   if ($created.Count -ne 1 -or $created[0].LocalPath -or ($p.port -ne 0 -and [int]$created[0].TcpPort -ne [int]$p.port)) { throw 'created mapping mismatch' }
+   if ($created.Count -ne 1 -or $created[0].LocalPath -or ($port -ne 0 -and [int]$created[0].TcpPort -ne [int]$port)) { throw 'created mapping mismatch' }
   } finally { if ($secure) { $secure.Dispose() }; $cred=$null; $p.password=$null }
   } elseif ($p.op -eq 'check') {
-   if (!$intent -or $intent.GetValue('Token') -cne $p.token -or $intent.GetValue('Remote') -ine $p.remote -or $intent.GetValue('User') -cne $p.user -or [int]$intent.GetValue('Port') -ne [int]$p.port) { throw 'intent mismatch' }
-   if ($matches.Count -ne 1 -or $matches[0].LocalPath -or ($p.port -ne 0 -and [int]$matches[0].TcpPort -ne [int]$p.port)) { throw 'mapping mismatch' }
+   if (!$intent -or $intent.GetValue('Token') -cne $p.token -or $intent.GetValue('Remote') -ine $p.remote -or $intent.GetValue('User') -cne $p.user -or [int]$intent.GetValue('Port') -ne [int]$port) { throw 'intent mismatch' }
+   if ($matches.Count -ne 1 -or $matches[0].LocalPath -or ($port -ne 0 -and [int]$matches[0].TcpPort -ne [int]$port)) { throw 'mapping mismatch' }
   } elseif ($p.op -eq 'remove') {
   if (!$intent) { if ($matches.Count -ne 0) { throw 'unowned mapping' }; exit 0 }
-  if ($intent.GetValue('Token') -cne $p.token -or $intent.GetValue('Remote') -ine $p.remote -or $intent.GetValue('User') -cne $p.user -or [int]$intent.GetValue('Port') -ne [int]$p.port) { throw 'intent mismatch' }
+  if ($intent.GetValue('Token') -cne $p.token -or $intent.GetValue('Remote') -ine $p.remote -or $intent.GetValue('User') -cne $p.user -or [int]$intent.GetValue('Port') -ne [int]$port) { throw 'intent mismatch' }
   if ($matches.Count -gt 1) { throw 'multiple mappings' }
   if ($matches.Count -eq 1) {
    $mapping = $matches[0]
-   if ($mapping.LocalPath -or ($p.port -ne 0 -and [int]$mapping.TcpPort -ne [int]$p.port)) { throw 'mapping mismatch' }
+   if ($mapping.LocalPath -or ($port -ne 0 -and [int]$mapping.TcpPort -ne [int]$port)) { throw 'mapping mismatch' }
    Remove-SmbGlobalMapping -InputObject $mapping -Confirm:$false -ErrorAction Stop
   }
   $intent.Close(); $intent = $null
@@ -75,7 +76,7 @@ type globalRequest struct {
 	Remote   string `json:"remote"`
 	User     string `json:"user,omitempty"`
 	Password string `json:"password,omitempty"`
-	Port     uint32 `json:"port,omitempty"`
+	Port     uint32 `json:"port"`
 }
 type globalOps struct {
 	command        func(globalRequest) error

@@ -3,11 +3,80 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
-	"github.com/joshmakestuff/hcsctl/internal/guestproto"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/joshmakestuff/hcsctl/internal/guestproto"
+	"golang.org/x/sys/windows"
 )
+
+func TestGlobalRequestSerializesPort(t *testing.T) {
+	for _, port := range []uint32{0, 1445} {
+		data, err := json.Marshal(globalRequest{Port: port})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got map[string]any
+		if err := json.Unmarshal(data, &got); err != nil {
+			t.Fatal(err)
+		}
+		if got["port"] != float64(port) {
+			t.Fatalf("port %d: %s", port, data)
+		}
+	}
+}
+
+func TestGlobalSMBPowerShellPortArguments(t *testing.T) {
+	var normalization, arguments, optional string
+	for _, line := range strings.Split(globalSMBScript, "\n") {
+		switch {
+		case strings.Contains(line, "$port = [uint16]$p.port"):
+			normalization = line
+		case strings.Contains(line, "$args = @{ RemotePath="):
+			arguments = line
+		case strings.Contains(line, "if ($port -ne 0) { $args.TcpPort"):
+			optional = line
+		}
+	}
+	if normalization == "" || arguments == "" || optional == "" || strings.Count(globalSMBScript, "$p.port") != 1 {
+		t.Fatal("script does not consistently normalize the port")
+	}
+	systemDir, err := windows.GetSystemDirectory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	powershell := filepath.Join(systemDir, "WindowsPowerShell", "v1.0", "powershell.exe")
+	// Execute the actual argument-building statements, without registry or SMB calls.
+	script := "$p = [Console]::In.ReadToEnd() | ConvertFrom-Json\n$cred = $null\n" + normalization + "\n" + arguments + "\n" + optional + "\n$args | ConvertTo-Json -Compress"
+	for _, tc := range []struct {
+		name, input string
+		port        float64
+		present     bool
+	}{
+		{"missing", `{}`, 0, false}, {"null", `{"port":null}`, 0, false}, {"zero", `{"port":0}`, 0, false}, {"explicit", `{"port":1445}`, 1445, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cmd := exec.Command(powershell, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script)
+			cmd.Stdin = strings.NewReader(tc.input)
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("PowerShell: %v: %s", err, out)
+			}
+			var got map[string]any
+			if err := json.Unmarshal(out, &got); err != nil {
+				t.Fatalf("output %q: %v", out, err)
+			}
+			value, present := got["TcpPort"]
+			if present != tc.present || present && value != tc.port || got["TransportType"] != "TCP" {
+				t.Fatalf("arguments: %s", out)
+			}
+		})
+	}
+}
 
 func TestGlobalLifecycle(t *testing.T) {
 	for _, tc := range []struct {
