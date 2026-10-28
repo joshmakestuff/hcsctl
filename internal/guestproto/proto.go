@@ -47,8 +47,44 @@ type Request struct {
 	NetConfig *NetConfig `json:"netConfig,omitempty"`
 
 	// Mount is the mount verb's payload; Unmount is the unmount verb's.
-	Mount   *Mount   `json:"mount,omitempty"`
-	Unmount *Unmount `json:"unmount,omitempty"`
+	Mount    *Mount    `json:"mount,omitempty"`
+	Unmount  *Unmount  `json:"unmount,omitempty"`
+	Share    *Share    `json:"share,omitempty"`
+	ShareRef *ShareRef `json:"shareRef,omitempty"`
+}
+
+// Share describes a managed guest share. Credentials are request-only and must
+// not be returned in results or persisted by the manager.
+type Share struct {
+	ID         string `json:"id"`
+	Generation uint64 `json:"generation"`
+	Transport  string `json:"transport"`
+	Source     string `json:"source"`
+	Path       string `json:"path"`
+	ReadOnly   bool   `json:"readOnly"`
+	User       string `json:"user,omitempty"`
+	Password   string `json:"password,omitempty"`
+	Port       uint32 `json:"port,omitempty"`
+	UID        int    `json:"uid,omitempty"`
+	GID        int    `json:"gid,omitempty"`
+}
+
+type ShareRef struct {
+	ID         string `json:"id"`
+	Generation uint64 `json:"generation"`
+}
+
+type ShareResult struct {
+	OK          bool      `json:"ok"`
+	Protocol    int       `json:"protocol"`
+	ID          string    `json:"id"`
+	Generation  uint64    `json:"generation"`
+	Transport   string    `json:"transport,omitempty"`
+	Path        string    `json:"path,omitempty"`
+	ReadOnly    bool      `json:"readOnly"`
+	State       string    `json:"state"`
+	BootTimeUTC time.Time `json:"bootTimeUtc"`
+	ErrorCode   string    `json:"errorCode,omitempty"`
 }
 
 // Mount asks the agent to attach an SMB share at Path inside the guest. The host reaches its

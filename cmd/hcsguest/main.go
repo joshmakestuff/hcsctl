@@ -180,6 +180,12 @@ func handle(c net.Conn) {
 			return
 		}
 		writeJSON(c, doc)
+	case "share-mount":
+		writeJSON(c, managedShares.mount(req.Share))
+	case "share-status":
+		writeJSON(c, managedShares.status(req.ShareRef))
+	case "share-unmount":
+		writeJSON(c, managedShares.unmount(req.ShareRef))
 	case "mount":
 		doc, err := applyMount(req.Mount)
 		if err != nil {
