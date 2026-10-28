@@ -17,7 +17,25 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+func fakeMountIdentity(t *testing.T) {
+	t.Helper()
+	oldID, oldTrust := shareMountID, shareTrustedDirectory
+	t.Cleanup(func() { shareMountID, shareTrustedDirectory = oldID, oldTrust })
+	shareTrustedDirectory = func(int) error { return nil }
+	shareMountID = func(fd int) (uint64, error) {
+		flags, err := unix.FcntlInt(uintptr(fd), unix.F_GETFL, 0)
+		if err != nil {
+			return 0, err
+		}
+		if flags&unix.O_PATH == 0 {
+			return 1, nil
+		}
+		return 2, nil
+	}
+}
+
 func TestLinuxShareMount(t *testing.T) {
+	fakeMountIdentity(t)
 	oldMount, oldUnmount, oldDial := shareMount, shareUnmount, shareDial
 	t.Cleanup(func() { shareMount, shareUnmount, shareDial = oldMount, oldUnmount, oldDial })
 	var source, filesystem, options string
@@ -86,6 +104,7 @@ func TestLinuxShareMount(t *testing.T) {
 }
 
 func TestLinuxPlan9Descriptor(t *testing.T) {
+	fakeMountIdentity(t)
 	oldMount, oldUnmount, oldDial := shareMount, shareUnmount, shareDial
 	t.Cleanup(func() { shareMount, shareUnmount, shareDial = oldMount, oldUnmount, oldDial })
 	pair, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_STREAM, 0)
@@ -122,6 +141,7 @@ func TestLinuxPlan9Descriptor(t *testing.T) {
 }
 
 func TestLinuxSMBVsockMountLifetime(t *testing.T) {
+	fakeMountIdentity(t)
 	oldMount, oldUnmount := shareMount, shareUnmount
 	t.Cleanup(func() { shareMount, shareUnmount = oldMount, oldUnmount })
 	var address string
@@ -209,13 +229,23 @@ func TestLinuxRelayShutdown(t *testing.T) {
 }
 
 func TestLinuxUnmountIdentityMismatch(t *testing.T) {
+	fakeMountIdentity(t)
 	oldMount, oldUnmount, oldID := shareMount, shareUnmount, shareMountID
 	t.Cleanup(func() { shareMount, shareUnmount, shareMountID = oldMount, oldUnmount, oldID })
 	shareMount = func(string, string, string, uintptr, string) error { return nil }
 	called := false
 	shareUnmount = func(string, int) error { called = true; return nil }
 	id := uint64(10)
-	shareMountID = func(string) (uint64, error) { return id, nil }
+	shareMountID = func(fd int) (uint64, error) {
+		flags, err := unix.FcntlInt(uintptr(fd), unix.F_GETFL, 0)
+		if err != nil {
+			return 0, err
+		}
+		if flags&unix.O_PATH == 0 {
+			return 1, nil
+		}
+		return id, nil
+	}
 	cleanup, err := mountManagedShare(&guestproto.Share{Transport: "smb-tcp", Source: `\\server\share`, Path: t.TempDir()})
 	if err != nil {
 		t.Fatal(err)
@@ -255,5 +285,76 @@ func TestLinuxRelayCancelsDial(t *testing.T) {
 	case <-done:
 	case <-time.After(time.Second):
 		t.Fatal("dial was not cancelled")
+	}
+}
+
+func TestLinuxUnmountRetainsAnchoredParent(t *testing.T) {
+	fakeMountIdentity(t)
+	baseID := shareMountID
+	var lastPinned int
+	shareMountID = func(fd int) (uint64, error) {
+		id, err := baseID(fd)
+		if err == nil && id == 2 {
+			lastPinned = fd
+		}
+		return id, err
+	}
+	oldMount, oldUnmount := shareMount, shareUnmount
+	t.Cleanup(func() { shareMount, shareUnmount = oldMount, oldUnmount })
+	base := t.TempDir()
+	parent := filepath.Join(base, "parent")
+	if err := os.Mkdir(parent, 0700); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(parent, "target")
+	if err := os.Mkdir(target, 0700); err != nil {
+		t.Fatal(err)
+	}
+	shareMount = func(string, string, string, uintptr, string) error { return nil }
+	calls := 0
+	shareUnmount = func(path string, flags int) error {
+		calls++
+		if !strings.HasPrefix(path, "/proc/self/fd/") || flags != 0 {
+			t.Error("unmount not anchored")
+		}
+		if _, err := os.Stat(path); err != nil {
+			t.Errorf("anchored path lost: %v", err)
+		}
+		if calls == 1 {
+			return unix.EBUSY
+		}
+		return nil
+	}
+	cleanup, err := mountManagedShare(&guestproto.Share{Transport: "smb-tcp", Source: `\\server\share`, Path: target})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(parent, filepath.Join(base, "renamed")); err != nil {
+		t.Fatal(err)
+	}
+	if err := cleanup(); !errors.Is(err, errShareBusy) {
+		t.Fatalf("busy: %v", err)
+	}
+	var st unix.Stat_t
+	if err := unix.Fstat(lastPinned, &st); err != nil {
+		t.Fatalf("busy lost mounted descriptor: %v", err)
+	}
+	if err := cleanup(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestTrustedShareDirectoryRejectsWritable(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0777); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if err := trustedShareDirectory(int(f.Fd())); err == nil {
+		t.Fatal("accepted writable directory")
 	}
 }
