@@ -53,6 +53,43 @@ func TestShareRelayPermissionFailureIsNotAvailability(t *testing.T) {
 	}
 }
 
+func TestMountIDDescriptorMetadata(t *testing.T) {
+	fd, err := unix.Open(t.TempDir(), unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unix.Close(fd)
+	id, err := mountID(fd)
+	var st unix.Statx_t
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.Statx(fd, "", unix.AT_EMPTY_PATH, unix.STATX_MNT_ID, &st); err != nil || st.Mask&unix.STATX_MNT_ID == 0 || id != st.Mnt_id {
+		t.Fatalf("descriptor and statx mount IDs differ: %d %+v %v", id, st, err)
+	}
+}
+
+func TestParseMountID(t *testing.T) {
+	for _, tc := range []struct {
+		name, data string
+		want       uint64
+	}{
+		{"valid", "pos:\t0\nflags:\t012000000\nmnt_id:\t123\nino:\t456\n", 123},
+		{"missing", "ino:\t456\n", 0},
+		{"zero", "mnt_id:\t0\n", 0},
+		{"negative", "mnt_id:\t-1\n", 0},
+		{"duplicate", "mnt_id: 1\nmnt_id: 2\n", 0},
+		{"overflow", "mnt_id: 18446744073709551616\n", 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			id, err := parseMountID(tc.data)
+			if id != tc.want || (err == nil) != (tc.want != 0) {
+				t.Fatalf("got %d, %v", id, err)
+			}
+		})
+	}
+}
+
 func TestLinuxShareMount(t *testing.T) {
 	fakeMountIdentity(t)
 	oldMount, oldUnmount, oldDial := shareMount, shareUnmount, shareDial

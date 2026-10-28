@@ -42,14 +42,36 @@ func trustedShareDirectory(fd int) error {
 }
 
 func mountID(fd int) (uint64, error) {
-	var st unix.Statx_t
-	if err := unix.Statx(fd, "", unix.AT_EMPTY_PATH, unix.STATX_MNT_ID, &st); err != nil {
+	// statx can revalidate disconnected CIFS metadata, even with DONT_SYNC.
+	// Recovery must identify the mount before restoring its relay, so read
+	// the kernel's descriptor metadata without invoking filesystem getattr.
+	data, err := os.ReadFile("/proc/self/fdinfo/" + strconv.Itoa(fd))
+	if err != nil {
 		return 0, err
 	}
-	if st.Mask&unix.STATX_MNT_ID == 0 {
+	return parseMountID(string(data))
+}
+
+func parseMountID(data string) (uint64, error) {
+	var id uint64
+	for line := range strings.SplitSeq(data, "\n") {
+		value, found := strings.CutPrefix(line, "mnt_id:")
+		if !found {
+			continue
+		}
+		if id != 0 {
+			return 0, errors.New("duplicate mount identity")
+		}
+		parsed, err := strconv.ParseUint(strings.TrimSpace(value), 10, 64)
+		if err != nil || parsed == 0 {
+			return 0, errors.New("invalid mount identity")
+		}
+		id = parsed
+	}
+	if id == 0 {
 		return 0, errors.New("mount identity unavailable")
 	}
-	return st.Mnt_id, nil
+	return id, nil
 }
 
 // mountTarget opens each component without following symbolic links. The final
