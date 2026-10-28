@@ -40,7 +40,7 @@ func TestShareIntentRestart(t *testing.T) {
 		}
 		return func() error { return nil }, nil
 	}}
-	s := &guestproto.Share{ID: "share", Generation: 1, Path: filepath.Join(t.TempDir(), "mount"), Transport: "smb-tcp", Source: "source", User: "secret-user", Password: "secret-password"}
+	s := &guestproto.Share{ID: "share", Generation: 1, BootID: boot, Path: filepath.Join(t.TempDir(), "mount"), Transport: "smb-tcp", Source: "source", User: "secret-user", Password: "secret-password"}
 	if r := m.mount(s); !r.OK || !called {
 		t.Fatalf("mount: %+v", r)
 	}
@@ -52,7 +52,7 @@ func TestShareIntentRestart(t *testing.T) {
 		t.Fatalf("credentials in journal: %s", b)
 	}
 	restarted := shareManager{journal: j, bootID: m.bootID}
-	ref := &guestproto.ShareRef{ID: s.ID, Generation: s.Generation}
+	ref := &guestproto.ShareRef{ID: s.ID, Generation: s.Generation, BootID: boot}
 	if r := restarted.status(ref); r.OK || r.ErrorCode != "recovery_required" || r.State != "recovery_required" {
 		t.Fatalf("restart: %+v", r)
 	}
@@ -65,6 +65,7 @@ func TestShareIntentRestart(t *testing.T) {
 		t.Fatalf("pending: %+v", r)
 	}
 	restarted = shareManager{journal: j, bootID: func() (string, error) { return "abcdefab-1234-4123-8123-123456789abc", nil }}
+	ref.BootID = "abcdefab-1234-4123-8123-123456789abc"
 	if r := restarted.status(ref); r.ErrorCode != "not_found" {
 		t.Fatalf("wrong boot: %+v", r)
 	}
@@ -74,11 +75,11 @@ func TestShareIntentWriteFailureBlocksMount(t *testing.T) {
 	j := &memoryShareJournal{}
 	called := false
 	m := shareManager{journal: j, bootID: func() (string, error) { return "12345678-1234-4123-8123-123456789abc", nil }, backend: func(*guestproto.Share) (func() error, error) { called = true; return nil, nil }}
-	if err := m.prepare(); err != nil {
+	if err := m.prepare("12345678-1234-4123-8123-123456789abc"); err != nil {
 		t.Fatal(err)
 	}
 	j.fail = true
-	r := m.mount(&guestproto.Share{ID: "share", Generation: 1, Path: filepath.Join(t.TempDir(), "mount"), Transport: "smb-tcp", Source: "source"})
+	r := m.mount(&guestproto.Share{ID: "share", Generation: 1, BootID: "12345678-1234-4123-8123-123456789abc", Path: filepath.Join(t.TempDir(), "mount"), Transport: "smb-tcp", Source: "source"})
 	if called || r.ErrorCode != "recovery_required" {
 		t.Fatalf("mount: %+v called=%v", r, called)
 	}

@@ -20,6 +20,7 @@ type shareBackend func(*guestproto.Share) (func() error, error)
 var errShareNotImplemented = errors.New("managed shares not implemented")
 var errShareBusy = errors.New("managed share is busy")
 var errShareJournal = errors.New("share journal unavailable")
+var errBootMismatch = errors.New("boot identity mismatch")
 
 type shareEntry struct {
 	result      guestproto.ShareResult
@@ -57,12 +58,16 @@ func (m *shareManager) result(id string, generation uint64, code string) guestpr
 	return guestproto.ShareResult{OK: code == "", Protocol: guestproto.Protocol, ID: id, Generation: generation, State: "absent", BootID: m.identity, BootTimeUTC: boot, ErrorCode: code}
 }
 
-func (m *shareManager) prepare() error {
+func (m *shareManager) prepare(expected string) error {
+	m.identity = ""
 	id, err := m.bootIdentity()
 	if err != nil {
 		return err
 	}
 	m.identity = id
+	if expected != id {
+		return errBootMismatch
+	}
 	if m.loaded || m.journal == nil {
 		return nil
 	}
@@ -93,11 +98,14 @@ func (m *shareManager) prepare() error {
 	return nil
 }
 
-func (m *shareManager) prepareFailure(err error) guestproto.ShareResult {
-	if errors.Is(err, errShareJournal) {
-		return m.result("", 0, "recovery_required")
+func (m *shareManager) prepareFailure(id string, generation uint64, err error) guestproto.ShareResult {
+	if errors.Is(err, errBootMismatch) {
+		return m.result(id, generation, "boot_mismatch")
 	}
-	return m.result("", 0, "boot_id_unavailable")
+	if errors.Is(err, errShareJournal) {
+		return m.result(id, generation, "recovery_required")
+	}
+	return m.result(id, generation, "boot_id_unavailable")
 }
 
 func (m *shareManager) persist() error {
@@ -145,9 +153,13 @@ func sharePath(path string) string {
 func (m *shareManager) mount(s *guestproto.Share) guestproto.ShareResult {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	var err error
-	if err = m.prepare(); err != nil {
-		return m.prepareFailure(err)
+	var id, bootID string
+	var generation uint64
+	if s != nil {
+		id, generation, bootID = s.ID, s.Generation, s.BootID
+	}
+	if err := m.prepare(bootID); err != nil {
+		return m.prepareFailure(id, generation, err)
 	}
 	if s == nil {
 		return m.result("", 0, "invalid_request")
@@ -190,6 +202,12 @@ func (m *shareManager) mount(s *guestproto.Share) guestproto.ShareResult {
 	}
 	cleanup, err := m.backend(s)
 	if errors.Is(err, errShareNotImplemented) {
+		e.intent.State = "absent"
+		if err := m.persist(); err != nil {
+			e.intent.State = "pending"
+			return pending
+		}
+		e.result = m.result(s.ID, s.Generation, "")
 		return m.result(s.ID, s.Generation, "not_implemented")
 	}
 	if err != nil || cleanup == nil {
@@ -239,9 +257,13 @@ func (m *shareManager) lookup(ref *guestproto.ShareRef) (*shareEntry, guestproto
 func (m *shareManager) status(ref *guestproto.ShareRef) guestproto.ShareResult {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	var err error
-	if err = m.prepare(); err != nil {
-		return m.prepareFailure(err)
+	var id, bootID string
+	var generation uint64
+	if ref != nil {
+		id, generation, bootID = ref.ID, ref.Generation, ref.BootID
+	}
+	if err := m.prepare(bootID); err != nil {
+		return m.prepareFailure(id, generation, err)
 	}
 	_, r := m.lookup(ref)
 	return r
@@ -250,9 +272,13 @@ func (m *shareManager) status(ref *guestproto.ShareRef) guestproto.ShareResult {
 func (m *shareManager) unmount(ref *guestproto.ShareRef) guestproto.ShareResult {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	var err error
-	if err = m.prepare(); err != nil {
-		return m.prepareFailure(err)
+	var id, bootID string
+	var generation uint64
+	if ref != nil {
+		id, generation, bootID = ref.ID, ref.Generation, ref.BootID
+	}
+	if err := m.prepare(bootID); err != nil {
+		return m.prepareFailure(id, generation, err)
 	}
 	e, r := m.lookup(ref)
 	if e == nil || e.result.State == "absent" {

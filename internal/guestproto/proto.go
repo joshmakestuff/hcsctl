@@ -58,6 +58,7 @@ type Request struct {
 type Share struct {
 	ID         string `json:"id"`
 	Generation uint64 `json:"generation"`
+	BootID     string `json:"bootId"`
 	Transport  string `json:"transport"`
 	Source     string `json:"source"`
 	Path       string `json:"path"`
@@ -72,6 +73,7 @@ type Share struct {
 type ShareRef struct {
 	ID         string `json:"id"`
 	Generation uint64 `json:"generation"`
+	BootID     string `json:"bootId"`
 }
 
 type ShareResult struct {
